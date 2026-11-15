@@ -8,8 +8,8 @@ struct MathDraft: Identifiable {
     var auto = false
 }
 
-/// One open document: its pages with handwriting, formulas and marks on top, the tool bar floating over
-/// them, and beside or below them the explanation of a mark when one is open.
+/// One open document: the tool bar, under it the pages with handwriting, formulas and marks on top, and
+/// beside or below them the explanation of a mark when one is open.
 struct ReaderView: View {
     let doc: Doc
     @EnvironmentObject private var library: Library
@@ -136,23 +136,29 @@ struct ReaderView: View {
         .onAppear(perform: setUp)
     }
 
+    /// The tool bar has a strip of its own above the pages. Floating over them it covered the top of
+    /// the first page, which could then neither be read nor written on.
     private var pages: some View {
-        PDFInkView(
-            url: library.pdfURL(for: doc.id),
-            store: DrawingStore(folder: folder),
-            mathStore: mathStore,
-            choice: choice,
-            fingerDraws: fingerDraws,
-            startPage: startPage,
-            marks: marks,
-            activeMark: session.panel?.questionID,
-            controller: controller
-        )
-        .id(reloadToken)
-        .ignoresSafeArea(.container, edges: .bottom)
-        .overlay(alignment: .top) {
+        VStack(spacing: 0) {
             ToolBar(choice: $choice)
-                .padding(.top, 10)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity)
+                .background(Color(uiColor: .secondarySystemBackground))
+                // Above the pages, so that the bar's shadow falls on them.
+                .zIndex(1)
+            PDFInkView(
+                url: library.pdfURL(for: doc.id),
+                store: DrawingStore(folder: folder),
+                mathStore: mathStore,
+                choice: choice,
+                fingerDraws: fingerDraws,
+                startPage: startPage,
+                marks: marks,
+                activeMark: session.panel?.questionID,
+                controller: controller
+            )
+            .id(reloadToken)
+            .ignoresSafeArea(.container, edges: .bottom)
         }
     }
 
@@ -263,7 +269,8 @@ struct ReaderView: View {
     }
 }
 
-/// The floating tool bar: the tools, then the three colours of the pen or the highlighter.
+/// The tool bar: the tools, then the three colours of the pen or the highlighter, or a word on how the
+/// tool in hand is used.
 private struct ToolBar: View {
     @Binding var choice: InkChoice
 
@@ -271,7 +278,23 @@ private struct ToolBar: View {
         tool == .ai ? Color(uiColor: InkChoice.markColor) : Color.accentColor
     }
 
+    private var hint: String? {
+        switch choice.tool {
+        case .ai: return "모르는 부분에 동그라미를 쳐 보세요"
+        case .formula: return "수식을 끌어 옮기고, 길게 눌러 고쳐요"
+        default: return nil
+        }
+    }
+
+    // The hint is left out where there is no room for it on one line.
     var body: some View {
+        ViewThatFits(in: .horizontal) {
+            bar(withHint: true)
+            bar(withHint: false)
+        }
+    }
+
+    private func bar(withHint: Bool) -> some View {
         HStack(spacing: 2) {
             ForEach(InkTool.allCases) { tool in
                 Button {
@@ -279,7 +302,7 @@ private struct ToolBar: View {
                 } label: {
                     Image(systemName: tool.symbol)
                         .font(.system(size: 19, weight: .medium))
-                        .frame(width: 46, height: 46)
+                        .frame(width: 44, height: 42)
                         .foregroundStyle(choice.tool == tool ? tint(tool) : Color.secondary)
                         .background(choice.tool == tool ? tint(tool).opacity(0.14) : Color.clear, in: Circle())
                 }
@@ -301,25 +324,22 @@ private struct ToolBar: View {
                             .overlay(Circle().stroke(Color.primary.opacity(0.15), lineWidth: 1))
                             .padding(5)
                             .overlay(Circle().stroke(Color.accentColor, lineWidth: index == selected ? 2 : 0))
-                            .frame(width: 40, height: 46)
+                            .frame(width: 40, height: 42)
                     }
                     .accessibilityLabel("색 \(index + 1)")
                 }
-            } else if choice.tool == .ai {
-                Text("모르는 부분에 동그라미를 쳐 보세요")
+            } else if withHint, let hint {
+                Text(hint)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                    .padding(.horizontal, 10)
-            } else if choice.tool == .formula {
-                Text("수식을 끌어 옮기고, 길게 눌러 고쳐요")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
                     .padding(.horizontal, 10)
             }
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 4)
-        .background(.regularMaterial, in: Capsule())
-        .shadow(color: .black.opacity(0.16), radius: 10, y: 3)
+        .background(Color(uiColor: .systemBackground), in: Capsule())
+        .shadow(color: .black.opacity(0.14), radius: 8, y: 2)
     }
 }

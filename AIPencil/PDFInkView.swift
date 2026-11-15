@@ -240,9 +240,9 @@ final class ReaderController: ObservableObject {
         coordinator?.replaceMath(old, with: result)
     }
 
-    /// The size of a page as it is shown, in points.
-    func pageSize(forPage index: Int) -> CGSize? {
-        coordinator?.pageSize(forPage: index)
+    /// How a page is shown: its size, and how its overlay is turned.
+    func pageShape(forPage index: Int) -> AskCapture.Shape? {
+        coordinator?.pageShape(forPage: index)
     }
 
     /// The handwriting of a page as it stands now.
@@ -379,9 +379,9 @@ struct PDFInkView: UIViewRepresentable {
             return overlays[page]?.bounds.size ?? page.bounds(for: .cropBox).size
         }
 
-        func pageSize(forPage index: Int) -> CGSize? {
+        func pageShape(forPage index: Int) -> AskCapture.Shape? {
             guard let page = pdfView?.document?.page(at: index) else { return nil }
-            return AskCapture.size(of: page)
+            return AskCapture.shape(of: page)
         }
 
         func drawing(forPage index: Int) -> PKDrawing? {
@@ -502,18 +502,18 @@ struct PDFInkView: UIViewRepresentable {
             }
         }
 
-        /// Scrolls just far enough for [rect] of a page to be seen, clear of the tool bar. Used when the
-        /// explanation panel opens and takes room from the pages.
+        /// Scrolls just far enough for [rect] of a page's overlay to be seen. Used when the explanation
+        /// panel opens and takes room from the pages.
         func reveal(_ rect: CGRect, onPage index: Int) {
             guard let view = pdfView, let page = view.document?.page(at: index) else { return }
             guard let overlay = overlays[page] else {
                 view.go(to: page)
                 return
             }
-            let seen = view.bounds.inset(by: UIEdgeInsets(top: 72, left: 8, bottom: 12, right: 8))
+            let seen = view.bounds.insetBy(dx: 8, dy: 12)
             if seen.contains(overlay.convert(rect, to: view)) { return }
             if let scroll = Self.scrollView(in: view) {
-                scroll.scrollRectToVisible(overlay.convert(rect, to: scroll).insetBy(dx: -16, dy: -80), animated: true)
+                scroll.scrollRectToVisible(overlay.convert(rect, to: scroll).insetBy(dx: -16, dy: -28), animated: true)
             } else {
                 view.go(to: page)
             }
@@ -535,7 +535,7 @@ struct PDFInkView: UIViewRepresentable {
                 DebugLog.write("demo mark: no page to draw on")
                 return
             }
-            DebugLog.write("overlay: page \(overlay.canvas.pageIndex) bounds \(overlay.bounds.size) page size \(AskCapture.size(of: page)) turned \(page.rotation)")
+            DebugLog.write("overlay: page \(overlay.canvas.pageIndex) bounds \(overlay.bounds.size) page shown \(AskCapture.shape(of: page).size) turned \(page.rotation)")
             var drawing = overlay.canvas.drawing
             drawing.strokes.append(Self.ring(center: center, radius: radius, color: InkChoice.markColor))
             overlay.canvas.drawing = drawing

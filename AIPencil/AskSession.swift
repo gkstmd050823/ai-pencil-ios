@@ -88,6 +88,11 @@ final class AskSession: ObservableObject {
         return find(id)
     }
 
+    /// The saved close-up of a question.
+    func cropPicture(for id: UUID) -> UIImage? {
+        store.flatMap { UIImage(contentsOfFile: $0.cropURL(id).path) }
+    }
+
     private func find(_ id: UUID) -> Question? {
         questions.first { $0.id == id }
     }
@@ -109,10 +114,13 @@ final class AskSession: ObservableObject {
 
     /// The user drew a mark with the AI pen.
     func ask(page: Int, points: [CGPoint]) {
-        guard let size = controller?.pageSize(forPage: page), !points.isEmpty else { return }
+        guard let shape = controller?.pageShape(forPage: page), !points.isEmpty else { return }
         task?.cancel()
         settle()
-        let region = AskCapture.explainRegion(mark: Question.bounds(of: points), pageSize: size)
+        // What to show close up is worked out on the page as the reader sees it: on a page shown
+        // turned, an underline is only flat once it has been turned too.
+        let shown = Question.bounds(of: points.map { $0.applying(shape.turn) })
+        let region = AskCapture.explainRegion(mark: shown, pageSize: shape.size)
         let question = Question(
             page: page,
             path: points.flatMap { [Double($0.x), Double($0.y)] },
@@ -126,7 +134,7 @@ final class AskSession: ObservableObject {
         crop = nil
         questions.append(question)
         panel = PanelState(questionID: question.id, page: page, model: question.model)
-        DebugLog.write("ask: page \(page) points \(points.count) box \(question.bounds) region \(region) page size \(size)")
+        DebugLog.write("ask: page \(page) points \(points.count) box \(question.bounds) region \(region) page shown \(shape.size)")
         start(question.id)
     }
 
@@ -175,7 +183,7 @@ final class AskSession: ObservableObject {
             questionID: id, page: question.page, model: question.model,
             turns: question.turns, phase: .done, notice: question.notice
         )
-        crop = store.flatMap { UIImage(contentsOfFile: $0.cropURL(id).path) }
+        crop = cropPicture(for: id)
     }
 
     func close() {

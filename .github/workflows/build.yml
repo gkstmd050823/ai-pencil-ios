@@ -94,7 +94,10 @@ jobs:
           DATA=$(xcrun simctl get_app_container "$UDID" app.aipencil.ios data)
           mkdir -p "$DATA/Documents"
           cp tools/tricky.pdf "$DATA/Documents/tricky.pdf"
-          shot 14-ask-turned-page 18 -demoImport tricky.pdf -demoPage 1 -demoAsk -demoAskX 754 -demoAskY 130 $API
+          # (The ring goes round the heading: the same place in every turned page's own frame.)
+          shot 14-ask-turned-90 18 -demoImport tricky.pdf -demoPage 1 -demoAsk $API
+          shot 14-ask-turned-270 18 -demoImport tricky.pdf -demoPage 2 -demoAsk $API
+          shot 14-ask-turned-180 18 -demoImport tricky.pdf -demoPage 3 -demoAsk $API
           shot 15-ask-cropped-page 18 -demoImport tricky.pdf -demoPage 4 -demoAsk -demoAskX 100 -demoAskY 36 $API
           shot 16-settings 8 -demoSettings
           xcrun simctl ui "$UDID" appearance dark

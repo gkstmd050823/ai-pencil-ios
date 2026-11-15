@@ -9,13 +9,14 @@ struct Turn: Codable, Equatable {
 }
 
 /// A mark made with the AI pen and the conversation it started. Places are in page points, measured
-/// from the page's top-left corner.
+/// from the top-left corner.
 struct Question: Codable, Identifiable, Equatable {
     var id = UUID()
     var page: Int
-    /// The mark as it was drawn: x, y, x, y, ...
+    /// The mark as it was drawn: x, y, x, y, ... in the frame of the page's overlay, which for a page
+    /// that is shown turned is the page before turning.
     var path: [Double]
-    /// The part of the page shown to Claude close up: left, top, right, bottom.
+    /// The part of the page shown to Claude close up: left, top, right, bottom, on the page as it is shown.
     var region: [Double]
     var createdAt = Date()
     var model: String

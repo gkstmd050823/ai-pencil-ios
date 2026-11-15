@@ -324,6 +324,8 @@ struct QuestionListView: View {
     var onPick: (Question) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    /// The close-up of each question, read once when the list opens.
+    @State private var pictures: [UUID: UIImage] = [:]
 
     private var answered: [Question] {
         session.questions
@@ -370,6 +372,11 @@ struct QuestionListView: View {
             }
             .navigationTitle("질문 목록")
             .navigationBarTitleDisplayMode(.inline)
+            .onAppear {
+                for question in answered where pictures[question.id] == nil {
+                    pictures[question.id] = session.cropPicture(for: question.id)
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("닫기") { dismiss() }
@@ -380,18 +387,30 @@ struct QuestionListView: View {
 
     private func row(_ question: Question) -> some View {
         HStack(alignment: .top, spacing: 12) {
-            Text("\(question.page + 1)쪽")
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(Color(uiColor: InkChoice.markColor))
-                .frame(minWidth: 40, alignment: .leading)
+            ZStack {
+                Color(uiColor: .secondarySystemBackground)
+                if let picture = pictures[question.id] {
+                    Image(uiImage: picture)
+                        .resizable()
+                        .scaledToFill()
+                }
+            }
+            .frame(width: 64, height: 46)
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.primary.opacity(0.12), lineWidth: 1))
             VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 8) {
+                    Text("\(question.page + 1)쪽")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(Color(uiColor: InkChoice.markColor))
+                    Text(question.createdAt.formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Text(summary(question))
                     .font(.subheadline)
                     .foregroundStyle(.primary)
                     .lineLimit(2)
-                Text(question.createdAt.formatted(date: .abbreviated, time: .shortened))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
             if question.markHidden {
@@ -404,12 +423,15 @@ struct QuestionListView: View {
         .padding(.vertical, 2)
     }
 
-    /// The start of the answer, with the marks of Markdown and LaTeX taken out.
+    /// The opening paragraph of the answer, with the marks of Markdown and LaTeX taken out.
     private func summary(_ question: Question) -> String {
         let text = question.turns.first { !$0.fromUser }?.text ?? ""
-        let plain = text
+        let opening = text.components(separatedBy: "\n\n").first { paragraph in
+            !paragraph.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        } ?? text
+        let plain = opening
             .replacingOccurrences(of: "\n", with: " ")
             .filter { !"*#$`\\".contains($0) }
-        return String(plain.prefix(120))
+        return String(plain.prefix(140))
     }
 }

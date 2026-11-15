@@ -7,9 +7,9 @@ import UIKit
 struct CaptureInput: @unchecked Sendable {
     var pdfURL: URL
     var page: Int
-    /// The part of the page to show close up.
+    /// The part of the page to show close up, on the page as it is shown.
     var region: CGRect
-    /// The mark the user drew.
+    /// The mark the user drew, in the overlay's frame.
     var mark: [CGPoint]
     /// The page's handwriting.
     var drawing: PKDrawing?
@@ -36,10 +36,29 @@ enum AskCapture {
     private static let maxCropScale: CGFloat = 6
     private static let markColor = UIColor(red: 0xE5 / 255.0, green: 0x23 / 255.0, blue: 0x1B / 255.0, alpha: 1)
 
-    /// The size of a page as it is shown: its crop box, turned the way the page is turned.
-    static func size(of page: PDFPage) -> CGSize {
-        let box = page.bounds(for: .cropBox)
-        return page.rotation % 180 == 0 ? box.size : CGSize(width: box.height, height: box.width)
+    /// How a page is shown. PDFKit lays its overlay over a page in the page's own frame, before any
+    /// turning, and turns the overlay along with the page. Handwriting, formulas and marks therefore live
+    /// in that unturned frame, while the pictures made for Claude show the page upright, as on screen.
+    struct Shape {
+        /// The size of the page as it is shown: its crop box, turned the way the page is turned.
+        var size: CGSize
+        /// Takes a point of the overlay to the same point on the page as it is shown.
+        var turn: CGAffineTransform
+    }
+
+    static func shape(of page: PDFPage) -> Shape {
+        let box = page.bounds(for: .cropBox).size
+        let sideways = CGSize(width: box.height, height: box.width)
+        switch ((page.rotation % 360) + 360) % 360 {
+        case 90:
+            return Shape(size: sideways, turn: CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: box.height, ty: 0))
+        case 180:
+            return Shape(size: box, turn: CGAffineTransform(a: -1, b: 0, c: 0, d: -1, tx: box.width, ty: box.height))
+        case 270:
+            return Shape(size: sideways, turn: CGAffineTransform(a: 0, b: -1, c: 1, d: 0, tx: 0, ty: box.width))
+        default:
+            return Shape(size: box, turn: .identity)
+        }
     }
 
     /// The part of the page to show Claude for a mark. A circle gives its own box; an underline or a
@@ -81,7 +100,8 @@ enum AskCapture {
 
     static func capture(_ input: CaptureInput) -> Capture? {
         guard let document = PDFDocument(url: input.pdfURL), let page = document.page(at: input.page) else { return nil }
-        let pageSize = size(of: page)
+        let shown = shape(of: page)
+        let pageSize = shown.size
         let whole = CGRect(origin: .zero, size: pageSize)
         var formulas: [(item: MathItem, picture: UIImage)] = []
         for item in input.math {
@@ -92,12 +112,12 @@ enum AskCapture {
 
         let pageScale = pageLongEdge / max(pageSize.width, pageSize.height, 1)
         let pagePicture = render(
-            page, pageSize: pageSize, region: whole, scale: pageScale,
+            page, shape: shown, region: whole, scale: pageScale,
             drawing: input.drawing, formulas: formulas, mark: input.mark, markWidth: max(3, pageScale * 1.6)
         )
         let closeScale = cropScale(input.region)
         let cropPicture = render(
-            page, pageSize: pageSize, region: input.region, scale: closeScale,
+            page, shape: shown, region: input.region, scale: closeScale,
             drawing: input.drawing, formulas: formulas, mark: input.mark, markWidth: max(3, closeScale * 1.1)
         )
         guard let pageJPEG = pagePicture.jpegData(compressionQuality: 0.85),
@@ -109,9 +129,10 @@ enum AskCapture {
         if input.withNeighbours {
             for index in [input.page - 1, input.page + 1] where index >= 0 && index < document.pageCount {
                 guard let other = document.page(at: index) else { continue }
-                let otherSize = size(of: other)
+                let otherShape = shape(of: other)
+                let otherSize = otherShape.size
                 let picture = render(
-                    other, pageSize: otherSize, region: CGRect(origin: .zero, size: otherSize),
+                    other, shape: otherShape, region: CGRect(origin: .zero, size: otherSize),
                     scale: 768 / max(otherSize.width, otherSize.height, 1),
                     drawing: nil, formulas: [], mark: [], markWidth: 0
                 )
@@ -123,19 +144,22 @@ enum AskCapture {
         return capture
     }
 
-    /// A picture of [region] of the page at [scale] pixels per page point: the page itself, then the
-    /// formulas typed on it, the handwriting, and the mark in red.
+    /// A picture of [region] of the page as it is shown, at [scale] pixels per page point: the page
+    /// itself, then the formulas typed on it, the handwriting, and the mark in red.
     private static func render(
-        _ page: PDFPage, pageSize: CGSize, region: CGRect, scale: CGFloat,
+        _ page: PDFPage, shape: Shape, region: CGRect, scale: CGFloat,
         drawing: PKDrawing?, formulas: [(item: MathItem, picture: UIImage)], mark: [CGPoint], markWidth: CGFloat
     ) -> UIImage {
+        let pageSize = shape.size
         let pixels = CGSize(width: max(1, (region.width * scale).rounded()), height: max(1, (region.height * scale).rounded()))
+        // The same part of the page in the overlay's frame, where the handwriting and the formulas are.
+        let source = region.applying(shape.turn.inverted())
         var ink: UIImage?
-        if let drawing, !drawing.strokes.isEmpty, drawing.bounds.intersects(region) {
+        if let drawing, !drawing.strokes.isEmpty, drawing.bounds.intersects(source) {
             // PencilKit draws for the appearance in force, turning dark ink light on a dark screen.
             // The paper here is white, so the ink is asked for as it looks in light mode.
             UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
-                ink = drawing.image(from: region, scale: scale)
+                ink = drawing.image(from: source, scale: scale)
             }
         }
         let format = UIGraphicsImageRendererFormat()
@@ -165,10 +189,12 @@ enum AskCapture {
             }
             cg.restoreGState()
 
-            for formula in formulas where formula.item.frame.intersects(region) {
+            // What was put on the page is drawn in the overlay's frame, turned as the page is turned.
+            cg.concatenate(shape.turn)
+            for formula in formulas where formula.item.frame.intersects(source) {
                 formula.picture.withTintColor(formula.item.color, renderingMode: .alwaysOriginal).draw(in: formula.item.frame)
             }
-            ink?.draw(in: region)
+            ink?.draw(in: source)
             if let first = mark.first {
                 let line = UIBezierPath()
                 line.move(to: first)
