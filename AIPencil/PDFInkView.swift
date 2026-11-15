@@ -5,6 +5,15 @@ import SwiftUI
 /// A PencilKit canvas that remembers which page it lies on.
 final class PageCanvas: PKCanvasView {
     var pageIndex = 0
+
+    // The tool palette shows for the canvas that is first responder, and a view can only become that once
+    // it is in a window; PDFKit adds the overlay to its page some time after handing it over.
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil {
+            becomeFirstResponder()
+        }
+    }
 }
 
 /// The reading and writing surface: PDFKit shows and scrolls the pages, and on every page it lays one
@@ -80,6 +89,8 @@ struct PDFInkView: UIViewRepresentable {
             canvas.drawingPolicy = fingerDraws ? .anyInput : .pencilOnly
             if let saved = store.load(page: canvas.pageIndex) {
                 canvas.drawing = saved
+            } else if canvas.pageIndex == 0, ProcessInfo.processInfo.arguments.contains("-demoInk") {
+                canvas.drawing = Self.demoDrawing()
             }
             canvas.delegate = self
             toolPicker.addObserver(canvas)
@@ -88,16 +99,30 @@ struct PDFInkView: UIViewRepresentable {
             return canvas
         }
 
-        func pdfView(_ pdfView: PDFView, willDisplayOverlayView overlayView: UIView, for page: PDFPage) {
-            // The palette shows for whichever canvas is first responder; the page coming on screen takes it.
-            overlayView.becomeFirstResponder()
-        }
-
         func pdfView(_ pdfView: PDFView, willEndDisplayingOverlayView overlayView: UIView, for page: PDFPage) {
             guard let canvas = overlayView as? PageCanvas else { return }
             store.save(canvas.drawing, page: canvas.pageIndex)
             toolPicker.removeObserver(canvas)
             canvases[page] = nil
+        }
+
+        /// A ring drawn by code, for the build server: its pictures cannot show anyone writing, and this shows
+        /// whether ink lands where its coordinates say. The ring is placed, in page points measured from the
+        /// page's top-left corner, round the heading of the bundled sample's first page.
+        private static func demoDrawing() -> PKDrawing {
+            let center = CGPoint(x: 130, y: 88)
+            let radius = CGSize(width: 86, height: 22)
+            var points: [PKStrokePoint] = []
+            for i in 0...48 {
+                let t = Double(i) / 48 * 2 * Double.pi
+                let location = CGPoint(x: center.x + radius.width * CGFloat(cos(t)), y: center.y + radius.height * CGFloat(sin(t)))
+                points.append(PKStrokePoint(
+                    location: location, timeOffset: Double(i) * 0.01, size: CGSize(width: 2.4, height: 2.4),
+                    opacity: 1, force: 1, azimuth: 0, altitude: CGFloat.pi / 2
+                ))
+            }
+            let path = PKStrokePath(controlPoints: points, creationDate: Date())
+            return PKDrawing(strokes: [PKStroke(ink: PKInk(.pen, color: .systemRed), path: path)])
         }
 
         // MARK: PKCanvasViewDelegate

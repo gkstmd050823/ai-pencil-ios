@@ -10,8 +10,6 @@ settings:
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "5.0"
-    # iPad only.
-    TARGETED_DEVICE_FAMILY: "2"
 targets:
   AIPencil:
     type: application
@@ -48,4 +46,6 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.aipencil.ios
+        # iPad only. Set on the target: XcodeGen's own target defaults would override a project-wide value.
+        TARGETED_DEVICE_FAMILY: "2"
         GENERATE_INFOPLIST_FILE: NO

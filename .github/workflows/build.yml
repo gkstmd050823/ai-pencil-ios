@@ -65,7 +65,7 @@ jobs:
           sleep 12
           xcrun simctl io "$UDID" screenshot screenshots/1-shelf.png
           xcrun simctl terminate "$UDID" app.aipencil.ios || true
-          xcrun simctl launch "$UDID" app.aipencil.ios -sample
+          xcrun simctl launch "$UDID" app.aipencil.ios -sample -demoInk
           sleep 12
           xcrun simctl io "$UDID" screenshot screenshots/2-reader.png
           xcrun simctl shutdown "$UDID" || true
