@@ -1,0 +1,51 @@
+# XcodeGen spec. The Xcode project is generated from this on the build server (xcodegen generate),
+# so no Mac is needed to create or edit it.
+name: AIPencil
+options:
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+    # iPad only.
+    TARGETED_DEVICE_FAMILY: "2"
+targets:
+  AIPencil:
+    type: application
+    platform: iOS
+    sources:
+      - AIPencil
+    info:
+      path: AIPencil/Info.plist
+      properties:
+        CFBundleDisplayName: AI 펜슬
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # An (empty) launch screen is what tells iPadOS the app fills the screen and can be resized.
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # Lets "open in" and the share sheet hand a PDF to the app.
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: PDF
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - com.adobe.pdf
+        LSSupportsOpeningDocumentsInPlace: false
+        UIFileSharingEnabled: true
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.aipencil.ios
+        GENERATE_INFOPLIST_FILE: NO

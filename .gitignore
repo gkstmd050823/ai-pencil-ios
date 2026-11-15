@@ -1,0 +1,16 @@
+# Generated on the build server from project.yml
+*.xcodeproj/
+AIPencil/Info.plist
+
+# Build output
+build/
+DerivedData/
+Payload/
+*.ipa
+*.log
+screenshots/
+
+# macOS and Xcode clutter
+.DS_Store
+xcuserdata/
+*.xcuserstate
