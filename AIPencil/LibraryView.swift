@@ -118,37 +118,7 @@ private struct Shelf: View {
             if docs.isEmpty && folders.isEmpty {
                 emptyState
             } else {
-                ScrollView {
-                    LazyVGrid(columns: columns, spacing: 22) {
-                        ForEach(folders) { item in
-                            NavigationLink(value: item) {
-                                FolderCard(folder: item, count: library.docs.filter { $0.folder == item.id }.count)
-                            }
-                            .buttonStyle(.plain)
-                            .contextMenu {
-                                Button {
-                                    newName = item.name
-                                    renamingFolder = item
-                                } label: {
-                                    Label("이름 바꾸기", systemImage: "pencil")
-                                }
-                                Button(role: .destructive) {
-                                    deletingFolder = item
-                                } label: {
-                                    Label("폴더 삭제", systemImage: "trash")
-                                }
-                            }
-                        }
-                        ForEach(docs) { doc in
-                            NavigationLink(value: doc) {
-                                DocCard(doc: doc, folderName: searching ? library.folders.first { $0.id == doc.folder }?.name : nil)
-                            }
-                            .buttonStyle(.plain)
-                            .contextMenu { docMenu(doc) }
-                        }
-                    }
-                    .padding(22)
-                }
+                grid
             }
         }
         .navigationTitle(folder?.name ?? "문서")
@@ -240,7 +210,7 @@ private struct Shelf: View {
             }
         }
         .confirmationDialog(
-            "\"\(deletingDoc?.title ?? "")\" 문서를 지울까요? 필기와 설명도 함께 지워져요.",
+            deleteDocTitle,
             isPresented: Binding(get: { deletingDoc != nil }, set: { if !$0 { deletingDoc = nil } }), titleVisibility: .visible
         ) {
             Button("삭제", role: .destructive) {
@@ -248,7 +218,7 @@ private struct Shelf: View {
             }
         }
         .confirmationDialog(
-            "\"\(deletingFolder?.name ?? "")\" 폴더를 지울까요? 안에 있던 문서는 지워지지 않고 폴더 밖으로 나와요.",
+            deleteFolderTitle,
             isPresented: Binding(get: { deletingFolder != nil }, set: { if !$0 { deletingFolder = nil } }), titleVisibility: .visible
         ) {
             Button("폴더 삭제", role: .destructive) {
@@ -270,6 +240,60 @@ private struct Shelf: View {
             }
             ranDemo = true
         }
+    }
+
+    private var grid: some View {
+        ScrollView {
+            LazyVGrid(columns: columns, spacing: 22) {
+                ForEach(folders) { item in
+                    NavigationLink(value: item) {
+                        FolderCard(folder: item, count: count(in: item))
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu {
+                        Button {
+                            newName = item.name
+                            renamingFolder = item
+                        } label: {
+                            Label("이름 바꾸기", systemImage: "pencil")
+                        }
+                        Button(role: .destructive) {
+                            deletingFolder = item
+                        } label: {
+                            Label("폴더 삭제", systemImage: "trash")
+                        }
+                    }
+                }
+                ForEach(docs) { doc in
+                    NavigationLink(value: doc) {
+                        DocCard(doc: doc, folderName: folderName(for: doc))
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu { docMenu(doc) }
+                }
+            }
+            .padding(22)
+        }
+    }
+
+    private var deleteDocTitle: String {
+        let name = deletingDoc?.title ?? ""
+        return "\"" + name + "\" 문서를 지울까요? 필기와 설명도 함께 지워져요."
+    }
+
+    private var deleteFolderTitle: String {
+        let name = deletingFolder?.name ?? ""
+        return "\"" + name + "\" 폴더를 지울까요? 안에 있던 문서는 지워지지 않고 폴더 밖으로 나와요."
+    }
+
+    private func count(in item: Folder) -> Int {
+        library.docs.filter { $0.folder == item.id }.count
+    }
+
+    /// The folder a document found by searching lives in, to show under its name.
+    private func folderName(for doc: Doc) -> String? {
+        guard searching, let id = doc.folder else { return nil }
+        return library.folders.first { $0.id == id }?.name
     }
 
     @ViewBuilder
