@@ -206,7 +206,7 @@ struct ExplainPanel: View {
                 } else {
                     VStack(spacing: 12) {
                         ProgressView()
-                        Text(waitingText(panel.phase))
+                        Text(panel.searching ? "웹에서 찾아보는 중" : waitingText(panel.phase))
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
@@ -247,6 +247,20 @@ struct ExplainPanel: View {
     /// Under an answer: how the follow-up is doing, or the ready-made requests, and the place to type one.
     @ViewBuilder
     private func footer(_ panel: PanelState) -> some View {
+        if panel.searching, !panel.streaming.isEmpty, !panel.turns.contains(where: { !$0.fromUser }) {
+            // A search begun part-way through the first answer.
+            Divider()
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("웹에서 찾아보는 중")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+        }
         if panel.turns.contains(where: { !$0.fromUser }) {
             Divider()
             if panel.phase == .error {
@@ -267,7 +281,7 @@ struct ExplainPanel: View {
                 HStack(spacing: 8) {
                     ProgressView()
                         .controlSize(.small)
-                    Text("답을 쓰는 중")
+                    Text(panel.searching ? "웹에서 찾아보는 중" : "답을 쓰는 중")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     Spacer()

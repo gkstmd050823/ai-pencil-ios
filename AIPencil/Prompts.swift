@@ -3,14 +3,14 @@ import Foundation
 /// Wording sent to Claude. Kept free of anything that changes from one request to the next, so that the
 /// part of a request the API keeps in its cache stays the same.
 enum Prompts {
-    static func system(language: String) -> String {
+    static func system(language: String, webSearch: Bool = false) -> String {
         let answerIn: String
         switch language {
         case "en": answerIn = "영어로"
         case "doc": answerIn = "문서가 쓰인 언어로"
         default: answerIn = "한국어로"
         }
-        return """
+        let instructions = """
         당신은 사용자가 태블릿으로 문서를 읽으며 공부하는 것을 돕습니다. 사용자는 이해가 안 되는 부분에 펜으로 표시(동그라미나 밑줄)를 하고, 그 설명을 문서 옆의 좁은 패널에서 바로 읽습니다. 사용자는 읽던 흐름을 끊고 싶지 않아 합니다.
 
         입력
@@ -31,7 +31,18 @@ enum Prompts {
         - 마크다운으로 씁니다. 패널이 좁으므로 문단은 짧게 하고, 표는 꼭 필요할 때만 씁니다.
         - 수식은 LaTeX로 쓰되 문장 속 수식은 $...$, 따로 떼어 보이는 수식은 $$...$$ 로 감쌉니다.
         """
+        return webSearch ? instructions + Self.webSearch : instructions
     }
+
+    /// Added to the instructions when the web search tool goes along with the request.
+    private static let webSearch = """
+
+
+    웹 검색
+    - 문서와 당신이 아는 것으로 충분히 설명할 수 있으면 검색하지 않습니다. 검색하면 답이 늦어집니다.
+    - 최신 정보, 문서 밖의 사실 확인, 출처가 필요한 내용, 사용자가 찾아 달라고 한 것에는 web_search 도구를 씁니다.
+    - 검색으로 알게 된 내용은 문서에 적힌 내용과 구분되게 쓰고, 어느 자료에 근거한 말인지 드러나게 씁니다.
+    """
 
     static func question(page: Int) -> String {
         "\(page)쪽에서 빨간 선으로 표시한 부분을 설명해 주세요."
@@ -51,6 +62,50 @@ enum Prompts {
         FollowUp(label: "왜 그런지", text: "왜 그렇게 되는지 이유를 더 자세히 설명해 주세요."),
         FollowUp(label: "한 줄 요약", text: "한두 문장으로 요약해 주세요."),
     ]
+}
+
+/// Puts an answer's words together with the web pages it cites, as Markdown.
+enum Sources {
+    /// The answer as it is shown and kept, from its text blocks: after each stretch that cites pages,
+    /// their numbers as links; at the end, the list of pages. An answer that cites nothing comes back as
+    /// it is.
+    static func compose(_ blocks: [[String: Any]]) -> String {
+        var pages: [(url: String, title: String?)] = []
+        var out = ""
+        for block in blocks where block["type"] as? String == "text" {
+            let text = block["text"] as? String ?? ""
+            let words = text.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
+            out += words
+            var numbers: [Int] = []
+            for cite in block["citations"] as? [[String: Any]] ?? [] {
+                guard let url = cite["url"] as? String, url.hasPrefix("http") else { continue }
+                if !pages.contains(where: { $0.url == url }) {
+                    pages.append((url, cite["title"] as? String))
+                }
+                let number = (pages.firstIndex { $0.url == url } ?? 0) + 1
+                if !numbers.contains(number) { numbers.append(number) }
+            }
+            for number in numbers {
+                out += " [[\(number)]](<\(pages[number - 1].url)>)"
+            }
+            out += text.dropFirst(words.count)
+        }
+        let body = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        if pages.isEmpty { return body }
+        var list: [String] = []
+        for (index, page) in pages.enumerated() {
+            list.append("\(index + 1). [\(label(page.title, page.url))](<\(page.url)>)")
+        }
+        return body + "\n\n---\n\n**출처**\n\n" + list.joined(separator: "\n")
+    }
+
+    private static func label(_ title: String?, _ url: String) -> String {
+        let name = (title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return (name.isEmpty ? url : name)
+            .replacingOccurrences(of: "[", with: "(")
+            .replacingOccurrences(of: "]", with: ")")
+            .replacingOccurrences(of: "\n", with: " ")
+    }
 }
 
 /// How much of the document's text goes along with a question. More of it costs more per question.

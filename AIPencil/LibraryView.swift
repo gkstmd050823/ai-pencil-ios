@@ -8,6 +8,8 @@ struct LibraryView: View {
     @State private var importing = false
     @State private var errorText: String?
     @State private var showingSettings = false
+    @State private var renaming: Doc?
+    @State private var newTitle = ""
     @State private var ranDemo = false
 
     private let columns = [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 22)]
@@ -26,6 +28,12 @@ struct LibraryView: View {
                                 }
                                 .buttonStyle(.plain)
                                 .contextMenu {
+                                    Button {
+                                        newTitle = doc.title
+                                        renaming = doc
+                                    } label: {
+                                        Label("이름 바꾸기", systemImage: "pencil")
+                                    }
                                     Button(role: .destructive) {
                                         library.delete(doc)
                                     } label: {
@@ -97,6 +105,13 @@ struct LibraryView: View {
         }
         .sheet(isPresented: $showingSettings) {
             SettingsView()
+        }
+        .alert("이름 바꾸기", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
+            TextField("문서 이름", text: $newTitle)
+            Button("취소", role: .cancel) {}
+            Button("바꾸기") {
+                if let doc = renaming { library.rename(doc, to: newTitle) }
+            }
         }
         .alert("하지 못했어요", isPresented: Binding(get: { errorText != nil }, set: { if !$0 { errorText = nil } })) {
             Button("확인", role: .cancel) {}

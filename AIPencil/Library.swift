@@ -126,6 +126,13 @@ final class Library: ObservableObject {
         }
     }
 
+    func rename(_ doc: Doc, to title: String) {
+        let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, let at = docs.firstIndex(where: { $0.id == doc.id }) else { return }
+        docs[at].title = name
+        save()
+    }
+
     func delete(_ doc: Doc) {
         docs.removeAll { $0.id == doc.id }
         try? FileManager.default.removeItem(at: folder(for: doc.id))

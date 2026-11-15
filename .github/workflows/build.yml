@@ -72,6 +72,8 @@ jobs:
           }
           shot 1-shelf-empty 12
           shot 2-reader 12 -sample -demoInk
+          # Zoomed in well past fitting the page: the ink has to stay sharp.
+          shot 2-reader-zoomed 14 -sample -demoInk -demoZoom 2.5
           shot 3-formula 16 -sample -demoInk -demoMath
           shot 4-blank-page-added 12 -sample -demoAddPage
           shot 5-new-note 10 -demoNote
@@ -81,7 +83,7 @@ jobs:
           shot 7-ask-no-key 12 -sample -demoAsk
           # A stand-in for the Claude API on this machine, so the rest can be tried without a key. It
           # prints what the app sent and keeps the pictures that came with each question.
-          python3 tools/mock_claude.py --host 127.0.0.1 --port 8787 --dump mock-dump --delay 0.004 --think 0.3 > mock.log 2>&1 &
+          python3 tools/mock_claude.py --host 127.0.0.1 --port 8787 --dump mock-dump --delay 0.004 --think 0.3 --search 1.5 > mock.log 2>&1 &
           MOCK=$!
           API="-apiBase http://127.0.0.1:8787"
           shot 8-ask 16 -sample -demoAsk $API
@@ -99,11 +101,25 @@ jobs:
           shot 14-ask-turned-270 18 -demoImport tricky.pdf -demoPage 2 -demoAsk $API
           shot 14-ask-turned-180 18 -demoImport tricky.pdf -demoPage 3 -demoAsk $API
           shot 15-ask-cropped-page 18 -demoImport tricky.pdf -demoPage 4 -demoAsk -demoAskX 100 -demoAskY 36 $API
+          # A follow-up that asks for the web: the stand-in answers with a search, a result and words that
+          # cite it. Asking once more shows whether all of that goes back to the API as it came.
+          shot 18-web-search 24 -sample -demoAsk -demoAskX 300 -demoAskY 600 -demoFollowUp -demoFollowUpText "웹에서 검색해서 알려줘" $API
+          shot 19-web-search-again 20 -sample -demoOpenQuestion -demoFollowUp -demoFollowUpText "왜 그런가요" $API
+          shot 20-tool-options 10 -sample -demoOptions
+          shot 21-pages 10 -sample -demoPages
+          shot 22-two-up 10 -sample -pageLayout twoUp
+          shot 23-sideways 10 -sample -pageLayout horizontal
+          # A formula typed on a page that is shown turned has to stand upright.
+          shot 24-formula-turned 16 -demoImport tricky.pdf -demoPage 1 -demoMath
           shot 16-settings 8 -demoSettings
           xcrun simctl ui "$UDID" appearance dark
           shot 17-dark 12 -sample -demoOpenQuestion
           xcrun simctl ui "$UDID" appearance light
           kill $MOCK || true
+          # The home screen, for the app's icon.
+          xcrun simctl terminate "$UDID" app.aipencil.ios || true
+          sleep 3
+          xcrun simctl io "$UDID" screenshot screenshots/25-home.png || true
           cp "$DATA/Documents/debug.log" app-debug.log 2>/dev/null || true
           echo "---- what the stand-in server received ----"
           cat mock.log || true

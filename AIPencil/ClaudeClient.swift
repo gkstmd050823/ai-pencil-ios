@@ -12,7 +12,7 @@ struct ClaudeError: LocalizedError {
 
 /// A finished answer.
 struct ClaudeReply {
-    /// The words of the answer.
+    /// The words of the answer, with the web pages they cite.
     var text: String
     /// Every block of the answer as JSON (an array), in the form it goes back to the API on a follow-up.
     var content: Data
@@ -22,6 +22,8 @@ struct ClaudeReply {
 enum ClaudeEvent {
     /// The request reached Claude and it is working on an answer.
     case started
+    /// Claude has gone to search the web; words follow once it has read what it found.
+    case searching
     case text(String)
     case done(ClaudeReply)
 }
@@ -79,8 +81,8 @@ enum Claude {
     /// The system prompt is two blocks: fixed instructions, then the document's text marked to be cached
     /// for an hour, so every later question about the same document reads it from the cache instead of
     /// paying for it again. Thinking is left to the model; effort is the speed/thoroughness control.
-    static func body(settings: AISettings, docText: String?, messages: [[String: Any]]) -> [String: Any] {
-        var system = [text(Prompts.system(language: settings.language))]
+    static func body(settings: AISettings, docText: String?, messages: [[String: Any]], webSearch: Bool) -> [String: Any] {
+        var system = [text(Prompts.system(language: settings.language, webSearch: webSearch))]
         if let docText, !docText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             var block = text("사용자가 읽고 있는 문서의 본문입니다.\n\n" + docText)
             block["cache_control"] = ["type": "ephemeral", "ttl": "1h"]
@@ -97,8 +99,16 @@ enum Claude {
             "cache_control": ["type": "ephemeral"],
         ]
         if usesFallbacks(settings.model) { body["fallbacks"] = "default" }
+        // Claude decides for itself whether a question needs the web. This version of the tool hands the
+        // results straight to the model and is the one all three models take.
+        if webSearch {
+            body["tools"] = [["type": "web_search_20250305", "name": "web_search", "max_uses": webSearchUses]]
+        }
         return body
     }
+
+    /// How many searches one answer may make.
+    static let webSearchUses = 3
 
     static func request(key: String, model: String, body: [String: Any]) throws -> URLRequest {
         guard let url = URL(string: base + "/v1/messages") else {
@@ -125,28 +135,54 @@ enum Claude {
     /// with their signatures, empty ones too.
     struct Accumulator {
         private var blocks: [Int: [String: Any]] = [:]
+        /// The input of a tool call arrives as pieces of JSON text, put together here until the block ends.
+        private var inputs: [Int: String] = [:]
         private(set) var stopReason: String?
         private(set) var finished = false
+        /// Set by the event just taken when it opened a search of the web.
+        private(set) var startedSearch = false
 
         /// Takes one event. Hands back the words it added to the answer, if it added any.
         mutating func take(_ event: [String: Any]) throws -> String? {
+            startedSearch = false
             switch event["type"] as? String {
             case "content_block_start":
                 if let index = event["index"] as? Int, let block = event["content_block"] as? [String: Any] {
                     blocks[index] = block
+                    startedSearch = block["type"] as? String == "server_tool_use"
                 }
             case "content_block_delta":
+                guard let index = event["index"] as? Int, let delta = event["delta"] as? [String: Any],
+                      let kind = delta["type"] as? String
+                else { return nil }
+                if kind == "input_json_delta" {
+                    inputs[index, default: ""] += delta["partial_json"] as? String ?? ""
+                    return nil
+                }
+                if kind == "citations_delta" {
+                    // A page the block's words rest on. It is kept whole: part of it is sealed and has to
+                    // go back to the API as it came.
+                    if let citation = delta["citation"] {
+                        var block = blocks[index] ?? [:]
+                        block["citations"] = (block["citations"] as? [Any] ?? []) + [citation]
+                        blocks[index] = block
+                    }
+                    return nil
+                }
                 // A "text_delta" adds to the block's "text", a "thinking_delta" to its "thinking", a
                 // "signature_delta" to its "signature".
-                guard let index = event["index"] as? Int, let delta = event["delta"] as? [String: Any],
-                      let kind = delta["type"] as? String, kind.hasSuffix("_delta")
-                else { return nil }
+                guard kind.hasSuffix("_delta") else { return nil }
                 let field = String(kind.dropLast("_delta".count))
                 guard let piece = delta[field] as? String else { return nil }
                 var block = blocks[index] ?? [:]
                 block[field] = (block[field] as? String ?? "") + piece
                 blocks[index] = block
                 if field == "text" { return piece }
+            case "content_block_stop":
+                if let index = event["index"] as? Int, let json = inputs.removeValue(forKey: index), var block = blocks[index] {
+                    block["input"] = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) ?? [String: Any]()
+                    blocks[index] = block
+                }
             case "message_delta":
                 if let delta = event["delta"] as? [String: Any], let reason = delta["stop_reason"] as? String {
                     stopReason = reason
@@ -167,13 +203,8 @@ enum Claude {
                 throw ClaudeError(message: "답을 받는 도중 연결이 끊겼어요. 다시 시도해 주세요.")
             }
             let content = blocks.keys.sorted().compactMap { blocks[$0] }
-            let text = content
-                .filter { $0["type"] as? String == "text" }
-                .compactMap { $0["text"] as? String }
-                .joined()
-                .trimmingCharacters(in: .whitespacesAndNewlines)
             let data = try JSONSerialization.data(withJSONObject: Claude.echo(content), options: [.sortedKeys])
-            return ClaudeReply(text: text, content: data, stopReason: stopReason)
+            return ClaudeReply(text: Sources.compose(content), content: data, stopReason: stopReason)
         }
     }
 
@@ -182,10 +213,14 @@ enum Claude {
     /// thinking from before the switch is left out, and the block that marks the switch stays where it was.
     static func echo(_ content: [[String: Any]]) -> [[String: Any]] {
         guard let boundary = content.lastIndex(where: { $0["type"] as? String == "fallback" }) else { return content }
+        // A search and its result stay only as a pair.
+        let answered = Set(content.compactMap { $0["tool_use_id"] as? String })
         var kept: [[String: Any]] = []
         for (index, block) in content.enumerated() {
-            let type = block["type"] as? String
-            if index >= boundary || type == "text" || type == "fallback" { kept.append(block) }
+            let type = block["type"] as? String ?? ""
+            let paired = (type == "server_tool_use" && answered.contains(block["id"] as? String ?? ""))
+                || (type.hasSuffix("_tool_result") && block["tool_use_id"] != nil)
+            if index >= boundary || type == "text" || type == "fallback" || paired { kept.append(block) }
         }
         return kept
     }
@@ -243,6 +278,9 @@ enum Claude {
                         }
                         if let words = try accumulator.take(event) {
                             continuation.yield(.text(words))
+                        }
+                        if accumulator.startedSearch {
+                            continuation.yield(.searching)
                         }
                     }
                     try Task.checkCancellation()

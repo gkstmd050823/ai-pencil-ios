@@ -35,6 +35,15 @@ $L(\\theta) = \\theta^2$, $\\theta_0 = 3$, $\\eta = 0.1$ 이면 기울기는 $2\
 > 학습률이 너무 크면 최솟값을 지나쳐 발산하고, 너무 작으면 학습이 느려집니다. (이 부분은 문서에 없는 일반적인 설명입니다.)
 """
 
+SEARCH_PARTS = [
+    "찾아보니 **Adam**은 모멘텀과 RMSProp을 합친 방법으로, 기울기의 평균과 제곱 평균을 함께 써서 걸음 크기를 가중치마다 다르게 잡습니다.",
+    " 문서의 기울기 하강법 식에서 학습률 $\\eta$ 를 고정값 대신 이렇게 조절한다고 보면 됩니다.",
+]
+SEARCH_RESULT = {"type": "web_search_result", "url": "https://example.com/adam-optimizer", "title": "Adam optimizer explained",
+                 "encrypted_content": "MOCK-ENCRYPTED-CONTENT", "page_age": "April 30, 2025"}
+SEARCH_CITATION = {"type": "web_search_result_location", "url": SEARCH_RESULT["url"], "title": SEARCH_RESULT["title"],
+                   "encrypted_index": "MOCK-ENCRYPTED-INDEX", "cited_text": "Adam combines momentum and RMSProp."}
+
 FOLLOW_UP_ANSWER = """산에서 **안개 속에 내려오는 상황**으로 생각하면 쉬워요.
 
 1. 발밑의 경사를 느껴 봅니다. 이것이 기울기 $\\nabla L$ 입니다.
@@ -65,7 +74,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/v1/models/"):
             model = self.path.rsplit("/", 1)[-1]
             body = json.dumps({"id": model, "type": "model", "display_name": model, "created_at": "2026-01-01T00:00:00Z"}).encode()
-            print(f"[models] lookup {model}", flush=True)
+            auth = "x-api-key" if self.headers.get("x-api-key") else "bearer" if self.headers.get("authorization") else "none"
+            print(f"[models] lookup {model} auth={auth}", flush=True)
             self.send_response(200)
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(body)))
@@ -108,6 +118,22 @@ class Handler(BaseHTTPRequestHandler):
         last_user = messages[-1].get("content") if messages else None
         if isinstance(last_user, str):
             print(f"      follow-up: {last_user}", flush=True)
+        tools = req.get("tools") or []
+        if tools:
+            print(f"      tools: {[(t.get('type'), t.get('max_uses')) for t in tools]}", flush=True)
+        # What came back of an earlier answer that searched: the sealed parts have to be as they were sent.
+        for i, m in enumerate(messages):
+            if m.get("role") != "assistant" or not isinstance(m.get("content"), list):
+                continue
+            kinds = [b.get("type") for b in m["content"]]
+            if "server_tool_use" not in kinds:
+                continue
+            query = next((b.get("input", {}).get("query") for b in m["content"] if b.get("type") == "server_tool_use"), None)
+            sealed = next((r.get("encrypted_content") for b in m["content"] if b.get("type") == "web_search_tool_result" for r in b.get("content", [])), None)
+            index = next((c.get("encrypted_index") for b in m["content"] if b.get("type") == "text" for c in (b.get("citations") or [])), None)
+            intact = query is not None and sealed == SEARCH_RESULT["encrypted_content"] and index == SEARCH_CITATION["encrypted_index"]
+            print(f"      searched answer sent back as message {i}: {kinds} query={query!r} sealed parts intact={intact}", flush=True)
+        searching = bool(tools) and isinstance(last_user, str) and any(word in last_user.lower() for word in ("검색", "웹", "search"))
         dump = self.server.dump
         if dump:
             os.makedirs(dump, exist_ok=True)
@@ -137,14 +163,44 @@ class Handler(BaseHTTPRequestHandler):
             out.write(sse("content_block_delta", {"type": "content_block_delta", "index": 0,
                                                     "delta": {"type": "signature_delta", "signature": f"mock-signature-{n}"}}))
             out.write(sse("content_block_stop", {"type": "content_block_stop", "index": 0}))
-            out.write(sse("content_block_start", {"type": "content_block_start", "index": 1,
-                                                    "content_block": {"type": "text", "text": ""}}))
-            for piece in chunks(answer):
-                out.write(sse("content_block_delta", {"type": "content_block_delta", "index": 1,
-                                                        "delta": {"type": "text_delta", "text": piece}}))
+            if searching:
+                # A search, as the API streams one: the call (its input in pieces), the result, then words that cite it.
+                answer = "".join(SEARCH_PARTS)
+                out.write(sse("content_block_start", {"type": "content_block_start", "index": 1, "content_block": {
+                    "type": "server_tool_use", "id": f"srvtoolu_mock_{n}", "name": "web_search", "input": {}}}))
+                for piece in ('{"query":', ' "Adam optimizer', ' explained"}'):
+                    out.write(sse("content_block_delta", {"type": "content_block_delta", "index": 1,
+                                                            "delta": {"type": "input_json_delta", "partial_json": piece}}))
+                out.write(sse("content_block_stop", {"type": "content_block_stop", "index": 1}))
                 out.flush()
-                time.sleep(self.server.delay)
-            out.write(sse("content_block_stop", {"type": "content_block_stop", "index": 1}))
+                time.sleep(self.server.search)
+                out.write(sse("content_block_start", {"type": "content_block_start", "index": 2, "content_block": {
+                    "type": "web_search_tool_result", "tool_use_id": f"srvtoolu_mock_{n}", "content": [SEARCH_RESULT]}}))
+                out.write(sse("content_block_stop", {"type": "content_block_stop", "index": 2}))
+                for at, part in enumerate(SEARCH_PARTS):
+                    index = 3 + at
+                    block = {"type": "text", "text": ""}
+                    if at == 0:
+                        block["citations"] = []
+                    out.write(sse("content_block_start", {"type": "content_block_start", "index": index, "content_block": block}))
+                    if at == 0:
+                        out.write(sse("content_block_delta", {"type": "content_block_delta", "index": index,
+                                                                "delta": {"type": "citations_delta", "citation": SEARCH_CITATION}}))
+                    for piece in chunks(part):
+                        out.write(sse("content_block_delta", {"type": "content_block_delta", "index": index,
+                                                                "delta": {"type": "text_delta", "text": piece}}))
+                        out.flush()
+                        time.sleep(self.server.delay)
+                    out.write(sse("content_block_stop", {"type": "content_block_stop", "index": index}))
+            else:
+                out.write(sse("content_block_start", {"type": "content_block_start", "index": 1,
+                                                        "content_block": {"type": "text", "text": ""}}))
+                for piece in chunks(answer):
+                    out.write(sse("content_block_delta", {"type": "content_block_delta", "index": 1,
+                                                            "delta": {"type": "text_delta", "text": piece}}))
+                    out.flush()
+                    time.sleep(self.server.delay)
+                out.write(sse("content_block_stop", {"type": "content_block_stop", "index": 1}))
             out.write(sse("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None},
                                               "usage": {"output_tokens": len(answer) // 2}}))
             out.write(sse("message_stop", {"type": "message_stop"}))
@@ -161,9 +217,10 @@ def main():
     ap.add_argument("--dump", help="folder to save the images and system prompt of each request")
     ap.add_argument("--delay", type=float, default=0.03, help="seconds between streamed pieces")
     ap.add_argument("--think", type=float, default=0.6, help="seconds of silence before the first words")
+    ap.add_argument("--search", type=float, default=1.5, help="seconds a web search takes")
     args = ap.parse_args()
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    server.dump, server.delay, server.think = args.dump, args.delay, args.think
+    server.dump, server.delay, server.think, server.search = args.dump, args.delay, args.think, args.search
     print(f"mock Claude listening on port {args.port}", flush=True)
     server.serve_forever()
 

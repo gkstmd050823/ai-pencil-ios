@@ -27,6 +27,8 @@ struct PanelState: Equatable {
     var error: String?
     var needsKey = false
     var notice: String?
+    /// Claude is searching the web for this answer right now.
+    var searching = false
 }
 
 /// The questions of the open document: asks Claude about a mark, keeps the conversation that follows,
@@ -54,6 +56,8 @@ final class AskSession: ObservableObject {
     private var task: Task<Void, Never>?
     /// The document's text, page by page, once it has been read.
     private var pages: [String]?
+    /// The last request had to go without the web search it asked for.
+    private var searchRefused = false
     private var textTask: Task<Void, Never>?
 
     deinit {
@@ -240,6 +244,7 @@ final class AskSession: ObservableObject {
             $0.error = nil
             $0.needsKey = false
             $0.streaming = ""
+            $0.searching = false
         }
         do {
             let settings = AISettings.current
@@ -276,21 +281,28 @@ final class AskSession: ObservableObject {
                 show(id) { $0.phase = .waiting }
             }
 
-            let reply = try await converse(id, key: key, settings: settings, docText: context.text)
-            // The answer may have come in just as the panel moved on to another question.
-            try Task.checkCancellation()
-            DebugLog.write("answer: \(reply.text.count) characters, stop reason \(reply.stopReason ?? "none"), messages \(messages.count + 1)")
-            if reply.stopReason == "refusal" {
-                throw ClaudeError(message: "이 요청에는 답하지 않았어요. 다른 부분을 표시하거나 질문을 바꿔 보세요.")
-            }
-            if reply.text.isEmpty {
-                throw ClaudeError(message: "답이 비어 있어요. 다시 시도해 주세요.")
+            let sent = messages.count
+            let reply: ClaudeReply
+            do {
+                reply = try await converse(id, key: key, settings: settings, docText: context.text)
+                // The answer may have come in just as the panel moved on to another question.
+                try Task.checkCancellation()
+                DebugLog.write("answer: \(reply.text.count) characters, stop reason \(reply.stopReason ?? "none"), messages \(messages.count)")
+                if reply.stopReason == "refusal" {
+                    throw ClaudeError(message: "이 요청에는 답하지 않았어요. 다른 부분을 표시하거나 질문을 바꿔 보세요.")
+                }
+                if reply.text.isEmpty {
+                    throw ClaudeError(message: "답이 비어 있어요. 다시 시도해 주세요.")
+                }
+            } catch let error as ClaudeError {
+                // An answer that is not kept is not part of the conversation either: asking again sends
+                // the question as it stood.
+                if messages.count > sent { messages.removeSubrange(sent...) }
+                throw error
             }
             guard var answered = find(id) else { return }
             answered.turns.append(Turn(fromUser: false, text: reply.text))
             answered.model = settings.model
-            let content = (try? JSONSerialization.jsonObject(with: reply.content)) as? [[String: Any]] ?? []
-            messages.append(["role": "assistant", "content": content])
             let turns = answered.turns
             amend(id) {
                 $0.turns = turns
@@ -303,12 +315,20 @@ final class AskSession: ObservableObject {
             }
             store.save(answered)
             store.saveMessages(messages, for: id)
-            let cut = reply.stopReason == "max_tokens" ? "답이 길어 중간에 끊겼어요. \"이어서\"라고 물어보면 계속돼요." : nil
-            let notes = [answered.notice, cut].compactMap { $0 }.joined(separator: "\n")
+            var cut: String?
+            if reply.stopReason == "max_tokens" {
+                cut = "답이 길어 중간에 끊겼어요. \"이어서\"라고 물어보면 계속돼요."
+            } else if reply.stopReason == "pause_turn" {
+                cut = "검색이 길어져 답을 끝내지 못했어요. 다시 물어봐 주세요."
+            }
+            let notes = [answered.notice, cut, searchRefused ? "이 API 키로는 웹 검색을 쓸 수 없어 검색 없이 답했어요." : nil]
+                .compactMap { $0 }
+                .joined(separator: "\n")
             show(id) {
                 $0.phase = .done
                 $0.turns = turns
                 $0.streaming = ""
+                $0.searching = false
                 $0.model = settings.model
                 $0.notice = notes.isEmpty ? nil : notes
             }
@@ -321,6 +341,7 @@ final class AskSession: ObservableObject {
                 $0.error = error.message
                 $0.needsKey = error.needsKey
                 $0.streaming = ""
+                $0.searching = false
             }
         } catch {
             let message = error.localizedDescription
@@ -328,35 +349,71 @@ final class AskSession: ObservableObject {
                 $0.phase = .error
                 $0.error = message
                 $0.streaming = ""
+                $0.searching = false
             }
         }
     }
 
-    /// Sends the conversation and waits for the answer. The API checks that the thinking in earlier
-    /// answers comes back exactly as it was sent; should it turn a conversation down over that, the way
-    /// out it documents is to send the conversation once more with all thinking taken out. That
-    /// version is then the one kept, so that it goes back the same way next time.
+    /// Sends the conversation and waits for the answer, which is added to the conversation as it comes:
+    /// in one piece, or in several when the API paused it and it was taken up again.
     @MainActor
     private func converse(_ id: UUID, key: String, settings: AISettings, docText: String?) async throws -> ClaudeReply {
-        do {
-            let body = Claude.body(settings: settings, docText: docText, messages: messages)
-            return try await listen(id, to: Claude.request(key: key, model: settings.model, body: body))
-        } catch let error as ClaudeError where error.status == 400 && Claude.hasThinking(messages) {
-            DebugLog.write("retrying without thinking after: \(error.message)")
-            messages = Claude.withoutThinking(messages)
-            if draftID != id { store?.saveMessages(messages, for: id) }
-            show(id) {
-                $0.phase = .waiting
-                $0.streaming = ""
+        var webSearch = settings.webSearch
+        searchRefused = false
+        var strippedThinking = false
+        var resumed = 0
+        var words = ""
+        var parts: [[String: Any]] = []
+        var last = ClaudeReply(text: "", content: Data(), stopReason: nil)
+        while true {
+            do {
+                let body = Claude.body(settings: settings, docText: docText, messages: messages, webSearch: webSearch)
+                last = try await listen(id, to: Claude.request(key: key, model: settings.model, body: body), after: words)
+            } catch let error as ClaudeError where error.status == 400 && parts.isEmpty {
+                if webSearch, error.message.range(of: "search", options: .caseInsensitive) != nil {
+                    // An organisation can switch web search off; the request is then turned down whole.
+                    // The question is worth answering without it.
+                    DebugLog.write("retrying without web search after: \(error.message)")
+                    webSearch = false
+                    searchRefused = true
+                    continue
+                }
+                if !strippedThinking, Claude.hasThinking(messages) {
+                    // The API checks that the thinking in earlier answers comes back exactly as it was
+                    // sent. Should it turn a conversation down over that, the way out it documents is
+                    // to send the conversation once more with all thinking taken out. That version is
+                    // then the one kept, so that it goes back the same way next time.
+                    DebugLog.write("retrying without thinking after: \(error.message)")
+                    strippedThinking = true
+                    messages = Claude.withoutThinking(messages)
+                    if draftID != id { store?.saveMessages(messages, for: id) }
+                    show(id) {
+                        $0.phase = .waiting
+                        $0.streaming = ""
+                    }
+                    continue
+                }
+                throw error
             }
-            let body = Claude.body(settings: settings, docText: docText, messages: messages)
-            return try await listen(id, to: Claude.request(key: key, model: settings.model, body: body))
+            let content = (try? JSONSerialization.jsonObject(with: last.content)) as? [[String: Any]] ?? []
+            parts += content
+            messages.append(["role": "assistant", "content": content])
+            words = Sources.compose(parts)
+            // After a long run of searches the API hands the turn back unfinished. Sending it back as it
+            // is, with nothing added, makes it carry on from where it stopped.
+            if last.stopReason == "pause_turn", resumed < 3 {
+                resumed += 1
+                continue
+            }
+            return ClaudeReply(text: words, content: last.content, stopReason: last.stopReason)
         }
     }
 
+    /// Reads one answer as it streams in, showing its words after [before], the words of the part of the
+    /// turn already received.
     @MainActor
-    private func listen(_ id: UUID, to request: URLRequest) async throws -> ClaudeReply {
-        var answer = ""
+    private func listen(_ id: UUID, to request: URLRequest, after before: String) async throws -> ClaudeReply {
+        var answer = before
         var shownAt = Date.distantPast
         for try await event in Claude.stream(request) {
             switch event {
@@ -364,6 +421,8 @@ final class AskSession: ObservableObject {
                 show(id) { state in
                     if state.phase == .waiting { state.phase = .thinking }
                 }
+            case .searching:
+                show(id) { $0.searching = true }
             case .text(let words):
                 answer += words
                 // Shown at most twenty times a second: laying the answer out afresh for every few
@@ -374,6 +433,7 @@ final class AskSession: ObservableObject {
                     show(id) {
                         $0.phase = .streaming
                         $0.streaming = soFar
+                        $0.searching = false
                     }
                 }
             case .done(let reply):

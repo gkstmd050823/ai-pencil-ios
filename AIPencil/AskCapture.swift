@@ -189,11 +189,18 @@ enum AskCapture {
             }
             cg.restoreGState()
 
-            // What was put on the page is drawn in the overlay's frame, turned as the page is turned.
-            cg.concatenate(shape.turn)
-            for formula in formulas where formula.item.frame.intersects(source) {
-                formula.picture.withTintColor(formula.item.color, renderingMode: .alwaysOriginal).draw(in: formula.item.frame)
+            // A formula keeps its place in the overlay's frame but stands upright on screen, so it is
+            // drawn upright here, round the place its middle is shown at.
+            for formula in formulas {
+                let item = formula.item
+                let middle = CGPoint(x: item.frame.midX, y: item.frame.midY).applying(shape.turn)
+                let upright = CGRect(x: middle.x - item.width / 2, y: middle.y - item.height / 2, width: item.width, height: item.height)
+                if upright.intersects(region) {
+                    formula.picture.withTintColor(item.color, renderingMode: .alwaysOriginal).draw(in: upright)
+                }
             }
+            // Handwriting and the mark are drawn in the overlay's frame, turned as the page is turned.
+            cg.concatenate(shape.turn)
             ink?.draw(in: source)
             if let first = mark.first {
                 let line = UIBezierPath()

@@ -58,6 +58,8 @@ struct AISettings {
     var depth: Depth
     var language: String
     var scope: ContextScope
+    /// Claude may search the web while answering. Each search is charged on top of the tokens.
+    var webSearch: Bool
 
     static var current: AISettings {
         let defaults = UserDefaults.standard
@@ -66,7 +68,8 @@ struct AISettings {
             model: AIModel.all.contains { $0.id == model } ? model : AIModel.fallback,
             depth: Depth(rawValue: defaults.string(forKey: "depth") ?? "") ?? .fast,
             language: defaults.string(forKey: "language") ?? "ko",
-            scope: ContextScope(rawValue: defaults.string(forKey: "contextScope") ?? "") ?? .whole
+            scope: ContextScope(rawValue: defaults.string(forKey: "contextScope") ?? "") ?? .whole,
+            webSearch: defaults.object(forKey: "webSearch") == nil ? true : defaults.bool(forKey: "webSearch")
         )
     }
 }
