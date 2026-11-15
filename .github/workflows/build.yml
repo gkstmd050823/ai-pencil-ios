@@ -61,13 +61,19 @@ jobs:
           if [ -z "$UDID" ]; then echo "no iPad simulator on this runner"; xcrun simctl list devices available; exit 0; fi
           xcrun simctl bootstatus "$UDID" -b
           xcrun simctl install "$UDID" build/Build/Products/Debug-iphonesimulator/AIPencil.app
-          xcrun simctl launch "$UDID" app.aipencil.ios
-          sleep 12
-          xcrun simctl io "$UDID" screenshot screenshots/1-shelf.png
-          xcrun simctl terminate "$UDID" app.aipencil.ios || true
-          xcrun simctl launch "$UDID" app.aipencil.ios -sample -demoInk
-          sleep 12
-          xcrun simctl io "$UDID" screenshot screenshots/2-reader.png
+          # Each launch asks the app to do something no one is there to tap, then a picture is taken.
+          shot() {
+            name="$1"; wait="$2"; shift 2
+            xcrun simctl launch --terminate-running-process "$UDID" app.aipencil.ios "$@"
+            sleep "$wait"
+            xcrun simctl io "$UDID" screenshot "screenshots/$name.png"
+          }
+          shot 1-shelf-empty 12
+          shot 2-reader 12 -sample -demoInk
+          shot 3-formula 16 -sample -demoInk -demoMath
+          shot 4-blank-page-added 12 -sample -demoAddPage
+          shot 5-new-note 10 -demoNote
+          shot 6-shelf 8
           xcrun simctl shutdown "$UDID" || true
 
       - name: Build for the iPad (unsigned)

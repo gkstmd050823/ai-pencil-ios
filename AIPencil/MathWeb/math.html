@@ -1,0 +1,53 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<link rel="stylesheet" href="katex.min.css">
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  body { color: #000; }
+  /* Shrinks to the formula, so that measuring the box measures the formula. */
+  #box { display: inline-block; white-space: nowrap; padding: 10px 14px; }
+  .katex-display { margin: 0; }
+</style>
+</head>
+<body>
+<div id="box"></div>
+<script src="katex.min.js"></script>
+<script>
+  var box = document.getElementById('box');
+
+  function draw(tex, fontPx) {
+    box.style.margin = '0';
+    box.style.fontSize = fontPx + 'px';
+    katex.render(tex, box, { displayMode: true, throwOnError: true, strict: 'ignore', output: 'html' });
+    var inner = box.querySelector('.katex-html') || box;
+    return inner.getBoundingClientRect();
+  }
+
+  // Typesets tex at fontPx (CSS px), smaller if it would not fit in maxW x maxH. Returns, as JSON, where the
+  // formula is on the page in CSS px, the size of one em of it, and how many device pixels a CSS px is.
+  function render(tex, fontPx, maxW, maxH) {
+    try {
+      var r = draw(tex, fontPx);
+      var fit = Math.min(1, (maxW - 28) / Math.max(1, r.width), (maxH - 20) / Math.max(1, r.height));
+      if (fit < 1) {
+        fontPx = Math.max(6, fontPx * fit * 0.98);
+        r = draw(tex, fontPx);
+      }
+      // Put the formula in the middle of the preview, then measure where that left it.
+      var whole = box.getBoundingClientRect();
+      box.style.marginLeft = Math.max(0, (maxW - whole.width) / 2) + 'px';
+      box.style.marginTop = Math.max(0, (maxH - whole.height) / 2) + 'px';
+      r = (box.querySelector('.katex-html') || box).getBoundingClientRect();
+      var em = parseFloat(getComputedStyle(box.querySelector('.katex')).fontSize);
+      return JSON.stringify({ ok: true, x: r.left, y: r.top, w: r.width, h: r.height, em: em, dpr: window.devicePixelRatio });
+    } catch (e) {
+      box.textContent = '';
+      return JSON.stringify({ ok: false, error: String((e && e.message) || e) });
+    }
+  }
+</script>
+</body>
+</html>

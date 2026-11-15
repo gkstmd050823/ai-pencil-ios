@@ -1,12 +1,13 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The shelf: every imported PDF, and the way to bring in more.
+/// The shelf: every document, and the ways to get more.
 struct LibraryView: View {
     @EnvironmentObject private var library: Library
     @State private var path: [Doc] = []
     @State private var importing = false
     @State private var errorText: String?
+    @State private var ranDemo = false
 
     private let columns = [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 22)]
 
@@ -39,10 +40,19 @@ struct LibraryView: View {
             .navigationTitle("문서")
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        importing = true
+                    Menu {
+                        Button {
+                            importing = true
+                        } label: {
+                            Label("PDF 가져오기", systemImage: "square.and.arrow.down")
+                        }
+                        Button {
+                            newNote()
+                        } label: {
+                            Label("빈 노트 만들기", systemImage: "doc.badge.plus")
+                        }
                     } label: {
-                        Label("PDF 가져오기", systemImage: "plus")
+                        Label("추가", systemImage: "plus")
                     }
                 }
             }
@@ -77,12 +87,12 @@ struct LibraryView: View {
                 errorText = error.localizedDescription
             }
         }
-        .alert("가져오지 못했어요", isPresented: Binding(get: { errorText != nil }, set: { if !$0 { errorText = nil } })) {
+        .alert("하지 못했어요", isPresented: Binding(get: { errorText != nil }, set: { if !$0 { errorText = nil } })) {
             Button("확인", role: .cancel) {}
         } message: {
             Text(errorText ?? "")
         }
-        .onAppear(perform: openSampleIfAsked)
+        .onAppear(perform: runDemoIfAsked)
     }
 
     private var emptyState: some View {
@@ -92,7 +102,7 @@ struct LibraryView: View {
                 .foregroundStyle(.tint)
             Text("읽다가 막히면 동그라미")
                 .font(.title2.bold())
-            Text("PDF를 가져와 애플 펜슬로 필기해 보세요.")
+            Text("PDF를 가져오거나 빈 노트를 만들어 애플 펜슬로 필기해 보세요.")
                 .foregroundStyle(.secondary)
             Button {
                 importing = true
@@ -103,19 +113,34 @@ struct LibraryView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
             .padding(.top, 8)
+            Button("빈 노트 만들기") { newNote() }
         }
         .padding(36)
     }
 
-    /// The build server starts the app with "-sample" to take a picture of the reader without anyone tapping:
-    /// the bundled sample is imported (once) and opened.
-    private func openSampleIfAsked() {
-        guard ProcessInfo.processInfo.arguments.contains("-sample"), path.isEmpty else { return }
-        if let existing = library.docs.first(where: { $0.title == "샘플" }) {
-            path = [existing]
-        } else if let url = Bundle.main.url(forResource: "Sample", withExtension: "pdf"),
-                  let doc = try? library.importPDF(from: url, title: "샘플") {
-            path = [doc]
+    private func newNote() {
+        do {
+            path = [try library.createNote()]
+        } catch {
+            errorText = error.localizedDescription
+        }
+    }
+
+    /// The build server starts the app with these to take pictures without anyone tapping: "-sample" opens
+    /// the bundled sample (imported once), "-demoNote" makes a blank notebook and opens it.
+    private func runDemoIfAsked() {
+        guard !ranDemo, path.isEmpty else { return }
+        ranDemo = true
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("-sample") {
+            if let existing = library.docs.first(where: { $0.title == "샘플" }) {
+                path = [existing]
+            } else if let url = Bundle.main.url(forResource: "Sample", withExtension: "pdf"),
+                      let doc = try? library.importPDF(from: url, title: "샘플") {
+                path = [doc]
+            }
+        } else if arguments.contains("-demoNote") {
+            newNote()
         }
     }
 }
