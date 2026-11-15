@@ -113,6 +113,9 @@ jobs:
           shot 20-tool-eraser 8 -sample -demoTool eraser
           shot 20-tool-lasso 8 -sample -demoTool lasso
           shot 20-shapes 12 -sample -demoShapes
+          # A dotted page added after the first page, and shapes drawn on it: an added page with writing on it.
+          shot 20-added-dots 12 -sample -demoAddPage -demoPaper dots
+          shot 20-added-dots-shapes 12 -sample -demoPage 1 -demoShapes
           shot 21-pages 10 -sample -demoBookmark -demoNavigator pages
           shot 21-bookmarks 10 -sample -demoNavigator bookmarks
           shot 21-search 10 -sample -demoNavigator search -demoSearch 손실
@@ -120,16 +123,29 @@ jobs:
           shot 22-two-up 10 -sample -pageLayout twoUp
           shot 23-paged 12 -sample -pageLayout paged
           shot 23-paged-ask 18 -sample -pageLayout paged -demoAsk -demoAskX 300 -demoAskY 200 $API
-          # The handwriting drawn into a copy of the PDF; its first page is turned into a picture to look at.
-          shot 26-export 14 -sample -demoExport
-          cp "$DATA/Documents/export.pdf" export.pdf 2>/dev/null || true
-          sips -s format png export.pdf --out screenshots/26-export-page1.png >/dev/null 2>&1 || true
-          # The same, for a document with pages that are shown turned.
-          shot 26-export-turned 14 -demoImport tricky.pdf -demoExport
-          cp "$DATA/Documents/export.pdf" export-turned.pdf 2>/dev/null || true
-          shot 27-shelf-folders 8 -demoShelf
           # A formula typed on a page that is shown turned has to stand upright.
           shot 24-formula-turned 16 -demoImport tricky.pdf -demoPage 1 -demoMath
+          # Exports: the file itself with the writing added at its end. Each is kept, and its pages are turned
+          # into pictures and their first words printed, to see that it looks right and still reads right.
+          exported() {
+            cp "$DATA/Documents/export.pdf" "$1.pdf" 2>/dev/null || true
+            rm -f "$DATA/Documents/export.pdf"
+            swift tools/pdf_pages.swift "$1.pdf" "screenshots/26-$1" 8 || true
+          }
+          shot 26-export 14 -sample -demoExport
+          exported export
+          # A document with pages that are shown turned.
+          shot 26-export-turned 14 -demoImport tricky.pdf -demoExport
+          exported export-turned
+          # A file put together the newer way (object streams, a cross-reference stream), with a ring on it.
+          cp tools/packed.pdf "$DATA/Documents/packed.pdf"
+          shot 26-packed-ask 18 -demoImport packed.pdf -demoAsk $API
+          shot 26-export-packed 14 -demoImport packed.pdf -demoExport
+          exported export-packed
+          # A ruled notebook with a page added: the first page's lines are the file's, the second's the export's.
+          shot 26-export-note 14 -demoNote -demoPaper lined -demoAddPage -demoExport
+          exported export-note
+          shot 27-shelf-folders 8 -demoShelf
           shot 16-settings 8 -demoSettings
           xcrun simctl ui "$UDID" appearance dark
           shot 17-dark 12 -sample -demoOpenQuestion
@@ -183,6 +199,8 @@ jobs:
             app-debug.log
             export.pdf
             export-turned.pdf
+            export-packed.pdf
+            export-note.pdf
           if-no-files-found: ignore
           retention-days: 14
 
