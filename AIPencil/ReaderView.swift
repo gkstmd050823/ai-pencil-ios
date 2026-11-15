@@ -9,37 +9,63 @@ struct MathDraft: Identifiable {
     var auto = false
 }
 
+/// A copy of the document made for sending elsewhere.
+private struct ExportedFile: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
 /// One open document: the tool bar, under it the pages with handwriting, formulas and marks on top, and
 /// beside or below them the explanation of a mark when one is open.
 struct ReaderView: View {
     let doc: Doc
     @EnvironmentObject private var library: Library
+    @Environment(\.colorScheme) private var scheme
     @AppStorage("fingerDraws") private var fingerDraws = false
     @AppStorage("showAiMarks") private var showAiMarks = true
     @AppStorage("pageLayout") private var layoutMode = PageLayoutMode.vertical
+    @AppStorage("darkPaper") private var darkPaper = true
+    /// How much of the screen the explanation takes: of its width beside the pages, of its height below them.
+    @AppStorage("panelShare") private var panelShare = 0.44
     @State private var choice = InkChoice.saved()
     /// The tool that was in hand before the one that is now, for the Pencil's "back to the last tool".
     @State private var previousTool = InkTool.eraser
     @StateObject private var controller = ReaderController()
     @StateObject private var session = AskSession()
-    /// Changed to have the page view built afresh, after the document's pages were renumbered.
+    /// Changed to have the page view built afresh: after the document's pages were renumbered, or when the
+    /// paper changes between light and dark.
     @State private var reloadToken = UUID()
     /// The build server can ask for a page to start on ("-demoPage 2"); otherwise this is the first page.
     @State private var startPage = max(0, UserDefaults.standard.integer(forKey: "demoPage"))
+    /// The paper as the page view was built with; nil until it has been rebuilt once.
+    @State private var paperDark: Bool?
+    @State private var bookmarks: [Int] = []
     @State private var mathDraft: MathDraft?
     @State private var errorText: String?
     @State private var showingSettings = false
     @State private var showingQuestions = false
-    @State private var showingPages = false
+    @State private var showingNavigator = false
+    @State private var navigatorTab = NavigatorSheet.Tab.pages
+    @State private var navigatorQuery = ""
     @State private var showingOptions = false
+    @State private var exporting = false
+    @State private var exported: ExportedFile?
+    @State private var dragStart: Double?
     @State private var ready = false
 
     private var folder: URL { library.folder(for: doc.id) }
     private var mathStore: MathStore { MathStore(folder: folder) }
+    private var wantsDark: Bool { darkPaper && scheme == .dark }
+    private var showsDark: Bool { paperDark ?? wantsDark }
+    private var marked: Bool { bookmarks.contains(controller.pageIndex) }
 
     /// The marks drawn on the pages: all of them, less the ones taken off the page, unless marks are switched off.
     private var marks: [Question] {
         showAiMarks ? session.questions.filter { !$0.markHidden } : []
+    }
+
+    private var backdrop: Color {
+        showsDark ? Color(white: 0.05) : Color(uiColor: .secondarySystemBackground)
     }
 
     var body: some View {
@@ -48,23 +74,18 @@ struct ReaderView: View {
             // ("-demoWide YES" lets the build server, whose simulator stands upright, see the wide form.)
             let wide = UserDefaults.standard.bool(forKey: "demoWide")
                 || (geometry.size.width >= 820 && geometry.size.width > geometry.size.height)
+            let total = wide ? geometry.size.width : geometry.size.height
+            let length = min(max(wide ? 320 : 280, total * CGFloat(panelShare)), max(240, total - (wide ? 380 : 240)))
             let layout = wide ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
             layout {
                 pages
                 if session.panel != nil {
-                    ExplainPanel(session: session, onOpenSettings: { showingSettings = true }, onLocate: locate)
-                        .frame(
-                            width: wide ? min(460, geometry.size.width * 0.4) : nil,
-                            height: wide ? nil : min(max(320, geometry.size.height * 0.46), max(200, geometry.size.height - 160))
-                        )
-                        .overlay(alignment: wide ? .leading : .top) {
-                            Rectangle()
-                                .fill(Color(uiColor: .separator))
-                                .frame(width: wide ? 0.5 : nil, height: wide ? nil : 0.5)
-                        }
+                    panel(wide: wide, total: total)
+                        .frame(width: wide ? length : nil, height: wide ? nil : length)
                 }
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
+            .background(backdrop)
         }
         .navigationTitle(doc.title)
         .navigationBarTitleDisplayMode(.inline)
@@ -83,41 +104,12 @@ struct ReaderView: View {
                         systemImage: fingerDraws ? "hand.draw.fill" : "hand.draw"
                     )
                 }
-                Menu {
-                    Picker("보기 방식", selection: $layoutMode) {
-                        ForEach(PageLayoutMode.allCases) { mode in
-                            Label(mode.label, systemImage: mode.symbol).tag(mode)
-                        }
-                    }
-                    Divider()
-                    Button {
-                        showingPages = true
-                    } label: {
-                        Label("쪽 이동", systemImage: "square.grid.2x2")
-                    }
-                    Button {
-                        addBlankPage()
-                    } label: {
-                        Label("이 쪽 뒤에 빈 쪽 추가", systemImage: "doc.badge.plus")
-                    }
-                    Divider()
-                    Toggle(isOn: $showAiMarks) {
-                        Label("AI 표시 보이기", systemImage: "sparkles")
-                    }
-                    Button {
-                        showingQuestions = true
-                    } label: {
-                        Label("질문 목록", systemImage: "list.bullet")
-                    }
-                    Divider()
-                    Button {
-                        showingSettings = true
-                    } label: {
-                        Label("설정", systemImage: "gearshape")
-                    }
+                Button {
+                    openNavigator(.search)
                 } label: {
-                    Label("더 보기", systemImage: "ellipsis.circle")
+                    Label("문서 안에서 찾기", systemImage: "magnifyingglass")
                 }
+                menu
             }
         }
         .sheet(item: $mathDraft) { draft in
@@ -145,10 +137,11 @@ struct ReaderView: View {
                 locate(question)
             }
         }
-        .sheet(isPresented: $showingPages) {
-            PageNavigator(url: library.pdfURL(for: doc.id), current: controller.pageIndex) { index in
-                controller.go(toPage: index)
-            }
+        .sheet(isPresented: $showingNavigator) {
+            NavigatorSheet(controller: controller, bookmarks: $bookmarks, tab: navigatorTab, query: navigatorQuery)
+        }
+        .sheet(item: $exported) { file in
+            ActivityView(items: [file.url])
         }
         .alert("하지 못했어요", isPresented: Binding(get: { errorText != nil }, set: { if !$0 { errorText = nil } })) {
             Button("확인", role: .cancel) {}
@@ -158,21 +151,80 @@ struct ReaderView: View {
         .onChange(of: choice) {
             choice.save()
         }
+        .onChange(of: bookmarks) {
+            BookmarkStore(folder: folder).save(bookmarks)
+        }
+        .onChange(of: wantsDark) {
+            // The pages are drawn anew for the other paper, from the page that was being read.
+            startPage = controller.currentPageIndex ?? startPage
+            controller.saveAndRetire()
+            paperDark = wantsDark
+            reloadToken = UUID()
+        }
         .onAppear(perform: setUp)
     }
 
-    /// The tool bar has a strip of its own above the pages. Floating over them it covered the top of
-    /// the first page, which could then neither be read nor written on.
+    private var menu: some View {
+        Menu {
+            Picker("보기 방식", selection: $layoutMode) {
+                ForEach(PageLayoutMode.allCases) { mode in
+                    Label(mode.label, systemImage: mode.symbol).tag(mode)
+                }
+            }
+            Divider()
+            Button {
+                openNavigator(.pages)
+            } label: {
+                Label("쪽 이동 · 목차 · 책갈피", systemImage: "square.grid.2x2")
+            }
+            Button {
+                toggleBookmark()
+            } label: {
+                Label(marked ? "책갈피 지우기" : "이 쪽에 책갈피", systemImage: marked ? "bookmark.slash" : "bookmark")
+            }
+            Menu {
+                ForEach(PaperKind.allCases) { kind in
+                    Button(kind.label) { addPage(kind) }
+                }
+            } label: {
+                Label("이 쪽 뒤에 쪽 추가", systemImage: "doc.badge.plus")
+            }
+            Button {
+                export(toDocuments: false)
+            } label: {
+                Label("PDF로 내보내기", systemImage: "square.and.arrow.up")
+            }
+            Divider()
+            Toggle(isOn: $showAiMarks) {
+                Label("AI 표시 보이기", systemImage: "sparkles")
+            }
+            Button {
+                showingQuestions = true
+            } label: {
+                Label("질문 목록", systemImage: "list.bullet")
+            }
+            Divider()
+            Button {
+                showingSettings = true
+            } label: {
+                Label("설정", systemImage: "gearshape")
+            }
+        } label: {
+            Label("더 보기", systemImage: "ellipsis.circle")
+        }
+    }
+
+    /// The tool bar has a strip of its own above the pages, so that it never covers the top of a page.
     private var pages: some View {
         VStack(spacing: 0) {
             ToolBar(
-                choice: $choice, showingOptions: $showingOptions,
+                choice: $choice, showingOptions: $showingOptions, darkPaper: showsDark,
                 canUndo: controller.canUndo, canRedo: controller.canRedo,
                 onPick: pick, onUndo: controller.undo, onRedo: controller.redo
             )
-            .padding(.vertical, 6)
+            .padding(.vertical, 7)
             .frame(maxWidth: .infinity)
-            .background(Color(uiColor: .secondarySystemBackground))
+            .background(backdrop)
             // Above the pages, so that the bar's shadow falls on them.
             .zIndex(1)
             PDFInkView(
@@ -182,6 +234,7 @@ struct ReaderView: View {
                 choice: choice,
                 fingerDraws: fingerDraws,
                 layout: layoutMode,
+                darkPaper: showsDark,
                 startPage: startPage,
                 marks: marks,
                 activeMark: session.panel?.questionID,
@@ -192,20 +245,71 @@ struct ReaderView: View {
             .overlay(alignment: .bottom) {
                 if controller.pageCount > 1 {
                     Button {
-                        showingPages = true
+                        openNavigator(.pages)
                     } label: {
-                        Text("\(controller.pageIndex + 1) / \(controller.pageCount)")
-                            .font(.footnote.weight(.semibold).monospacedDigit())
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(Color.black.opacity(0.55), in: Capsule())
+                        HStack(spacing: 5) {
+                            if marked {
+                                Image(systemName: "bookmark.fill")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tint)
+                            }
+                            Text("\(controller.pageIndex + 1) / \(controller.pageCount)")
+                                .font(.footnote.weight(.semibold).monospacedDigit())
+                                .foregroundStyle(.primary)
+                        }
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 7)
+                        .background(.regularMaterial, in: Capsule())
+                        .overlay(Capsule().stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
+                        .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
                     }
-                    .padding(.bottom, 10)
+                    .padding(.bottom, 12)
                     .accessibilityLabel("\(controller.pageCount)쪽 중 \(controller.pageIndex + 1)쪽, 쪽 이동")
                 }
             }
+            .overlay {
+                if exporting {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("PDF로 내보내는 중")
+                            .font(.subheadline.weight(.medium))
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 12)
+                    .background(.regularMaterial, in: Capsule())
+                    .shadow(color: .black.opacity(0.15), radius: 10, y: 3)
+                }
+            }
         }
+    }
+
+    /// The explanation, with a handle on the edge it shares with the pages: dragging it gives the
+    /// explanation more room or less.
+    private func panel(wide: Bool, total: CGFloat) -> some View {
+        let inner = wide ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
+        return inner {
+            Capsule()
+                .fill(Color.secondary.opacity(0.4))
+                .frame(width: wide ? 5 : 40, height: wide ? 40 : 5)
+                .frame(width: wide ? 18 : nil, height: wide ? nil : 16)
+                .frame(maxWidth: wide ? nil : .infinity, maxHeight: wide ? .infinity : nil)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 2, coordinateSpace: .global)
+                        .onChanged { value in
+                            let from = dragStart ?? panelShare
+                            dragStart = from
+                            let moved = wide ? -value.translation.width : -value.translation.height
+                            panelShare = min(0.72, max(0.24, from + Double(moved / max(total, 1))))
+                        }
+                        .onEnded { _ in dragStart = nil }
+                )
+                .accessibilityLabel("설명 창 크기 조절")
+            ExplainPanel(session: session, onOpenSettings: { showingSettings = true }, onLocate: locate)
+        }
+        .background(Color(uiColor: .systemBackground))
+        .clipShape(UnevenRoundedRectangle(topLeadingRadius: 18, bottomLeadingRadius: wide ? 18 : 0, bottomTrailingRadius: 0, topTrailingRadius: wide ? 0 : 18))
+        .shadow(color: .black.opacity(0.14), radius: 12, x: wide ? -2 : 0, y: wide ? 0 : -2)
     }
 
     /// Takes a tool in hand, remembering the one put down.
@@ -227,6 +331,21 @@ struct ReaderView: View {
             pick(previousTool)
         case .options:
             showingOptions = true
+        }
+    }
+
+    private func openNavigator(_ tab: NavigatorSheet.Tab, query: String = "") {
+        navigatorTab = tab
+        navigatorQuery = query
+        showingNavigator = true
+    }
+
+    private func toggleBookmark() {
+        let page = controller.pageIndex
+        if bookmarks.contains(page) {
+            bookmarks.removeAll { $0 == page }
+        } else {
+            bookmarks = (bookmarks + [page]).sorted()
         }
     }
 
@@ -256,6 +375,8 @@ struct ReaderView: View {
         controller.onPencil = { action in
             pencil(action)
         }
+        bookmarks = BookmarkStore(folder: folder).load()
+        library.touch(doc)
         session.attach(title: doc.title, pdfURL: library.pdfURL(for: doc.id), folder: folder, controller: controller)
         runDemoIfAsked()
     }
@@ -269,21 +390,53 @@ struct ReaderView: View {
         }
     }
 
-    private func addBlankPage() {
+    private func addPage(_ paper: PaperKind) {
         guard let index = controller.currentPageIndex else { return }
         session.close()
         // Everything on disk first, and nothing more written by the old page view: its page numbers are about to be wrong.
         controller.saveAndRetire()
         do {
-            try library.insertBlankPage(in: doc, after: index)
+            try library.insertBlankPage(in: doc, after: index, paper: paper)
             startPage = index + 1
         } catch {
             errorText = error.localizedDescription
             startPage = index
         }
-        // The questions' page numbers changed on disk along with everything else.
+        // The questions' and bookmarks' page numbers changed on disk along with everything else.
         session.attach(title: doc.title, pdfURL: library.pdfURL(for: doc.id), folder: folder, controller: controller)
+        bookmarks = BookmarkStore(folder: folder).load()
         reloadToken = UUID()
+    }
+
+    /// Makes a copy of the document with the handwriting drawn in and offers to send it somewhere.
+    /// For the build server the copy is put in the app's Documents folder instead.
+    private func export(toDocuments: Bool) {
+        guard !exporting else { return }
+        exporting = true
+        controller.save()
+        let pdfURL = library.pdfURL(for: doc.id)
+        let folder = self.folder
+        let title = doc.title
+        let withMarks = showAiMarks
+        Task {
+            let url = await Task.detached(priority: .userInitiated) {
+                Exporter.export(pdfURL: pdfURL, folder: folder, title: title, withMarks: withMarks)
+            }.value
+            exporting = false
+            guard let url else {
+                errorText = "PDF로 내보내지 못했어요."
+                return
+            }
+            if toDocuments {
+                let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                let target = documents.appendingPathComponent("export.pdf")
+                try? FileManager.default.removeItem(at: target)
+                try? FileManager.default.copyItem(at: url, to: target)
+                DebugLog.write("export: written to Documents/export.pdf")
+            } else {
+                exported = ExportedFile(url: url)
+            }
+        }
     }
 
     /// The build server starts the app with these to take pictures of things no one is there to tap.
@@ -292,15 +445,14 @@ struct ReaderView: View {
         let defaults = UserDefaults.standard
         let session = self.session
         let controller = self.controller
+        func later(_ seconds: Double, _ work: @escaping () -> Void) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
+        }
         if arguments.contains("-demoMath") {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                mathDraft = MathDraft(preset: "\\frac{a}{b} = \\sqrt{x^2 + 1}", auto: true)
-            }
+            later(2) { mathDraft = MathDraft(preset: "\\frac{a}{b} = \\sqrt{x^2 + 1}", auto: true) }
         }
         if arguments.contains("-demoAddPage") {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                addBlankPage()
-            }
+            later(2) { addPage(PaperKind(rawValue: defaults.string(forKey: "demoPaper") ?? "") ?? .blank) }
         }
         if arguments.contains("-demoAsk") {
             // A ring drawn with the AI pen round the place given ("-demoAskX 300 -demoAskY 200"), or
@@ -308,9 +460,7 @@ struct ReaderView: View {
             let x = defaults.object(forKey: "demoAskX") == nil ? 130 : defaults.double(forKey: "demoAskX")
             let y = defaults.object(forKey: "demoAskY") == nil ? 88 : defaults.double(forKey: "demoAskY")
             choice.tool = .ai
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                controller.demoMark(center: CGPoint(x: x, y: y), radius: CGSize(width: 86, height: 22))
-            }
+            later(2.5) { controller.demoMark(center: CGPoint(x: x, y: y), radius: CGSize(width: 86, height: 22)) }
         }
         if arguments.contains("-demoFollowUp") {
             // Once the first answer is in, asks something more: the words given, or the first ready-made request.
@@ -326,7 +476,7 @@ struct ReaderView: View {
             }
         }
         if arguments.contains("-demoOpenQuestion") {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            later(2) {
                 if let last = session.questions.last {
                     session.open(last.id)
                     locate(last)
@@ -334,89 +484,82 @@ struct ReaderView: View {
             }
         }
         if arguments.contains("-demoQuestions") {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                showingQuestions = true
-            }
+            later(2) { showingQuestions = true }
+        }
+        if let tool = InkTool(rawValue: defaults.string(forKey: "demoTool") ?? "") {
+            choice.tool = tool
         }
         if arguments.contains("-demoOptions") {
-            choice.tool = .pen
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                showingOptions = true
-            }
+            later(2) { showingOptions = true }
         }
-        if arguments.contains("-demoPages") {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                showingPages = true
-            }
+        if let tab = NavigatorSheet.Tab(rawValue: defaults.string(forKey: "demoNavigator") ?? "") {
+            later(2) { openNavigator(tab, query: defaults.string(forKey: "demoSearch") ?? "") }
+        }
+        if arguments.contains("-demoBookmark") {
+            later(1.5) { if !marked { toggleBookmark() } }
+        }
+        if arguments.contains("-demoShapes") {
+            choice.tool = .shape
+            later(2) { controller.demoShapes() }
+        }
+        if arguments.contains("-demoExport") {
+            later(3) { export(toDocuments: true) }
         }
         // "-demoZoom 2.5" zooms in that many times past fitting the page, to see how sharp ink stays.
         let zoom = defaults.double(forKey: "demoZoom")
         if zoom > 0 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                controller.demoZoom(zoom)
-            }
+            later(1.5) { controller.demoZoom(zoom) }
         }
     }
 }
 
-/// The tool bar: undo and redo, the tools, then the colours of the pen or the highlighter, or a word on
-/// how the tool in hand is used. Touching the tool in hand again opens its settings.
+/// The tool bar: undo and redo, the tools, and a part for the tool in hand, which is the same width
+/// whatever the tool, so that the bar keeps its size and its place. Touching the tool in hand again
+/// opens its settings.
 private struct ToolBar: View {
     @Binding var choice: InkChoice
     @Binding var showingOptions: Bool
+    var darkPaper: Bool
     var canUndo: Bool
     var canRedo: Bool
     var onPick: (InkTool) -> Void
     var onUndo: () -> Void
     var onRedo: () -> Void
 
+    /// The width kept for the tool's own part.
+    private static let room: CGFloat = 232
+
     private func tint(_ tool: InkTool) -> Color {
         tool == .ai ? Color(uiColor: InkChoice.markColor) : Color.accentColor
     }
 
-    private var hint: String? {
-        switch choice.tool {
-        case .ai: return "모르는 부분에 동그라미를 쳐 보세요"
-        case .formula: return "수식을 끌어 옮기고, 길게 눌러 고쳐요"
-        default: return nil
-        }
-    }
-
     private var hasOptions: Bool {
-        choice.tool == .pen || choice.tool == .highlighter || choice.tool == .eraser
+        choice.tool == .pen || choice.tool == .highlighter || choice.tool == .eraser || choice.tool == .shape
     }
 
-    // What does not fit on one line is left out: the hint or the colours, which are in the tool's
-    // settings as well.
+    /// A colour as it will look on the paper.
+    private func shown(_ rgb: UInt32) -> Color {
+        let color = InkChoice.color(rgb)
+        return Color(uiColor: darkPaper ? color.onDarkPaper : color)
+    }
+
+    // Where the whole bar does not fit on one line, the tool's own part is left out; what it holds is
+    // in the tool's settings as well.
     var body: some View {
         ViewThatFits(in: .horizontal) {
-            bar(withExtras: true)
-            bar(withExtras: false)
+            bar(withRoom: true)
+            bar(withRoom: false)
         }
         .popover(isPresented: $showingOptions) {
-            ToolOptions(choice: $choice)
+            ToolOptions(choice: $choice, darkPaper: darkPaper)
         }
     }
 
-    private func bar(withExtras: Bool) -> some View {
-        HStack(spacing: 2) {
-            Button(action: onUndo) {
-                Image(systemName: "arrow.uturn.backward")
-                    .font(.system(size: 17, weight: .medium))
-                    .frame(width: 40, height: 42)
-            }
-            .disabled(!canUndo)
-            .accessibilityLabel("실행 취소")
-            Button(action: onRedo) {
-                Image(systemName: "arrow.uturn.forward")
-                    .font(.system(size: 17, weight: .medium))
-                    .frame(width: 40, height: 42)
-            }
-            .disabled(!canRedo)
-            .accessibilityLabel("다시 실행")
-            Divider()
-                .frame(height: 26)
-                .padding(.horizontal, 4)
+    private func bar(withRoom: Bool) -> some View {
+        HStack(spacing: 1) {
+            step("arrow.uturn.backward", "실행 취소", enabled: canUndo, action: onUndo)
+            step("arrow.uturn.forward", "다시 실행", enabled: canRedo, action: onRedo)
+            rule
             ForEach(InkTool.allCases) { tool in
                 Button {
                     if choice.tool == tool, hasOptions {
@@ -425,72 +568,159 @@ private struct ToolBar: View {
                         onPick(tool)
                     }
                 } label: {
-                    Image(systemName: tool.symbol)
-                        .font(.system(size: 19, weight: .medium))
-                        .frame(width: 44, height: 42)
-                        .foregroundStyle(choice.tool == tool ? tint(tool) : Color.secondary)
-                        .background(choice.tool == tool ? tint(tool).opacity(0.14) : Color.clear, in: Circle())
+                    VStack(spacing: 3) {
+                        Image(systemName: tool.symbol)
+                            .font(.system(size: 18, weight: .medium))
+                            .frame(height: 22)
+                        // The pen and the highlighter wear their colour.
+                        Capsule()
+                            .fill(tool == .pen ? shown(choice.penColor) : tool == .highlighter ? shown(choice.highlighterColor) : Color.clear)
+                            .frame(width: 18, height: 3)
+                    }
+                    .frame(width: 44, height: 42)
+                    .foregroundStyle(choice.tool == tool ? tint(tool) : Color.secondary)
+                    .background(choice.tool == tool ? tint(tool).opacity(0.15) : Color.clear, in: RoundedRectangle(cornerRadius: 12))
                 }
                 .accessibilityLabel(tool.label)
             }
-            if withExtras, choice.tool == .pen || choice.tool == .highlighter {
-                Divider()
-                    .frame(height: 26)
-                    .padding(.horizontal, 6)
-                let colors = choice.tool == .pen ? InkChoice.penColors : InkChoice.highlighterColors
-                let selected = choice.tool == .pen ? choice.penColor : choice.highlighterColor
-                ForEach(colors.indices, id: \.self) { index in
-                    Button {
-                        if choice.tool == .pen { choice.penColor = index } else { choice.highlighterColor = index }
-                    } label: {
-                        Swatch(color: colors[index], selected: index == selected)
-                            .frame(width: 36, height: 42)
-                    }
-                    .accessibilityLabel("색 \(index + 1)")
-                }
-                Button {
-                    showingOptions = true
-                } label: {
-                    Image(systemName: "slider.horizontal.3")
-                        .font(.system(size: 16, weight: .medium))
-                        .frame(width: 40, height: 42)
-                        .foregroundStyle(Color.secondary)
-                }
-                .accessibilityLabel("펜 설정")
-            } else if withExtras, let hint {
-                Text(hint)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .fixedSize()
-                    .padding(.horizontal, 10)
+            if withRoom {
+                rule
+                own
+                    .frame(width: Self.room, height: 42)
             }
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 4)
-        .background(Color(uiColor: .systemBackground), in: Capsule())
-        .shadow(color: .black.opacity(0.14), radius: 8, y: 2)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
+        .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 20))
+        .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.primary.opacity(0.07), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.12), radius: 10, y: 3)
+    }
+
+    private var rule: some View {
+        Rectangle()
+            .fill(Color.primary.opacity(0.12))
+            .frame(width: 1, height: 24)
+            .padding(.horizontal, 6)
+    }
+
+    private func step(_ symbol: String, _ label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 16, weight: .medium))
+                .frame(width: 38, height: 42)
+        }
+        .disabled(!enabled)
+        .accessibilityLabel(label)
+    }
+
+    /// The part of the bar that belongs to the tool in hand.
+    @ViewBuilder
+    private var own: some View {
+        switch choice.tool {
+        case .pen:
+            quick(InkChoice.penPalette, selected: choice.penColor) { choice.penColor = $0 }
+        case .highlighter:
+            quick(InkChoice.highlighterPalette, selected: choice.highlighterColor) { choice.highlighterColor = $0 }
+        case .shape:
+            HStack(spacing: 4) {
+                ForEach(ShapeKind.allCases) { kind in
+                    Button {
+                        choice.shapeKind = kind
+                    } label: {
+                        Image(systemName: kind.symbol)
+                            .font(.system(size: 16, weight: .medium))
+                            .frame(width: 40, height: 34)
+                            .foregroundStyle(choice.shapeKind == kind ? Color.accentColor : Color.secondary)
+                            .background(choice.shapeKind == kind ? Color.accentColor.opacity(0.15) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
+                    }
+                    .accessibilityLabel(kind.label)
+                }
+                Spacer(minLength: 0)
+                more(current: choice.penColor)
+            }
+        case .eraser:
+            Picker("지우개 종류", selection: $choice.eraserKind) {
+                ForEach(EraserKind.allCases) { kind in
+                    Text(kind.label + " 지우개").tag(kind)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 6)
+        case .ai:
+            hint("모르는 곳에 동그라미를 쳐 보세요")
+        case .lasso:
+            hint("둘러서 고른 뒤 끌어 옮겨요")
+        case .formula:
+            hint("수식을 끌어 옮기고, 길게 눌러 고쳐요")
+        }
+    }
+
+    private func hint(_ text: String) -> some View {
+        Text(text)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            .frame(maxWidth: .infinity)
+    }
+
+    /// The first five colours of a palette, and a way to the rest.
+    private func quick(_ palette: [UInt32], selected: UInt32, pick: @escaping (UInt32) -> Void) -> some View {
+        HStack(spacing: 0) {
+            ForEach(palette.prefix(5), id: \.self) { rgb in
+                Button {
+                    pick(rgb)
+                } label: {
+                    Swatch(color: shown(rgb), selected: rgb == selected)
+                        .frame(width: 37, height: 42)
+                }
+                .accessibilityLabel("색 \((palette.firstIndex(of: rgb) ?? 0) + 1)")
+            }
+            Spacer(minLength: 0)
+            more(current: palette.prefix(5).contains(selected) ? nil : selected)
+        }
+    }
+
+    /// Opens the tool's settings. It wears the colour in use when that is not one of the five beside it.
+    private func more(current: UInt32?) -> some View {
+        Button {
+            showingOptions = true
+        } label: {
+            ZStack {
+                if let current {
+                    Swatch(color: shown(current), selected: true)
+                } else {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(Color.secondary)
+                }
+            }
+            .frame(width: 40, height: 42)
+        }
+        .accessibilityLabel("굵기와 색 더 보기")
     }
 }
 
 /// A round colour to pick.
 private struct Swatch: View {
-    let color: UIColor
+    let color: Color
     let selected: Bool
 
     var body: some View {
         Circle()
-            .fill(Color(uiColor: color))
-            .frame(width: 24, height: 24)
-            .overlay(Circle().stroke(Color.primary.opacity(0.15), lineWidth: 1))
+            .fill(color)
+            .frame(width: 23, height: 23)
+            .overlay(Circle().stroke(Color.primary.opacity(0.18), lineWidth: 0.75))
             .padding(4)
             .overlay(Circle().stroke(Color.accentColor, lineWidth: selected ? 2 : 0))
     }
 }
 
-/// The settings of the tool in hand: the kind of pen, how thick, which colour.
+/// The settings of the tool in hand: the kind of pen, how thick, how much it answers to pressure,
+/// which colour.
 private struct ToolOptions: View {
     @Binding var choice: InkChoice
+    var darkPaper: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -505,19 +735,41 @@ private struct ToolOptions: View {
                 Text(choice.penKind.hint)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                WidthRow(widths: InkChoice.penWidths.map { min(18, $0 * 3) }, selection: $choice.penWidth)
-                ColorRow(colors: InkChoice.penColors, selection: $choice.penColor)
+                SliderRow(title: "굵기", value: $choice.penWidth, range: InkChoice.penWidths, shown: String(format: "%.1f", choice.penWidth), line: CGFloat(choice.penWidth))
+                SliderRow(title: "필압", value: $choice.pressure, range: 0...2, shown: "\(Int((choice.pressure * 100).rounded()))%", line: nil)
+                    .disabled(choice.penKind == .ball)
+                    .opacity(choice.penKind == .ball ? 0.4 : 1)
+                Text(choice.penKind == .ball
+                     ? "볼펜은 굵기가 일정해서 필압을 쓰지 않아요."
+                     : "0%면 굵기가 일정하고, 100%가 원래 반응, 그 위로는 힘에 따른 굵기 차이가 더 커져요. 100%가 아닐 때는 획을 다 그은 뒤에 굵기가 맞춰져요.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                ColorGrid(palette: InkChoice.penPalette, selection: $choice.penColor, darkPaper: darkPaper)
             case .highlighter:
-                WidthRow(widths: InkChoice.highlighterWidths.map { min(22, $0) }, selection: $choice.highlighterWidth)
-                ColorRow(colors: InkChoice.highlighterColors, selection: $choice.highlighterColor)
-            case .eraser:
-                Picker("지우개 종류", selection: $choice.eraserKind) {
-                    ForEach(EraserKind.allCases) { kind in
+                SliderRow(title: "굵기", value: $choice.highlighterWidth, range: InkChoice.highlighterWidths, shown: String(format: "%.0f", choice.highlighterWidth), line: CGFloat(choice.highlighterWidth) * 0.8)
+                ColorGrid(palette: InkChoice.highlighterPalette, selection: $choice.highlighterColor, darkPaper: darkPaper)
+            case .shape:
+                Picker("도형", selection: $choice.shapeKind) {
+                    ForEach(ShapeKind.allCases) { kind in
                         Text(kind.label).tag(kind)
                     }
                 }
                 .pickerStyle(.segmented)
-                Text(choice.eraserKind == .stroke ? "닿은 획을 통째로 지워요" : "문지른 자리만 지워요")
+                Text("끌어서 그려요. 직선과 화살표는 가로·세로에 가까우면 반듯하게 맞춰져요.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                SliderRow(title: "굵기", value: $choice.penWidth, range: InkChoice.penWidths, shown: String(format: "%.1f", choice.penWidth), line: CGFloat(choice.penWidth))
+                ColorGrid(palette: InkChoice.penPalette, selection: $choice.penColor, darkPaper: darkPaper)
+            case .eraser:
+                Picker("지우개 종류", selection: $choice.eraserKind) {
+                    ForEach(EraserKind.allCases) { kind in
+                        Text(kind.label + " 지우개").tag(kind)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text(choice.eraserKind == .stroke ? "닿은 획을 통째로 지워요." : "문지른 자리만 지워요.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             default:
@@ -525,139 +777,89 @@ private struct ToolOptions: View {
             }
         }
         .padding(18)
-        .frame(width: 340)
+        .frame(width: 372)
         .presentationCompactAdaptation(.popover)
     }
 }
 
-/// The thicknesses to pick from, each shown as a bar that thick.
-private struct WidthRow: View {
-    /// How tall each bar is drawn, in points.
-    let widths: [CGFloat]
-    @Binding var selection: Int
+/// A named slider with its value beside the name, and for a thickness a line that thick.
+private struct SliderRow: View {
+    let title: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let shown: String
+    /// The height of the sample line, when the slider sets a thickness.
+    let line: CGFloat?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("굵기")
-                .font(.subheadline.weight(.semibold))
-            HStack(spacing: 6) {
-                ForEach(widths.indices, id: \.self) { index in
-                    Button {
-                        selection = index
-                    } label: {
-                        Capsule()
-                            .fill(Color.primary)
-                            .frame(width: 30, height: widths[index])
-                            .frame(maxWidth: .infinity, minHeight: 40)
-                            .background(
-                                index == selection ? Color.accentColor.opacity(0.16) : Color(uiColor: .secondarySystemBackground),
-                                in: RoundedRectangle(cornerRadius: 10)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("굵기 \(index + 1)")
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 10) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                if let line {
+                    Capsule()
+                        .fill(Color.primary)
+                        .frame(width: 54, height: max(1, min(line * 1.6, 20)))
                 }
+                Spacer()
+                Text(shown)
+                    .font(.subheadline.monospacedDigit())
+                    .foregroundStyle(.secondary)
             }
+            .frame(height: 22)
+            Slider(value: $value, in: range)
         }
     }
 }
 
-private struct ColorRow: View {
-    let colors: [UIColor]
-    @Binding var selection: Int
+/// The colours of a palette, and under them a way to pick any other colour.
+private struct ColorGrid: View {
+    let palette: [UInt32]
+    @Binding var selection: UInt32
+    var darkPaper: Bool
+
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 6), count: 9)
+
+    private func shown(_ rgb: UInt32) -> Color {
+        let color = InkChoice.color(rgb)
+        return Color(uiColor: darkPaper ? color.onDarkPaper : color)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("색")
                 .font(.subheadline.weight(.semibold))
-            HStack(spacing: 8) {
-                ForEach(colors.indices, id: \.self) { index in
+            LazyVGrid(columns: columns, spacing: 6) {
+                ForEach(palette, id: \.self) { rgb in
                     Button {
-                        selection = index
+                        selection = rgb
                     } label: {
-                        Swatch(color: colors[index], selected: index == selection)
+                        Swatch(color: shown(rgb), selected: rgb == selection)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("색 \(index + 1)")
+                    .accessibilityLabel("색 \((palette.firstIndex(of: rgb) ?? 0) + 1)")
                 }
             }
+            ColorPicker(
+                "다른 색 고르기",
+                selection: Binding(
+                    get: { Color(uiColor: InkChoice.color(selection)) },
+                    set: { selection = InkChoice.rgb(UIColor($0)) }
+                ),
+                supportsOpacity: false
+            )
+            .font(.subheadline)
         }
     }
 }
 
-/// Every page as a small picture, to jump to one.
-private struct PageNavigator: View {
-    let url: URL
-    let current: Int
-    let onPick: (Int) -> Void
+/// The system's sheet for sending a file somewhere: to Files, to another app, to a printer.
+private struct ActivityView: UIViewControllerRepresentable {
+    let items: [Any]
 
-    @Environment(\.dismiss) private var dismiss
-    @State private var document: PDFDocument?
-
-    private let columns = [GridItem(.adaptive(minimum: 120, maximum: 170), spacing: 18)]
-
-    var body: some View {
-        NavigationStack {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVGrid(columns: columns, spacing: 18) {
-                        ForEach(0..<(document?.pageCount ?? 0), id: \.self) { index in
-                            Button {
-                                onPick(index)
-                                dismiss()
-                            } label: {
-                                PageThumbnail(document: document, index: index, current: index == current)
-                            }
-                            .buttonStyle(.plain)
-                            .id(index)
-                        }
-                    }
-                    .padding(20)
-                }
-                .onChange(of: document?.pageCount) {
-                    proxy.scrollTo(current, anchor: .center)
-                }
-            }
-            .navigationTitle("쪽 이동")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("닫기") { dismiss() }
-                }
-            }
-        }
-        .onAppear {
-            if document == nil { document = PDFDocument(url: url) }
-        }
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
     }
-}
 
-private struct PageThumbnail: View {
-    let document: PDFDocument?
-    let index: Int
-    let current: Bool
-    @State private var picture: UIImage?
-
-    var body: some View {
-        VStack(spacing: 6) {
-            ZStack {
-                Color(uiColor: .secondarySystemBackground)
-                if let picture {
-                    Image(uiImage: picture)
-                        .resizable()
-                        .scaledToFit()
-                }
-            }
-            .aspectRatio(0.72, contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(current ? Color.accentColor : Color.primary.opacity(0.12), lineWidth: current ? 2.5 : 1))
-            Text("\(index + 1)")
-                .font(.caption.weight(current ? .bold : .regular).monospacedDigit())
-                .foregroundStyle(current ? Color.accentColor : Color.secondary)
-        }
-        .task(id: index) {
-            guard picture == nil, let page = document?.page(at: index) else { return }
-            picture = page.thumbnail(of: CGSize(width: 340, height: 480), for: .cropBox)
-        }
-    }
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }

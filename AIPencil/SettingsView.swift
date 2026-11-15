@@ -30,6 +30,7 @@ struct SettingsView: View {
     @AppStorage("theme") private var theme = "system"
     @AppStorage("showAiMarks") private var showAiMarks = true
     @AppStorage("pageLayout") private var layoutMode = PageLayoutMode.vertical
+    @AppStorage("darkPaper") private var darkPaper = true
     @State private var typedKey = ""
     @State private var savedKey = KeyStore.load()
     @State private var checking = false
@@ -202,11 +203,12 @@ struct SettingsView: View {
                     Text(mode.label).tag(mode)
                 }
             }
+            Toggle("어두운 테마에서는 종이도 어둡게", isOn: $darkPaper)
             Toggle("AI 표시 보이기", isOn: $showAiMarks)
         } header: {
             Text("화면")
         } footer: {
-            Text("종이는 어두운 테마에서도 흰색 그대로예요.")
+            Text("종이를 어둡게 하면 흰 종이는 어두운 회색으로, 글자와 필기는 밝게 보여요. 색의 종류는 그대로예요. 내보내는 PDF와 Claude에게 가는 그림은 늘 원래 색이에요.")
         }
     }
 

@@ -2,190 +2,6 @@ import PDFKit
 import PencilKit
 import SwiftUI
 
-/// The tools of the tool bar.
-enum InkTool: String, CaseIterable, Identifiable, Codable {
-    case pen, highlighter, eraser, ai, lasso, formula
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .pen: return "펜"
-        case .highlighter: return "형광펜"
-        case .eraser: return "지우개"
-        case .ai: return "AI 펜"
-        case .lasso: return "올가미"
-        case .formula: return "수식 옮기기"
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .pen: return "pencil.tip"
-        case .highlighter: return "highlighter"
-        case .eraser: return "eraser"
-        case .ai: return "sparkles"
-        case .lasso: return "lasso"
-        case .formula: return "arrow.up.and.down.and.arrow.left.and.right"
-        }
-    }
-}
-
-/// The kinds of pen. They differ in how the line answers to the hand.
-enum PenKind: String, CaseIterable, Identifiable, Codable {
-    case fountain, pen, ball, pencil
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .fountain: return "만년필"
-        case .pen: return "펜"
-        case .ball: return "볼펜"
-        case .pencil: return "연필"
-        }
-    }
-
-    var hint: String {
-        switch self {
-        case .fountain: return "누르는 힘에 따라 굵기가 달라져요"
-        case .pen: return "빠르게 그으면 끝이 가늘어져요"
-        case .ball: return "굵기가 늘 같아요"
-        case .pencil: return "기울이면 넓게 칠해져요"
-        }
-    }
-
-    var ink: PKInkingTool.InkType {
-        switch self {
-        case .fountain: return .fountainPen
-        case .pen: return .pen
-        case .ball: return .monoline
-        case .pencil: return .pencil
-        }
-    }
-}
-
-/// What the eraser takes away.
-enum EraserKind: String, CaseIterable, Identifiable, Codable {
-    case stroke, part
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .stroke: return "획 지우개"
-        case .part: return "부분 지우개"
-        }
-    }
-}
-
-/// What is in the user's hand: a tool, and how each tool is set up.
-struct InkChoice: Equatable, Codable {
-    var tool: InkTool = .pen
-    var penKind = PenKind.fountain
-    var penColor = 0
-    var penWidth = 2
-    var highlighterColor = 0
-    var highlighterWidth = 1
-    var eraserKind = EraserKind.stroke
-
-    static let penColors: [UIColor] = [
-        UIColor(red: 0.11, green: 0.11, blue: 0.12, alpha: 1),
-        UIColor(red: 0.12, green: 0.44, blue: 0.92, alpha: 1),
-        UIColor(red: 0.90, green: 0.28, blue: 0.30, alpha: 1),
-        UIColor(red: 0.13, green: 0.62, blue: 0.38, alpha: 1),
-        UIColor(red: 0.94, green: 0.55, blue: 0.00, alpha: 1),
-        UIColor(red: 0.49, green: 0.30, blue: 1.00, alpha: 1),
-    ]
-    static let highlighterColors: [UIColor] = [
-        UIColor(red: 1.00, green: 0.84, blue: 0.04, alpha: 1),
-        UIColor(red: 0.37, green: 0.86, blue: 0.54, alpha: 1),
-        UIColor(red: 1.00, green: 0.56, blue: 0.72, alpha: 1),
-        UIColor(red: 0.39, green: 0.71, blue: 1.00, alpha: 1),
-        UIColor(red: 1.00, green: 0.66, blue: 0.30, alpha: 1),
-    ]
-    /// Line widths in page points, thinnest first.
-    static let penWidths: [CGFloat] = [1.2, 1.8, 2.6, 3.8, 5.4]
-    static let highlighterWidths: [CGFloat] = [9, 14, 22]
-    /// The colour of the AI pen and of the marks it leaves on the page.
-    static let markColor = UIColor(red: 0x6D / 255.0, green: 0x5B / 255.0, blue: 0xF6 / 255.0, alpha: 1)
-
-    private static func pick<T>(_ list: [T], _ index: Int) -> T {
-        list[min(max(index, 0), list.count - 1)]
-    }
-
-    var penUIColor: UIColor { Self.pick(Self.penColors, penColor) }
-
-    /// The PencilKit tool this choice stands for. The formula tool does not write; while it is chosen the
-    /// canvases are switched off and keep whatever they had.
-    var pencilKitTool: PKTool {
-        switch tool {
-        case .pen, .formula:
-            let ink = penKind.ink
-            let allowed = ink.validWidthRange
-            let width = min(max(Self.pick(Self.penWidths, penWidth), allowed.lowerBound), allowed.upperBound)
-            return PKInkingTool(ink, color: penUIColor, width: width)
-        case .highlighter:
-            return PKInkingTool(.marker, color: Self.pick(Self.highlighterColors, highlighterColor), width: Self.pick(Self.highlighterWidths, highlighterWidth))
-        case .eraser:
-            return eraserKind == .stroke ? PKEraserTool(.vector) : PKEraserTool(.bitmap, width: 16)
-        case .ai:
-            return PKInkingTool(.monoline, color: Self.markColor, width: 2.6)
-        case .lasso:
-            return PKLassoTool()
-        }
-    }
-
-    /// The choice as it was left last time, tool settings and all.
-    static func saved() -> InkChoice {
-        guard let data = UserDefaults.standard.data(forKey: "inkChoice"),
-              var choice = try? JSONDecoder().decode(InkChoice.self, from: data)
-        else { return InkChoice() }
-        // A document opens with something to write with in hand.
-        if choice.tool == .formula || choice.tool == .lasso || choice.tool == .eraser { choice.tool = .pen }
-        return choice
-    }
-
-    func save() {
-        if let data = try? JSONEncoder().encode(self) {
-            UserDefaults.standard.set(data, forKey: "inkChoice")
-        }
-    }
-}
-
-/// How the pages are laid out.
-enum PageLayoutMode: String, CaseIterable, Identifiable {
-    case vertical, twoUp
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .vertical: return "한 쪽씩 보기"
-        case .twoUp: return "두 쪽씩 보기"
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .vertical: return "doc"
-        case .twoUp: return "book"
-        }
-    }
-}
-
-/// What a double tap or a squeeze of the Apple Pencil asks for.
-enum PencilAction {
-    /// The eraser, or back from it.
-    case eraser
-    /// The tool that was in hand before this one.
-    case previous
-    /// The AI pen, or back from it.
-    case ai
-    /// The settings of the tool in hand.
-    case options
-}
-
 /// A PencilKit canvas that remembers which page it lies on.
 final class PageCanvas: PKCanvasView {
     var pageIndex = 0
@@ -193,14 +9,19 @@ final class PageCanvas: PKCanvasView {
     var strokeCount = 0
 }
 
+/// The drag that draws a shape: it begins the moment the page is touched, and remembers where.
+final class ShapeGesture: UILongPressGestureRecognizer {
+    var start = CGPoint.zero
+}
+
 /// A formula on a page: its shape, filled with its colour.
 final class MathView: UIImageView {
     var item: MathItem
 
-    init(item: MathItem, picture: UIImage?, quarterTurns: Int) {
+    init(item: MathItem, picture: UIImage?, quarterTurns: Int, dark: Bool) {
         self.item = item
         super.init(image: picture?.withRenderingMode(.alwaysTemplate))
-        tintColor = item.color
+        tintColor = dark ? item.color.onDarkPaper : item.color
         contentMode = .scaleToFill
         isUserInteractionEnabled = true
         bounds = CGRect(x: 0, y: 0, width: item.width, height: item.height)
@@ -250,6 +71,10 @@ final class MarkBadge: UIButton {
 final class PageOverlay: UIView {
     let canvas = PageCanvas()
     private let markLines = UIView()
+    /// Takes the drags of the shape tool. Hidden, and so out of the way, while any other tool is in hand.
+    let shapeSurface = UIView()
+    /// The shape being drawn, until the hand lets go and it becomes ink.
+    let shapePreview = CAShapeLayer()
     /// How many times finer than the page the canvas draws its ink. PDFKit zooms this view by stretching
     /// it, which on its own would stretch the ink's pixels too and leave the lines soft. So the canvas is
     /// made this many times larger, zoomed in on its own drawing by as much, and shrunk back to the page:
@@ -273,6 +98,13 @@ final class PageOverlay: UIView {
         canvas.backgroundColor = .clear
         canvas.isOpaque = false
         addSubview(canvas)
+        shapeSurface.backgroundColor = .clear
+        shapeSurface.isHidden = true
+        shapePreview.fillColor = nil
+        shapePreview.lineCap = .round
+        shapePreview.lineJoin = .round
+        shapeSurface.layer.addSublayer(shapePreview)
+        addSubview(shapeSurface)
     }
 
     required init?(coder: NSCoder) {
@@ -323,6 +155,7 @@ final class PageOverlay: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         markLines.frame = bounds
+        shapeSurface.frame = bounds
         if bounds.width > 0, bounds.height > 0, canvasFits.size != bounds.size || canvasFits.scale != inkScale {
             canvasFits = (bounds.size, inkScale)
             let larger = CGSize(width: bounds.width * inkScale, height: bounds.height * inkScale)
@@ -415,6 +248,24 @@ final class ReaderController: ObservableObject {
         coordinator?.go(toPage: index)
     }
 
+    /// The document as the page view has it open: for its small pictures and its table of contents.
+    var document: PDFDocument? { coordinator?.pdfView?.document }
+
+    /// Every place in the document where these words stand.
+    func search(_ text: String) -> [SearchHit] {
+        coordinator?.search(text) ?? []
+    }
+
+    /// Goes to a place that was found and marks the words there.
+    func show(_ hit: SearchHit) {
+        coordinator?.show(hit)
+    }
+
+    /// Writes the handwriting of the pages in view to disk now.
+    func save() {
+        coordinator?.saveAll()
+    }
+
     func undo() {
         coordinator?.undoManager?.undo()
     }
@@ -432,6 +283,11 @@ final class ReaderController: ObservableObject {
     func demoZoom(_ factor: Double) {
         coordinator?.demoZoom(factor)
     }
+
+    /// For the build server: one of each shape on the page in view, made the way a drag makes them.
+    func demoShapes() {
+        coordinator?.demoShapes()
+    }
 }
 
 /// The reading and writing surface: PDFKit shows and scrolls the pages, and on every page it lays one
@@ -444,6 +300,8 @@ struct PDFInkView: UIViewRepresentable {
     /// Off: only Apple Pencil writes and fingers scroll. On: fingers write too.
     var fingerDraws: Bool
     var layout: PageLayoutMode
+    /// Pages are shown as dark paper: near-black with light ink.
+    var darkPaper: Bool
     /// The page to show first.
     var startPage: Int
     /// The marks of the AI pen to draw on the pages.
@@ -460,8 +318,10 @@ struct PDFInkView: UIViewRepresentable {
         let view = PDFView()
         view.autoScales = true
         view.pageShadowsEnabled = true
-        view.backgroundColor = .secondarySystemBackground
+        view.backgroundColor = darkPaper ? UIColor(white: 0.05, alpha: 1) : .secondarySystemBackground
+        InkPage.dark = darkPaper
         let coordinator = context.coordinator
+        coordinator.darkPaper = darkPaper
         coordinator.choice = choice
         coordinator.fingerDraws = fingerDraws
         coordinator.apply(marks: marks, active: activeMark)
@@ -473,7 +333,10 @@ struct PDFInkView: UIViewRepresentable {
         view.pageOverlayViewProvider = coordinator
         // Markup mode makes PDFKit pass touches through to the overlays instead of selecting text.
         view.isInMarkupMode = true
-        view.document = PDFDocument(url: url)
+        // The delegate has the document make its pages of our own kind, which can draw themselves dark.
+        let document = PDFDocument(url: url)
+        document?.delegate = coordinator
+        view.document = document
         view.addInteraction(UIPencilInteraction(delegate: coordinator))
         coordinator.watch(view)
         if startPage > 0, let page = view.document?.page(at: startPage) {
@@ -494,7 +357,7 @@ struct PDFInkView: UIViewRepresentable {
         coordinator.stopWatching()
     }
 
-    final class Coordinator: NSObject, PDFPageOverlayViewProvider, PKCanvasViewDelegate, UIContextMenuInteractionDelegate, UIPencilInteractionDelegate {
+    final class Coordinator: NSObject, PDFPageOverlayViewProvider, PDFDocumentDelegate, PKCanvasViewDelegate, UIContextMenuInteractionDelegate, UIPencilInteractionDelegate {
         private let store: DrawingStore
         private let mathStore: MathStore
         private var overlays: [PDFPage: PageOverlay] = [:]
@@ -509,6 +372,7 @@ struct PDFInkView: UIViewRepresentable {
         weak var controller: ReaderController?
         var choice = InkChoice()
         var fingerDraws = false
+        var darkPaper = false
         /// Set when the document's pages are about to be renumbered: nothing more is written from here.
         var retired = false
 
@@ -526,7 +390,7 @@ struct PDFInkView: UIViewRepresentable {
             self.choice = choice
             self.fingerDraws = fingerDraws
             for overlay in overlays.values {
-                configure(overlay.canvas)
+                configure(overlay)
             }
             holdUndoForMarks()
         }
@@ -544,18 +408,33 @@ struct PDFInkView: UIViewRepresentable {
             guard layout != self.layout, let view = pdfView else { return }
             let page = view.currentPage
             self.layout = layout
-            view.displayMode = layout == .twoUp ? .twoUpContinuous : .singlePageContinuous
-            view.displayDirection = .vertical
+            // Turning pages one at a time is PDFKit's page view controller; the other two scroll.
+            let paged = layout == .paged
+            view.displayMode = layout == .twoUp ? .twoUpContinuous : (paged ? .singlePage : .singlePageContinuous)
+            view.displayDirection = paged ? .horizontal : .vertical
             view.displaysAsBook = false
+            view.usePageViewController(paged, withViewOptions: nil)
             view.autoScales = true
             if let page { DispatchQueue.main.async { view.go(to: page) } }
         }
 
-        private func configure(_ canvas: PageCanvas) {
+        private func configure(_ overlay: PageOverlay) {
+            let canvas = overlay.canvas
             canvas.tool = choice.pencilKitTool
             canvas.drawingPolicy = fingerDraws ? .anyInput : .pencilOnly
-            // With the formula tool the canvas steps aside, so that touches reach the formulas under it.
-            canvas.isUserInteractionEnabled = choice.tool != .formula
+            // With the formula tool the canvas steps aside, so that touches reach the formulas under it;
+            // with the shape tool, so that they reach the surface that draws shapes.
+            canvas.isUserInteractionEnabled = choice.tool != .formula && choice.tool != .shape
+            overlay.shapeSurface.isHidden = choice.tool != .shape
+            let pencil = NSNumber(value: UITouch.TouchType.pencil.rawValue)
+            let finger = NSNumber(value: UITouch.TouchType.direct.rawValue)
+            for gesture in overlay.shapeSurface.gestureRecognizers ?? [] {
+                gesture.allowedTouchTypes = fingerDraws ? [pencil, finger] : [pencil]
+            }
+        }
+
+        func classForPage() -> AnyClass {
+            InkPage.self
         }
 
         /// A stroke of the AI pen is taken off the canvas again by code, which the undo history knows
@@ -677,9 +556,14 @@ struct PDFInkView: UIViewRepresentable {
             let overlay = PageOverlay(frame: .zero)
             overlay.inkScale = inkScale
             overlay.quarterTurns = (((page.rotation % 360) + 360) % 360) / 90
+            // On dark paper PencilKit shows ink in its dark-screen colours: black ink white.
+            overlay.overrideUserInterfaceStyle = darkPaper ? .dark : .light
             let canvas = overlay.canvas
             canvas.pageIndex = view.document?.index(for: page) ?? 0
-            configure(canvas)
+            let draw = ShapeGesture(target: self, action: #selector(drawShape(_:)))
+            draw.minimumPressDuration = 0
+            overlay.shapeSurface.addGestureRecognizer(draw)
+            configure(overlay)
             if let saved = store.load(page: canvas.pageIndex) {
                 canvas.drawing = saved
             } else if canvas.pageIndex == 0, ProcessInfo.processInfo.arguments.contains("-demoInk") {
@@ -736,8 +620,116 @@ struct PDFInkView: UIViewRepresentable {
                 }
                 return
             }
+            if choice.reworksPressure, strokes.count == canvas.strokeCount + 1, let stroke = strokes.last {
+                // The line just drawn is given as much thick-and-thin as the pressure setting asks for.
+                // PencilKit has no such setting of its own, so the line is reworked once it is done; the
+                // canvas is changed a moment later, as with the AI pen's strokes.
+                let reworked = Self.rework(stroke, around: choice.penLineWidth, by: CGFloat(choice.pressure))
+                let count = strokes.count
+                canvas.strokeCount = count
+                DispatchQueue.main.async { [weak self, weak canvas] in
+                    guard let self, let canvas, canvas.drawing.strokes.count == count else { return }
+                    var drawing = canvas.drawing
+                    drawing.strokes[count - 1] = reworked
+                    // The history already holds the stroke; this change to it is not a step of its own.
+                    self.undoManager?.disableUndoRegistration()
+                    canvas.drawing = drawing
+                    self.undoManager?.enableUndoRegistration()
+                }
+                return
+            }
             canvas.strokeCount = strokes.count
             store.save(canvas.drawing, page: canvas.pageIndex)
+        }
+
+        /// The same line with its widths moved toward [base] or away from it: [amount] 0 gives one
+        /// width throughout, 1 leaves the line as it is, 2 doubles its swelling and thinning.
+        private static func rework(_ stroke: PKStroke, around base: CGFloat, by amount: CGFloat) -> PKStroke {
+            var points: [PKStrokePoint] = []
+            for point in stroke.path {
+                let width = max(0.3, base + (point.size.width - base) * amount)
+                let height = max(0.3, base + (point.size.height - base) * amount)
+                points.append(PKStrokePoint(
+                    location: point.location, timeOffset: point.timeOffset, size: CGSize(width: width, height: height),
+                    opacity: point.opacity, force: point.force, azimuth: point.azimuth, altitude: point.altitude,
+                    secondaryScale: point.secondaryScale
+                ))
+            }
+            let path = PKStrokePath(controlPoints: points, creationDate: stroke.path.creationDate)
+            return PKStroke(ink: stroke.ink, path: path, transform: stroke.transform, mask: stroke.mask)
+        }
+
+        // MARK: shapes
+
+        /// Dragging with the shape tool: the shape follows the hand, and becomes ink when it lets go.
+        @objc private func drawShape(_ gesture: ShapeGesture) {
+            guard let overlay = gesture.view?.superview as? PageOverlay else { return }
+            let point = gesture.location(in: overlay)
+            let width = choice.penLineWidth
+            switch gesture.state {
+            case .began:
+                gesture.start = point
+            case .changed:
+                let outline = ShapeOutline.points(choice.shapeKind, from: gesture.start, to: point, lineWidth: width)
+                guard let first = outline.first else { return }
+                let path = UIBezierPath()
+                path.move(to: first)
+                for next in outline.dropFirst() { path.addLine(to: next) }
+                overlay.shapePreview.path = path.cgPath
+                overlay.shapePreview.lineWidth = width
+                overlay.shapePreview.strokeColor = (darkPaper ? choice.penUIColor.onDarkPaper : choice.penUIColor).cgColor
+            case .ended:
+                overlay.shapePreview.path = nil
+                guard hypot(point.x - gesture.start.x, point.y - gesture.start.y) > 4 else { return }
+                let outline = ShapeOutline.points(choice.shapeKind, from: gesture.start, to: point, lineWidth: width)
+                guard outline.count > 1 else { return }
+                var points: [PKStrokePoint] = []
+                for (index, place) in outline.enumerated() {
+                    points.append(PKStrokePoint(
+                        location: place, timeOffset: Double(index) * 0.004, size: CGSize(width: width, height: width),
+                        opacity: 1, force: 1, azimuth: 0, altitude: CGFloat.pi / 2
+                    ))
+                }
+                let stroke = PKStroke(ink: PKInk(.monoline, color: choice.penUIColor), path: PKStrokePath(controlPoints: points, creationDate: Date()))
+                var drawing = overlay.canvas.drawing
+                let before = drawing
+                drawing.strokes.append(stroke)
+                setDrawing(drawing, on: overlay.canvas, undoingTo: before)
+            default:
+                overlay.shapePreview.path = nil
+            }
+        }
+
+        /// Changes a canvas's drawing by code in a way that can be undone and redone.
+        private func setDrawing(_ new: PKDrawing, on canvas: PageCanvas, undoingTo old: PKDrawing) {
+            undoManager?.registerUndo(withTarget: self) { [weak canvas] me in
+                guard let canvas else { return }
+                me.setDrawing(old, on: canvas, undoingTo: new)
+            }
+            canvas.drawing = new
+        }
+
+        // MARK: searching
+
+        func search(_ text: String) -> [SearchHit] {
+            guard let document = pdfView?.document else { return [] }
+            var hits: [SearchHit] = []
+            for selection in document.findString(text, withOptions: [.caseInsensitive]).prefix(300) {
+                guard let page = selection.pages.first else { continue }
+                // The whole line the words stand in, to show where that is.
+                let line = selection.copy() as? PDFSelection ?? selection
+                line.extendForLineBoundaries()
+                let snippet = (line.string ?? selection.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                hits.append(SearchHit(page: document.index(for: page), snippet: snippet, selection: selection))
+            }
+            return hits
+        }
+
+        func show(_ hit: SearchHit) {
+            guard let view = pdfView else { return }
+            hit.selection.color = UIColor.systemYellow.withAlphaComponent(0.6)
+            view.highlightedSelections = [hit.selection]
+            view.go(to: hit.selection)
         }
 
         // MARK: UIPencilInteractionDelegate
@@ -828,7 +820,8 @@ struct PDFInkView: UIViewRepresentable {
         /// panel opens and takes room from the pages.
         func reveal(_ rect: CGRect, onPage index: Int) {
             guard let view = pdfView, let page = view.document?.page(at: index) else { return }
-            guard let overlay = overlays[page] else {
+            // (Turning pages one at a time, each page fills the view; going to it is all there is to do.)
+            guard let overlay = overlays[page], layout != .paged else {
                 view.go(to: page)
                 return
             }
@@ -852,6 +845,32 @@ struct PDFInkView: UIViewRepresentable {
             return nil
         }
 
+        func demoShapes() {
+            guard let view = pdfView, let page = view.currentPage, let overlay = overlays[page] else { return }
+            let width = choice.penLineWidth
+            let drags: [(ShapeKind, CGPoint, CGPoint)] = [
+                (.line, CGPoint(x: 70, y: 470), CGPoint(x: 250, y: 474)),
+                (.arrow, CGPoint(x: 300, y: 520), CGPoint(x: 500, y: 450)),
+                (.rect, CGPoint(x: 70, y: 520), CGPoint(x: 250, y: 620)),
+                (.ellipse, CGPoint(x: 300, y: 560), CGPoint(x: 500, y: 660)),
+            ]
+            for (kind, from, to) in drags {
+                let outline = ShapeOutline.points(kind, from: from, to: to, lineWidth: width)
+                var points: [PKStrokePoint] = []
+                for (index, place) in outline.enumerated() {
+                    points.append(PKStrokePoint(
+                        location: place, timeOffset: Double(index) * 0.004, size: CGSize(width: width, height: width),
+                        opacity: 1, force: 1, azimuth: 0, altitude: CGFloat.pi / 2
+                    ))
+                }
+                let stroke = PKStroke(ink: PKInk(.monoline, color: choice.penUIColor), path: PKStrokePath(controlPoints: points, creationDate: Date()))
+                var drawing = overlay.canvas.drawing
+                let before = drawing
+                drawing.strokes.append(stroke)
+                setDrawing(drawing, on: overlay.canvas, undoingTo: before)
+            }
+        }
+
         func demoZoom(_ factor: Double) {
             guard let view = pdfView else { return }
             view.scaleFactor = view.scaleFactorForSizeToFit * CGFloat(factor)
@@ -873,7 +892,7 @@ struct PDFInkView: UIViewRepresentable {
         @discardableResult
         private func install(_ item: MathItem, in overlay: PageOverlay) -> MathView {
             let picture = UIImage(contentsOfFile: mathStore.imageURL(item.image).path)
-            let view = MathView(item: item, picture: picture, quarterTurns: overlay.quarterTurns)
+            let view = MathView(item: item, picture: picture, quarterTurns: overlay.quarterTurns, dark: darkPaper)
             view.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(dragMath(_:))))
             view.addInteraction(UIContextMenuInteraction(delegate: self))
             overlay.add(view)

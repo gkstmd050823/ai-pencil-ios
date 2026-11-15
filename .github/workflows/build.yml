@@ -77,6 +77,9 @@ jobs:
           shot 3-formula 16 -sample -demoInk -demoMath
           shot 4-blank-page-added 12 -sample -demoAddPage
           shot 5-new-note 10 -demoNote
+          shot 5-paper-sheet 8 -demoPapers
+          shot 5-new-note-lined 10 -demoNote -demoPaper lined
+          shot 5-new-note-cornell 10 -demoNote -demoPaper cornell
           shot 6-shelf 8
 
           # The AI pen. Without a key and without the stand-in server it can only say that a key is needed.
@@ -106,13 +109,29 @@ jobs:
           shot 18-web-search 24 -sample -demoAsk -demoAskX 300 -demoAskY 600 -demoFollowUp -demoFollowUpText "웹에서 검색해서 알려줘" $API
           shot 19-web-search-again 20 -sample -demoOpenQuestion -demoFollowUp -demoFollowUpText "왜 그런가요" $API
           shot 20-tool-options 10 -sample -demoOptions
-          shot 21-pages 10 -sample -demoPages
+          # The bar must be the same size and in the same place whatever tool is in hand.
+          shot 20-tool-eraser 8 -sample -demoTool eraser
+          shot 20-tool-lasso 8 -sample -demoTool lasso
+          shot 20-shapes 12 -sample -demoShapes
+          shot 21-pages 10 -sample -demoBookmark -demoNavigator pages
+          shot 21-bookmarks 10 -sample -demoNavigator bookmarks
+          shot 21-search 10 -sample -demoNavigator search -demoSearch 손실
+          shot 21-outline 10 -sample -demoNavigator outline
           shot 22-two-up 10 -sample -pageLayout twoUp
+          shot 23-paged 12 -sample -pageLayout paged
+          shot 23-paged-ask 18 -sample -pageLayout paged -demoAsk -demoAskX 300 -demoAskY 200 $API
+          # The handwriting drawn into a copy of the PDF; its first page is turned into a picture to look at.
+          shot 26-export 14 -sample -demoExport
+          cp "$DATA/Documents/export.pdf" export.pdf 2>/dev/null || true
+          sips -s format png export.pdf --out screenshots/26-export-page1.png >/dev/null 2>&1 || true
+          shot 27-shelf-folders 8 -demoShelf
           # A formula typed on a page that is shown turned has to stand upright.
           shot 24-formula-turned 16 -demoImport tricky.pdf -demoPage 1 -demoMath
           shot 16-settings 8 -demoSettings
           xcrun simctl ui "$UDID" appearance dark
           shot 17-dark 12 -sample -demoOpenQuestion
+          shot 17-dark-white-paper 10 -sample -darkPaper NO
+          shot 17-dark-shelf 8
           xcrun simctl ui "$UDID" appearance light
           kill $MOCK || true
           # The home screen, for the app's icon.
@@ -159,6 +178,7 @@ jobs:
             mock-dump
             mock.log
             app-debug.log
+            export.pdf
           if-no-files-found: ignore
           retention-days: 14
 
