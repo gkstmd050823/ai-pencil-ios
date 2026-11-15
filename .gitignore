@@ -9,6 +9,7 @@ Payload/
 *.ipa
 *.log
 screenshots/
+mock-dump/
 
 # macOS and Xcode clutter
 .DS_Store

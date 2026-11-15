@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<link rel="stylesheet" href="katex.min.css">
+<style>
+  :root {
+    --text: #1b1b1f; --muted: #6a6a72; --line: #e2e0db; --code-bg: #f3f2ee;
+    --accent: #5b4be0; --bubble: #ece9ff; --bubble-text: #21166e; --note-bg: #f6f5f2;
+  }
+  :root.dark {
+    --text: #ececf0; --muted: #a2a2ac; --line: #303036; --code-bg: #26262a;
+    --accent: #afa2ff; --bubble: #372e86; --bubble-text: #e7e2ff; --note-bg: #232326;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; background: transparent; }
+  body {
+    color: var(--text); font-family: system-ui, -apple-system, "Noto Sans KR", sans-serif;
+    font-size: 15.5px; line-height: 1.68; padding: 4px 18px 24px; word-break: keep-all; overflow-wrap: anywhere;
+  }
+  .turn { margin: 0; }
+  .turn.user {
+    margin: 22px 0 14px auto; width: fit-content; max-width: 88%;
+    background: var(--bubble); color: var(--bubble-text);
+    padding: 9px 14px; border-radius: 18px 18px 4px 18px; font-size: 14.5px; line-height: 1.5; white-space: pre-wrap;
+  }
+  .turn.assistant > :first-child { margin-top: 6px; }
+  p { margin: 0.72em 0; }
+  h1, h2, h3, h4 { line-height: 1.35; margin: 1.25em 0 0.45em; letter-spacing: -0.01em; }
+  h1 { font-size: 1.22em; } h2 { font-size: 1.14em; } h3 { font-size: 1.06em; } h4 { font-size: 1em; }
+  ul, ol { padding-left: 1.35em; margin: 0.6em 0; }
+  li { margin: 0.28em 0; }
+  li > p { margin: 0.3em 0; }
+  strong { font-weight: 650; }
+  a { color: var(--accent); }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 1.2em 0; }
+  blockquote { margin: 0.8em 0; padding: 0.1em 0 0.1em 0.9em; border-left: 3px solid var(--line); color: var(--muted); }
+  code { font-family: ui-monospace, "Roboto Mono", monospace; font-size: 0.88em; background: var(--code-bg); padding: 0.12em 0.36em; border-radius: 5px; }
+  pre { background: var(--code-bg); padding: 12px 14px; border-radius: 12px; overflow-x: auto; line-height: 1.5; }
+  pre code { background: none; padding: 0; font-size: 0.85em; }
+  .table-wrap { overflow-x: auto; margin: 0.8em 0; }
+  table { border-collapse: collapse; font-size: 0.93em; min-width: 60%; }
+  th, td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--code-bg); font-weight: 600; }
+  .katex { font-size: 1.06em; }
+  .katex-display { margin: 0.9em 0; overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+  .katex-display > .katex { white-space: nowrap; }
+  .caret::after {
+    content: ""; display: inline-block; width: 7px; height: 1.05em; margin-left: 2px; vertical-align: -0.16em;
+    border-radius: 2px; background: var(--accent); animation: blink 1s steps(2, start) infinite;
+  }
+  @keyframes blink { to { visibility: hidden; } }
+  .notice { margin-top: 18px; padding: 9px 12px; border-radius: 10px; background: var(--note-bg); color: var(--muted); font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div id="turns"></div>
+<div id="notice" class="notice" style="display:none"></div>
+<script src="marked.umd.js"></script>
+<script src="katex.min.js"></script>
+<script>
+(function () {
+  var turnsEl = document.getElementById('turns');
+  var noticeEl = document.getElementById('notice');
+
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  // Raw HTML in the answer is shown as text, never run.
+  marked.use({
+    gfm: true, breaks: false,
+    renderer: { html: function (t) { return esc(typeof t === 'string' ? t : t.text); } },
+    // Links may only lead to web pages, and images (which could not load anyway) become their caption.
+    walkTokens: function (token) {
+      if (token.type === 'link' && !/^https?:\/\//i.test(token.href || '')) token.href = '#';
+      if (token.type === 'image') { token.type = 'text'; token.raw = token.text || ''; delete token.tokens; }
+    }
+  });
+
+  // Code first so math inside code is left alone, then display math, then inline math.
+  var TOKENS = /(```[\s\S]*?(?:```|$))|(`[^`\n]*`)|(\$\$[\s\S]+?\$\$)|(\\\[[\s\S]+?\\\])|(\\\([\s\S]+?\\\))|(\$(?!\s)(?:\\.|[^$\\\n])+?\$(?!\d))/g;
+
+  function renderMath(tex, display) {
+    try {
+      return katex.renderToString(tex, { displayMode: display, throwOnError: false, strict: 'ignore', output: 'html' });
+    } catch (e) {
+      return '<code>' + esc(tex) + '</code>';
+    }
+  }
+
+  // While an answer is still arriving, a formula may be half written. Hold it back until it closes.
+  function trimOpenMath(src) {
+    var stripped = src.replace(/```[\s\S]*?(?:```|$)/g, '').replace(/`[^`\n]*`/g, '');
+    var count = (stripped.match(/\$\$/g) || []).length;
+    if (count % 2 === 1) return src.slice(0, src.lastIndexOf('$$'));
+    var open = src.lastIndexOf('\\[');
+    if (open >= 0 && src.indexOf('\\]', open) < 0) return src.slice(0, open);
+    return src;
+  }
+
+  function renderMarkdown(src, streaming) {
+    if (streaming) src = trimOpenMath(src);
+    var math = [];
+    var text = src.replace(TOKENS, function (m, fence, code, dd, bracket, paren, inline) {
+      if (fence || code) return m;
+      var tex, display;
+      if (dd) { tex = dd.slice(2, -2); display = true; }
+      else if (bracket) { tex = bracket.slice(2, -2); display = true; }
+      else if (paren) { tex = paren.slice(2, -2); display = false; }
+      else {
+        if (/\s$/.test(inline.slice(0, -1))) return m;
+        tex = inline.slice(1, -1); display = false;
+      }
+      math.push(renderMath(tex.trim(), display));
+      return (display ? '\n\nMATHTOKEN' : 'MATHTOKEN') + (math.length - 1) + (display ? 'X\n\n' : 'X');
+    });
+    var html = marked.parse(text);
+    html = html.replace(/<p>MATHTOKEN(\d+)X<\/p>/g, function (_, i) { return math[+i]; });
+    html = html.replace(/MATHTOKEN(\d+)X/g, function (_, i) { return math[+i]; });
+    return html.replace(/<table>/g, '<div class="table-wrap"><table>').replace(/<\/table>/g, '</table></div>');
+  }
+
+  var lastCount = 0;
+
+  window.render = function (state) {
+    document.documentElement.classList.toggle('dark', !!state.dark);
+    var turns = state.turns || [];
+    while (turnsEl.children.length > turns.length) turnsEl.removeChild(turnsEl.lastChild);
+    for (var i = 0; i < turns.length; i++) {
+      var t = turns[i];
+      var node = turnsEl.children[i];
+      if (!node) { node = document.createElement('div'); turnsEl.appendChild(node); }
+      var streamingThis = !!state.streaming && i === turns.length - 1 && !t.user;
+      var key = (t.user ? 'u' : 'a') + (streamingThis ? 's' : 'd') + t.text;
+      if (node._key === key) continue;
+      node._key = key;
+      node.className = 'turn ' + (t.user ? 'user' : 'assistant');
+      if (t.user) {
+        node.textContent = t.text;
+      } else {
+        node.innerHTML = renderMarkdown(t.text, streamingThis);
+        if (streamingThis) {
+          var last = node.lastElementChild;
+          while (last && last.lastElementChild && /^(UL|OL|LI|BLOCKQUOTE)$/.test(last.tagName)) last = last.lastElementChild;
+          (last || node).classList.add('caret');
+        }
+      }
+    }
+    if (state.notice) { noticeEl.style.display = ''; noticeEl.textContent = state.notice; }
+    else noticeEl.style.display = 'none';
+
+    // A new question in the thread scrolls into view; the answer itself is read from its top, not chased.
+    // A saved explanation opens at its beginning.
+    if (lastCount === 0) {
+      window.scrollTo(0, 0);
+    } else if (turns.length > lastCount) {
+      var target = null;
+      for (var j = turns.length - 1; j >= lastCount; j--) if (turns[j].user) { target = turnsEl.children[j]; break; }
+      if (target) window.scrollTo({ top: target.offsetTop - 8, behavior: 'smooth' });
+    }
+    lastCount = turns.length;
+  };
+
+  window.reset = function () { turnsEl.innerHTML = ''; lastCount = 0; window.scrollTo(0, 0); };
+})();
+</script>
+</body>
+</html>

@@ -2,7 +2,9 @@
 #
 # What comes out (Actions > the run > Artifacts):
 #   AIPencil-ipa      an unsigned IPA. Sideloadly on Windows signs it with your Apple ID and installs it.
-#   screenshots       the app running in an iPad simulator, to see what a change looks like.
+#   screenshots       the app running in an iPad simulator, to see what a change looks like; with them what
+#                     the stand-in Claude server received (mock.log, the pictures in mock-dump) and the app's
+#                     own notes (app-debug.log).
 #   logs              the full build logs, when something went wrong.
 name: iPad build
 
@@ -74,6 +76,36 @@ jobs:
           shot 4-blank-page-added 12 -sample -demoAddPage
           shot 5-new-note 10 -demoNote
           shot 6-shelf 8
+
+          # The AI pen. Without a key and without the stand-in server it can only say that a key is needed.
+          shot 7-ask-no-key 12 -sample -demoAsk
+          # A stand-in for the Claude API on this machine, so the rest can be tried without a key. It
+          # prints what the app sent and keeps the pictures that came with each question.
+          python3 tools/mock_claude.py --host 127.0.0.1 --port 8787 --dump mock-dump --delay 0.004 --think 0.3 > mock.log 2>&1 &
+          MOCK=$!
+          API="-apiBase http://127.0.0.1:8787"
+          shot 8-ask 16 -sample -demoAsk $API
+          shot 9-follow-up 20 -sample -demoAsk -demoAskX 300 -demoAskY 330 -demoFollowUp $API
+          shot 10-marks-reloaded 10 -sample
+          shot 11-marks-hidden 10 -sample -showAiMarks NO
+          shot 12-question-list 10 -sample -demoQuestions
+          shot 13-wide 16 -sample -demoAsk -demoAskX 380 -demoAskY 520 -demoWide YES $API
+          # Pages that are turned or cropped: the mark in the pictures sent has to sit where it sits on screen.
+          DATA=$(xcrun simctl get_app_container "$UDID" app.aipencil.ios data)
+          mkdir -p "$DATA/Documents"
+          cp tools/tricky.pdf "$DATA/Documents/tricky.pdf"
+          shot 14-ask-turned-page 18 -demoImport tricky.pdf -demoPage 1 -demoAsk -demoAskX 754 -demoAskY 130 $API
+          shot 15-ask-cropped-page 18 -demoImport tricky.pdf -demoPage 4 -demoAsk -demoAskX 100 -demoAskY 36 $API
+          shot 16-settings 8 -demoSettings
+          xcrun simctl ui "$UDID" appearance dark
+          shot 17-dark 12 -sample -demoOpenQuestion
+          xcrun simctl ui "$UDID" appearance light
+          kill $MOCK || true
+          cp "$DATA/Documents/debug.log" app-debug.log 2>/dev/null || true
+          echo "---- what the stand-in server received ----"
+          cat mock.log || true
+          echo "---- the app's own notes ----"
+          cat app-debug.log || true
           xcrun simctl shutdown "$UDID" || true
 
       - name: Build for the iPad (unsigned)
@@ -104,7 +136,11 @@ jobs:
         if: always()
         with:
           name: screenshots
-          path: screenshots
+          path: |
+            screenshots
+            mock-dump
+            mock.log
+            app-debug.log
           if-no-files-found: ignore
           retention-days: 14
 

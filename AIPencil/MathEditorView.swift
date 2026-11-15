@@ -35,7 +35,7 @@ final class MathTypesetter: NSObject, ObservableObject, WKNavigationDelegate {
         webView.scrollView.backgroundColor = .clear
         webView.scrollView.isScrollEnabled = false
         webView.navigationDelegate = self
-        if let folder = Bundle.main.url(forResource: "MathWeb", withExtension: nil) {
+        if let folder = Bundle.main.url(forResource: "Web", withExtension: nil) {
             webView.loadFileURL(folder.appendingPathComponent("math.html"), allowingReadAccessTo: folder)
         }
     }

@@ -7,8 +7,8 @@ options:
   createIntermediateGroups: true
 settings:
   base:
-    MARKETING_VERSION: "0.2.0"
-    CURRENT_PROJECT_VERSION: "2"
+    MARKETING_VERSION: "0.3.0"
+    CURRENT_PROJECT_VERSION: "3"
     SWIFT_VERSION: "5.0"
 targets:
   AIPencil:
@@ -17,9 +17,10 @@ targets:
     sources:
       - path: AIPencil
         excludes:
-          - "MathWeb/**"
-      # KaTeX and its fonts go into the app as a folder, kept whole: the stylesheet finds the fonts by relative path.
-      - path: AIPencil/MathWeb
+          - "Web/**"
+      # The pages shown in web views (formula preview, explanations) with KaTeX, marked and the fonts go
+      # into the app as a folder, kept whole: the stylesheet finds the fonts by relative path.
+      - path: AIPencil/Web
         type: folder
     info:
       path: AIPencil/Info.plist
@@ -48,6 +49,10 @@ targets:
         LSSupportsOpeningDocumentsInPlace: false
         UIFileSharingEnabled: true
         ITSAppUsesNonExemptEncryption: false
+        # Plain HTTP only to this machine or the local network: a debug build can be pointed at the
+        # stand-in server in tools/. A release build only ever talks to api.anthropic.com, over HTTPS.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.aipencil.ios

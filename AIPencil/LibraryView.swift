@@ -7,6 +7,7 @@ struct LibraryView: View {
     @State private var path: [Doc] = []
     @State private var importing = false
     @State private var errorText: String?
+    @State private var showingSettings = false
     @State private var ranDemo = false
 
     private let columns = [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 22)]
@@ -39,6 +40,13 @@ struct LibraryView: View {
             }
             .navigationTitle("문서")
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        showingSettings = true
+                    } label: {
+                        Label("설정", systemImage: "gearshape")
+                    }
+                }
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
                         Button {
@@ -87,6 +95,9 @@ struct LibraryView: View {
                 errorText = error.localizedDescription
             }
         }
+        .sheet(isPresented: $showingSettings) {
+            SettingsView()
+        }
         .alert("하지 못했어요", isPresented: Binding(get: { errorText != nil }, set: { if !$0 { errorText = nil } })) {
             Button("확인", role: .cancel) {}
         } message: {
@@ -102,7 +113,8 @@ struct LibraryView: View {
                 .foregroundStyle(.tint)
             Text("읽다가 막히면 동그라미")
                 .font(.title2.bold())
-            Text("PDF를 가져오거나 빈 노트를 만들어 애플 펜슬로 필기해 보세요.")
+            Text("PDF를 가져와 필기하다가, 모르는 부분에 AI 펜으로 동그라미를 치면 바로 설명해 줘요.")
+                .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
             Button {
                 importing = true
@@ -127,7 +139,8 @@ struct LibraryView: View {
     }
 
     /// The build server starts the app with these to take pictures without anyone tapping: "-sample" opens
-    /// the bundled sample (imported once), "-demoNote" makes a blank notebook and opens it.
+    /// the bundled sample (imported once), "-demoNote" makes a blank notebook and opens it, "-demoImport
+    /// name.pdf" opens a file the server put in the app's Documents folder, "-demoSettings" shows the settings.
     private func runDemoIfAsked() {
         guard !ranDemo, path.isEmpty else { return }
         ranDemo = true
@@ -141,6 +154,16 @@ struct LibraryView: View {
             }
         } else if arguments.contains("-demoNote") {
             newNote()
+        } else if let name = UserDefaults.standard.string(forKey: "demoImport") {
+            let title = (name as NSString).deletingPathExtension
+            let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            if let existing = library.docs.first(where: { $0.title == title }) {
+                path = [existing]
+            } else if let doc = try? library.importPDF(from: documents.appendingPathComponent(name), title: title) {
+                path = [doc]
+            }
+        } else if arguments.contains("-demoSettings") {
+            showingSettings = true
         }
     }
 }

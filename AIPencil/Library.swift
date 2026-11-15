@@ -23,7 +23,8 @@ enum ImportError: LocalizedError {
 }
 
 /// The documents kept by the app. Each one has a folder of its own under Documents/docs holding a copy of
-/// the PDF, the handwriting of every page and its typed formulas. Used from the main thread only.
+/// the PDF, the handwriting of every page, its typed formulas and the questions asked about it. Used from
+/// the main thread only.
 final class Library: ObservableObject {
     @Published private(set) var docs: [Doc] = []
 
@@ -118,6 +119,7 @@ final class Library: ObservableObject {
         _ = try FileManager.default.replaceItemAt(url, withItemAt: edited)
         DrawingStore(folder: folder(for: doc.id)).shiftPages(from: index + 1, pageCount: before)
         MathStore(folder: folder(for: doc.id)).shiftPages(from: index + 1)
+        QuestionStore(folder: folder(for: doc.id)).shiftPages(from: index + 1)
         if let at = docs.firstIndex(where: { $0.id == doc.id }) {
             docs[at].pageCount = before + 1
             save()
