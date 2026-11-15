@@ -29,9 +29,26 @@ enum Paper {
     private static let ruled: CGFloat = 28.35
     private static let square: CGFloat = 14.17
 
-    /// One page of this paper as PDF data. [turned] is how the page will be shown turned, in degrees; the
-    /// lines are drawn for the size before turning.
+    private static var made: [String: Data] = [:]
+    private static let lock = NSLock()
+
+    /// One page of this paper as PDF data. A page of a kind and size is drawn once and kept: a notebook
+    /// has many pages of the same paper, and they are put together each time it is opened.
     static func data(_ kind: PaperKind, size: CGSize = a4) -> Data {
+        let fit = CGSize(width: max(size.width, 72), height: max(size.height, 72))
+        let key = "\(kind.rawValue) \(fit.width) \(fit.height)"
+        lock.lock()
+        let kept = made[key]
+        lock.unlock()
+        if let kept { return kept }
+        let data = draw(kind, size: fit)
+        lock.lock()
+        made[key] = data
+        lock.unlock()
+        return data
+    }
+
+    private static func draw(_ kind: PaperKind, size: CGSize) -> Data {
         let bounds = CGRect(origin: .zero, size: size)
         return UIGraphicsPDFRenderer(bounds: bounds).pdfData { context in
             context.beginPage()
@@ -96,9 +113,12 @@ enum Paper {
         }
     }
 
-    /// One page of this paper, ready to go into a document.
-    static func page(_ kind: PaperKind, size: CGSize = a4) -> PDFPage? {
-        PDFDocument(data: data(kind, size: size))?.page(at: 0)
+    /// One page of this paper, ready to go into a document. With [darkens] it is of the kind that can be
+    /// shown as dark paper.
+    static func page(_ kind: PaperKind, size: CGSize = a4, darkens: Bool = false) -> PDFPage? {
+        guard let document = PDFDocument(data: data(kind, size: size)) else { return nil }
+        if darkens { document.delegate = InkPageMaker.shared }
+        return document.page(at: 0)
     }
 
     /// A small picture of the paper, for choosing one.

@@ -99,7 +99,7 @@ enum AskCapture {
     }
 
     static func capture(_ input: CaptureInput) -> Capture? {
-        guard let document = PDFDocument(url: input.pdfURL), let page = document.page(at: input.page) else { return nil }
+        guard let document = DocFile.open(input.pdfURL), let page = document.page(at: input.page) else { return nil }
         let shown = shape(of: page)
         let pageSize = shown.size
         let whole = CGRect(origin: .zero, size: pageSize)
@@ -227,7 +227,7 @@ enum DocText {
     /// The text of every page. Reading a long document takes a while, so the result is kept beside the
     /// document and used again as long as the number of pages is the same.
     static func load(pdfURL: URL, folder: URL) -> [String] {
-        guard let document = PDFDocument(url: pdfURL) else { return [] }
+        guard let document = DocFile.open(pdfURL) else { return [] }
         let cache = folder.appendingPathComponent("text.json")
         if let data = try? Data(contentsOf: cache), let saved = try? JSONDecoder().decode(Saved.self, from: data),
            saved.pageCount == document.pageCount {

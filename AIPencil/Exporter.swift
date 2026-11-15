@@ -18,7 +18,7 @@ private final class InkStamp: PDFAnnotation {
 /// as fine as the page.
 enum Exporter {
     static func export(pdfURL: URL, folder: URL, title: String, withMarks: Bool) -> URL? {
-        guard let document = PDFDocument(url: pdfURL), document.pageCount > 0 else { return nil }
+        guard let document = DocFile.open(pdfURL), document.pageCount > 0 else { return nil }
         let drawings = DrawingStore(folder: folder)
         let mathStore = MathStore(folder: folder)
         let math = mathStore.load()

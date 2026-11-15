@@ -334,9 +334,7 @@ struct PDFInkView: UIViewRepresentable {
         // Markup mode makes PDFKit pass touches through to the overlays instead of selecting text.
         view.isInMarkupMode = true
         // The delegate has the document make its pages of our own kind, which can draw themselves dark.
-        let document = PDFDocument(url: url)
-        document?.delegate = coordinator
-        view.document = document
+        view.document = DocFile.open(url, delegate: coordinator)
         view.addInteraction(UIPencilInteraction(delegate: coordinator))
         coordinator.watch(view)
         if startPage > 0, let page = view.document?.page(at: startPage) {
