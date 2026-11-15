@@ -287,7 +287,22 @@ enum Exporter {
             }
             page.addAnnotation(stamp)
         }
-        return document.write(to: url)
+        var options: [PDFDocumentWriteOption: Any] = [:]
+        if document.isEncrypted {
+            // Left to itself PDFKit carries the old lock into the new file, where no password fits it any
+            // more. So the copy is locked afresh the way the original was: open to read without a password,
+            // with the same things held back (printing, copying), under an owner's password nobody has.
+            options[.ownerPasswordOption] = UUID().uuidString
+            options[.accessPermissionsOption] = NSNumber(value: document.accessPermissions.rawValue)
+        }
+        guard document.write(to: url, withOptions: options.isEmpty ? nil : options) else { return false }
+        // A copy that does not open is worse than none.
+        guard let check = PDFDocument(url: url), !check.isLocked, check.pageCount == document.pageCount else {
+            DebugLog.write("export: the copy written anew does not open; given up")
+            try? FileManager.default.removeItem(at: url)
+            return false
+        }
+        return true
     }
 
     /// A formula's shape filled with its colour, as a picture with clear paper round the letters.
