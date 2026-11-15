@@ -2,26 +2,72 @@ import PDFKit
 import PencilKit
 import SwiftUI
 
-/// A PencilKit canvas that remembers which page it lies on.
-final class PageCanvas: PKCanvasView {
-    var pageIndex = 0
+/// The writing tools of the tool bar.
+enum InkTool: String, CaseIterable, Identifiable {
+    case pen, highlighter, eraser, lasso
 
-    // The tool palette shows for the canvas that is first responder, and a view can only become that once
-    // it is in a window; PDFKit adds the overlay to its page some time after handing it over.
-    override func didMoveToWindow() {
-        super.didMoveToWindow()
-        if window != nil {
-            becomeFirstResponder()
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .pen: return "펜"
+        case .highlighter: return "형광펜"
+        case .eraser: return "지우개"
+        case .lasso: return "올가미"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .pen: return "pencil.tip"
+        case .highlighter: return "highlighter"
+        case .eraser: return "eraser"
+        case .lasso: return "lasso"
         }
     }
 }
 
+/// What is in the user's hand: a tool, and for the pen and the highlighter a colour.
+struct InkChoice: Equatable {
+    var tool: InkTool = .pen
+    var penColor = 0
+    var highlighterColor = 0
+
+    static let penColors: [UIColor] = [
+        UIColor(red: 0.11, green: 0.11, blue: 0.12, alpha: 1),
+        UIColor(red: 0.12, green: 0.44, blue: 0.92, alpha: 1),
+        UIColor(red: 0.90, green: 0.28, blue: 0.30, alpha: 1),
+    ]
+    static let highlighterColors: [UIColor] = [
+        UIColor(red: 1.00, green: 0.84, blue: 0.04, alpha: 1),
+        UIColor(red: 0.37, green: 0.86, blue: 0.54, alpha: 1),
+        UIColor(red: 1.00, green: 0.56, blue: 0.72, alpha: 1),
+    ]
+
+    /// The PencilKit tool this choice stands for. Widths are in page points.
+    var pencilKitTool: PKTool {
+        switch tool {
+        case .pen: return PKInkingTool(.pen, color: Self.penColors[penColor], width: 2.2)
+        case .highlighter: return PKInkingTool(.marker, color: Self.highlighterColors[highlighterColor], width: 14)
+        case .eraser: return PKEraserTool(.vector)
+        case .lasso: return PKLassoTool()
+        }
+    }
+}
+
+/// A PencilKit canvas that remembers which page it lies on.
+final class PageCanvas: PKCanvasView {
+    var pageIndex = 0
+}
+
 /// The reading and writing surface: PDFKit shows and scrolls the pages, and on every page it lays one
 /// PencilKit canvas (iPadOS 16's page overlay) that takes the handwriting. PDFKit sizes each canvas to its
-/// page and zooms it with the page, so a drawing is stored in the page's own coordinates.
+/// page and zooms it with the page, so a point on a canvas is a point of the page, measured from the page's
+/// top-left corner (checked on the build server with a ring drawn round a heading).
 struct PDFInkView: UIViewRepresentable {
     let url: URL
     let store: DrawingStore
+    var choice: InkChoice
     /// Off: only Apple Pencil writes and fingers scroll. On: fingers write too.
     var fingerDraws: Bool
 
@@ -36,17 +82,18 @@ struct PDFInkView: UIViewRepresentable {
         view.displayDirection = .vertical
         view.pageShadowsEnabled = true
         view.backgroundColor = .secondarySystemBackground
+        context.coordinator.choice = choice
+        context.coordinator.fingerDraws = fingerDraws
         // The provider has to be in place before the document, or the first pages get no overlay.
         view.pageOverlayViewProvider = context.coordinator
         // Markup mode makes PDFKit pass touches through to the overlays instead of selecting text.
         view.isInMarkupMode = true
-        context.coordinator.fingerDraws = fingerDraws
         view.document = PDFDocument(url: url)
         return view
     }
 
     func updateUIView(_ view: PDFView, context: Context) {
-        context.coordinator.setFingerDraws(fingerDraws)
+        context.coordinator.apply(choice: choice, fingerDraws: fingerDraws)
     }
 
     static func dismantleUIView(_ view: PDFView, coordinator: Coordinator) {
@@ -56,20 +103,25 @@ struct PDFInkView: UIViewRepresentable {
     final class Coordinator: NSObject, PDFPageOverlayViewProvider, PKCanvasViewDelegate {
         private let store: DrawingStore
         private var canvases: [PDFPage: PageCanvas] = [:]
-        /// The system's floating palette of pens, eraser, lasso and ruler.
-        private let toolPicker = PKToolPicker()
+        var choice = InkChoice()
         var fingerDraws = false
 
         init(store: DrawingStore) {
             self.store = store
         }
 
-        func setFingerDraws(_ on: Bool) {
-            guard on != fingerDraws else { return }
-            fingerDraws = on
+        func apply(choice: InkChoice, fingerDraws: Bool) {
+            guard choice != self.choice || fingerDraws != self.fingerDraws else { return }
+            self.choice = choice
+            self.fingerDraws = fingerDraws
             for canvas in canvases.values {
-                canvas.drawingPolicy = on ? .anyInput : .pencilOnly
+                configure(canvas)
             }
+        }
+
+        private func configure(_ canvas: PageCanvas) {
+            canvas.tool = choice.pencilKitTool
+            canvas.drawingPolicy = fingerDraws ? .anyInput : .pencilOnly
         }
 
         func saveAll() {
@@ -86,15 +138,13 @@ struct PDFInkView: UIViewRepresentable {
             canvas.pageIndex = view.document?.index(for: page) ?? 0
             canvas.backgroundColor = .clear
             canvas.isOpaque = false
-            canvas.drawingPolicy = fingerDraws ? .anyInput : .pencilOnly
+            configure(canvas)
             if let saved = store.load(page: canvas.pageIndex) {
                 canvas.drawing = saved
             } else if canvas.pageIndex == 0, ProcessInfo.processInfo.arguments.contains("-demoInk") {
                 canvas.drawing = Self.demoDrawing()
             }
             canvas.delegate = self
-            toolPicker.addObserver(canvas)
-            toolPicker.setVisible(true, forFirstResponder: canvas)
             canvases[page] = canvas
             return canvas
         }
@@ -102,7 +152,6 @@ struct PDFInkView: UIViewRepresentable {
         func pdfView(_ pdfView: PDFView, willEndDisplayingOverlayView overlayView: UIView, for page: PDFPage) {
             guard let canvas = overlayView as? PageCanvas else { return }
             store.save(canvas.drawing, page: canvas.pageIndex)
-            toolPicker.removeObserver(canvas)
             canvases[page] = nil
         }
 
