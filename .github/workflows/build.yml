@@ -108,7 +108,6 @@ jobs:
           shot 20-tool-options 10 -sample -demoOptions
           shot 21-pages 10 -sample -demoPages
           shot 22-two-up 10 -sample -pageLayout twoUp
-          shot 23-sideways 10 -sample -pageLayout horizontal
           # A formula typed on a page that is shown turned has to stand upright.
           shot 24-formula-turned 16 -demoImport tricky.pdf -demoPage 1 -demoMath
           shot 16-settings 8 -demoSettings

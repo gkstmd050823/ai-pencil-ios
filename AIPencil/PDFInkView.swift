@@ -155,22 +155,20 @@ struct InkChoice: Equatable, Codable {
 
 /// How the pages are laid out.
 enum PageLayoutMode: String, CaseIterable, Identifiable {
-    case vertical, horizontal, twoUp
+    case vertical, twoUp
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
-        case .vertical: return "세로로 넘기기"
-        case .horizontal: return "가로로 넘기기"
+        case .vertical: return "한 쪽씩 보기"
         case .twoUp: return "두 쪽씩 보기"
         }
     }
 
     var symbol: String {
         switch self {
-        case .vertical: return "arrow.up.and.down"
-        case .horizontal: return "arrow.left.and.right"
+        case .vertical: return "doc"
         case .twoUp: return "book"
         }
     }
@@ -547,7 +545,7 @@ struct PDFInkView: UIViewRepresentable {
             let page = view.currentPage
             self.layout = layout
             view.displayMode = layout == .twoUp ? .twoUpContinuous : .singlePageContinuous
-            view.displayDirection = layout == .horizontal ? .horizontal : .vertical
+            view.displayDirection = .vertical
             view.displaysAsBook = false
             view.autoScales = true
             if let page { DispatchQueue.main.async { view.go(to: page) } }
@@ -764,11 +762,12 @@ struct PDFInkView: UIViewRepresentable {
             case "options": action = .options
             case "off": action = nil
             default:
+                // (A shortcut the user tied to the gesture is run by the system; nothing is added to it.)
                 switch system {
-                case .ignore: action = nil
+                case .switchEraser: action = .eraser
                 case .switchPrevious: action = .previous
                 case .showColorPalette, .showInkAttributes, .showContextualPalette: action = .options
-                default: action = .eraser
+                default: action = nil
                 }
             }
             if let action { controller?.onPencil?(action) }

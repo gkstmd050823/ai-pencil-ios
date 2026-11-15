@@ -197,7 +197,7 @@ struct SettingsView: View {
                 Text("어둡게").tag("dark")
             }
             .pickerStyle(.segmented)
-            Picker("쪽 넘기기", selection: $layoutMode) {
+            Picker("쪽 보기", selection: $layoutMode) {
                 ForEach(PageLayoutMode.allCases) { mode in
                     Text(mode.label).tag(mode)
                 }

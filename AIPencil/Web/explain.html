@@ -57,12 +57,14 @@
 <body>
 <div id="turns"></div>
 <div id="notice" class="notice" style="display:none"></div>
+<div id="room"></div>
 <script src="marked.umd.js"></script>
 <script src="katex.min.js"></script>
 <script>
 (function () {
   var turnsEl = document.getElementById('turns');
   var noticeEl = document.getElementById('notice');
+  var roomEl = document.getElementById('room');
 
   function esc(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -151,6 +153,19 @@
     if (state.notice) { noticeEl.style.display = ''; noticeEl.textContent = state.notice; }
     else noticeEl.style.display = 'none';
 
+    // Room under the latest question asked here, enough for it to be brought to the top of the panel:
+    // its answer then arrives in view under it, however short the answer still is. A conversation that
+    // was only opened, not added to, gets none.
+    roomEl.style.height = '0px';
+    if (lastCount > 0) {
+      var asked = null;
+      for (var k = turns.length - 1; k >= 0; k--) if (turns[k].user) { asked = turnsEl.children[k]; break; }
+      if (asked) {
+        var under = document.documentElement.scrollHeight - asked.offsetTop;
+        roomEl.style.height = Math.max(0, window.innerHeight - under - 8) + 'px';
+      }
+    }
+
     // A new question in the thread scrolls into view; the answer itself is read from its top, not chased.
     // A saved explanation opens at its beginning.
     if (lastCount === 0) {
@@ -163,7 +178,7 @@
     lastCount = turns.length;
   };
 
-  window.reset = function () { turnsEl.innerHTML = ''; lastCount = 0; window.scrollTo(0, 0); };
+  window.reset = function () { turnsEl.innerHTML = ''; roomEl.style.height = '0px'; lastCount = 0; window.scrollTo(0, 0); };
 })();
 </script>
 </body>
