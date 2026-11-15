@@ -20,7 +20,7 @@ concurrency:
 jobs:
   build:
     runs-on: macos-26
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -142,6 +142,12 @@ jobs:
           shot 26-packed-ask 18 -demoImport packed.pdf -demoAsk $API
           shot 26-export-packed 14 -demoImport packed.pdf -demoExport
           exported export-packed
+          # A file that opens without a password but is encrypted against changes, as handouts often are. It
+          # cannot be added to, so this is the other way out: PDFKit writes the document anew.
+          cp tools/locked.pdf "$DATA/Documents/locked.pdf"
+          shot 26-locked-ask 18 -demoImport locked.pdf -demoAsk $API
+          shot 26-export-locked 14 -demoImport locked.pdf -demoExport
+          exported export-locked
           # A ruled notebook with a page added: the first page's lines are the file's, the second's the export's.
           shot 26-export-note 14 -demoNote -demoPaper lined -demoAddPage -demoExport
           exported export-note
@@ -202,6 +208,7 @@ jobs:
             export.pdf
             export-turned.pdf
             export-packed.pdf
+            export-locked.pdf
             export-note.pdf
           if-no-files-found: ignore
           retention-days: 14
