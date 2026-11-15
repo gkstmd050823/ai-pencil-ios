@@ -15,6 +15,13 @@ private struct ExportedFile: Identifiable {
     let url: URL
 }
 
+/// A request to show the navigator: which of its tabs, and for the search, with which words.
+private struct NavigatorRequest: Identifiable {
+    let id = UUID()
+    var tab: NavigatorSheet.Tab
+    var query = ""
+}
+
 /// One open document: the tool bar, under it the pages with handwriting, formulas and marks on top, and
 /// beside or below them the explanation of a mark when one is open.
 struct ReaderView: View {
@@ -44,9 +51,7 @@ struct ReaderView: View {
     @State private var errorText: String?
     @State private var showingSettings = false
     @State private var showingQuestions = false
-    @State private var showingNavigator = false
-    @State private var navigatorTab = NavigatorSheet.Tab.pages
-    @State private var navigatorQuery = ""
+    @State private var navigator: NavigatorRequest?
     @State private var showingOptions = false
     @State private var exporting = false
     @State private var exported: ExportedFile?
@@ -137,8 +142,8 @@ struct ReaderView: View {
                 locate(question)
             }
         }
-        .sheet(isPresented: $showingNavigator) {
-            NavigatorSheet(controller: controller, bookmarks: $bookmarks, tab: navigatorTab, query: navigatorQuery)
+        .sheet(item: $navigator) { request in
+            NavigatorSheet(controller: controller, bookmarks: $bookmarks, tab: request.tab, query: request.query)
         }
         .sheet(item: $exported) { file in
             ActivityView(items: [file.url])
@@ -335,9 +340,7 @@ struct ReaderView: View {
     }
 
     private func openNavigator(_ tab: NavigatorSheet.Tab, query: String = "") {
-        navigatorTab = tab
-        navigatorQuery = query
-        showingNavigator = true
+        navigator = NavigatorRequest(tab: tab, query: query)
     }
 
     private func toggleBookmark() {

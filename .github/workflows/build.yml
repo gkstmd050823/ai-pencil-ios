@@ -124,6 +124,9 @@ jobs:
           shot 26-export 14 -sample -demoExport
           cp "$DATA/Documents/export.pdf" export.pdf 2>/dev/null || true
           sips -s format png export.pdf --out screenshots/26-export-page1.png >/dev/null 2>&1 || true
+          # The same, for a document with pages that are shown turned.
+          shot 26-export-turned 14 -demoImport tricky.pdf -demoExport
+          cp "$DATA/Documents/export.pdf" export-turned.pdf 2>/dev/null || true
           shot 27-shelf-folders 8 -demoShelf
           # A formula typed on a page that is shown turned has to stand upright.
           shot 24-formula-turned 16 -demoImport tricky.pdf -demoPage 1 -demoMath
@@ -179,6 +182,7 @@ jobs:
             mock.log
             app-debug.log
             export.pdf
+            export-turned.pdf
           if-no-files-found: ignore
           retention-days: 14
 

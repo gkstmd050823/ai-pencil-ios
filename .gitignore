@@ -11,6 +11,7 @@ Payload/
 screenshots/
 mock-dump/
 export.pdf
+export-turned.pdf
 
 # macOS and Xcode clutter
 .DS_Store
