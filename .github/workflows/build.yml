@@ -149,6 +149,8 @@ jobs:
           shot 16-settings 8 -demoSettings
           xcrun simctl ui "$UDID" appearance dark
           shot 17-dark 12 -sample -demoOpenQuestion
+          # A page added in the app has to turn into dark paper like the file's own pages.
+          shot 17-dark-added-page 10 -sample -demoPage 1
           shot 17-dark-white-paper 10 -sample -darkPaper NO
           shot 17-dark-shelf 8
           xcrun simctl ui "$UDID" appearance light

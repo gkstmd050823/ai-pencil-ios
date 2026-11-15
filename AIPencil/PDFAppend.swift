@@ -1171,7 +1171,9 @@ enum PDFAppend {
                 out.append(contentsOf: PDFAppend.ascii("\nendstream\nendobj\n"))
             } else {
                 let listed = offsets.keys.sorted()
-                out.append(contentsOf: PDFAppend.ascii("xref\n"))
+                // Object 0 heads the list of free numbers. Saying so first is what other writers do, and
+                // some readers take a table that does not start at 0 for one that is numbered wrongly.
+                out.append(contentsOf: PDFAppend.ascii("xref\n0 1\n0000000000 65535 f \n"))
                 var i = 0
                 while i < listed.count {
                     var j = i
