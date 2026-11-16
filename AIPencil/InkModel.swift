@@ -50,7 +50,7 @@ enum PenKind: String, CaseIterable, Identifiable, Codable {
     var hint: String {
         switch self {
         case .fountain: return "누르는 힘에 따라 쓰는 동안 굵기가 달라져요"
-        case .pen: return "빠르게 그으면 끝이 가늘어져요"
+        case .pen: return "힘을 주면 조금 굵어져요"
         case .ball: return "힘을 주어도 굵기가 늘 같아요"
         case .pencil: return "누르면 진해지고, 기울이면 넓게 칠해져요"
         }
@@ -112,6 +112,10 @@ struct InkChoice: Equatable, Codable {
     var penColor: UInt32 = 0x1C1C1F
     /// The pen's line width in page points.
     var penWidth = 2.6
+    /// For the app's own pen. How much pressure changes the line's width, from 0 (not at all) to 1; and
+    /// how far a shaky line is steadied, from 0 (the line goes exactly where the pen goes) to 1.
+    var penSense = 0.5
+    var penSteady = 0.25
     var highlighterColor: UInt32 = 0xFFD60A
     var highlighterWidth = 14.0
     var eraserKind = EraserKind.stroke
@@ -139,6 +143,8 @@ struct InkChoice: Equatable, Codable {
         penKind = read(.penKind, penKind)
         penColor = read(.penColor, penColor)
         penWidth = read(.penWidth, penWidth)
+        penSense = read(.penSense, penSense)
+        penSteady = read(.penSteady, penSteady)
         highlighterColor = read(.highlighterColor, highlighterColor)
         highlighterWidth = read(.highlighterWidth, highlighterWidth)
         eraserKind = read(.eraserKind, eraserKind)
@@ -189,6 +195,22 @@ struct InkChoice: Equatable, Codable {
     var penLineWidth: CGFloat {
         let allowed = penKind.ink.validWidthRange
         return min(max(CGFloat(penWidth), allowed.lowerBound), allowed.upperBound)
+    }
+
+    /// Whether the pen in hand is the app's own, given that the app's own pen is switched on. The pencil
+    /// stays PencilKit's: its grain is PencilKit's to draw.
+    func usesAppPen(_ on: Bool) -> Bool {
+        on && tool == .pen && penKind != .pencil
+    }
+
+    /// How much the app's own pen answers to pressure, by the kind of pen: the fountain pen as much as
+    /// is set, the plain pen a little, the ballpoint not at all.
+    var appPenSense: CGFloat {
+        switch penKind {
+        case .fountain: return CGFloat(penSense)
+        case .pen: return CGFloat(penSense) * 0.4
+        case .ball, .pencil: return 0
+        }
     }
 
     /// Whether the tool in hand is put down by itself once it has been used.

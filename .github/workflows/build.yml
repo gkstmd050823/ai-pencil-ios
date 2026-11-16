@@ -79,6 +79,12 @@ jobs:
           # both ways zoomed in much further, and both ways on a page that is one scanned picture.
           shot 2-reader-soft 12 -sample -demoInk -sharpPages NO
           shot 2-reader-zoomed-soft 14 -sample -demoInk -demoZoom 2.5 -sharpPages NO
+          # The app's own pen: a shaky line as the hand made it and the same line steadied, both pressed
+          # harder in the middle. First as the shapes shown while writing, then as the handwriting they become.
+          shot 3-pen-shapes 9 -sample -demoPage 5 -demoPen -demoHoldPreviews
+          shot 3-pen-written 10 -sample -demoPage 5
+          shot 3-pen-written-zoomed 12 -sample -demoPage 5 -demoZoom 2.5
+          shot 3-pen-written-canvas 10 -sample -demoPage 5 -sharpPages NO
           shot 2-reader-zoom6 14 -sample -demoInk -demoZoom 6
           shot 2-reader-zoom6-soft 14 -sample -demoInk -demoZoom 6 -sharpPages NO
           shot 2-reader-zoom12 14 -sample -demoInk -demoZoom 12

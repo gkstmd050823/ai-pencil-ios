@@ -32,6 +32,7 @@ struct ReaderView: View {
     @AppStorage("showAiMarks") private var showAiMarks = true
     @AppStorage("pageLayout") private var layoutMode = PageLayoutMode.vertical
     @AppStorage("darkPaper") private var darkPaper = true
+    @AppStorage("appPen") private var appPen = true
     /// How much of the screen the explanation takes: of its width beside the pages, of its height below them.
     @AppStorage("panelShare") private var panelShare = 0.44
     @State private var choice = InkChoice.saved()
@@ -230,7 +231,7 @@ struct ReaderView: View {
     private var pages: some View {
         VStack(spacing: 0) {
             ToolBar(
-                choice: $choice, showingOptions: $showingOptions, darkPaper: showsDark,
+                choice: $choice, showingOptions: $showingOptions, darkPaper: showsDark, appPen: appPen,
                 canUndo: controller.canUndo, canRedo: controller.canRedo, questions: answered,
                 onPick: pick, onUndo: controller.undo, onRedo: controller.redo,
                 onQuestions: { showingQuestions = true }, onClearPage: controller.clearPage
@@ -246,6 +247,7 @@ struct ReaderView: View {
                 mathStore: mathStore,
                 choice: choice,
                 fingerDraws: fingerDraws,
+                appPen: appPen,
                 layout: layoutMode,
                 darkPaper: showsDark,
                 startPage: startPage,
@@ -518,6 +520,9 @@ struct ReaderView: View {
         // The eraser's settings, said outright so that one launch's does not carry into the next.
         if defaults.object(forKey: "demoEraserAuto") != nil { choice.eraserAuto = defaults.bool(forKey: "demoEraserAuto") }
         if defaults.object(forKey: "demoHighlighterOnly") != nil { choice.eraserHighlighterOnly = defaults.bool(forKey: "demoHighlighterOnly") }
+        if arguments.contains("-demoPen") {
+            later(2.5) { controller.demoPen() }
+        }
         if arguments.contains("-demoEraseMark") {
             // The eraser drawn down through the ring round the sample's heading.
             later(3) { controller.demoErase(from: CGPoint(x: 130, y: 50), to: CGPoint(x: 130, y: 130)) }
@@ -557,6 +562,7 @@ private struct ToolBar: View {
     @Binding var choice: InkChoice
     @Binding var showingOptions: Bool
     var darkPaper: Bool
+    var appPen: Bool
     var canUndo: Bool
     var canRedo: Bool
     /// How many questions the document has, shown beside the AI pen.
@@ -592,7 +598,7 @@ private struct ToolBar: View {
             bar(withRoom: false)
         }
         .popover(isPresented: $showingOptions) {
-            ToolOptions(choice: $choice, darkPaper: darkPaper) {
+            ToolOptions(choice: $choice, darkPaper: darkPaper, appPen: appPen) {
                 showingOptions = false
                 onClearPage()
             }
@@ -788,6 +794,7 @@ private struct Swatch: View {
 private struct ToolOptions: View {
     @Binding var choice: InkChoice
     var darkPaper: Bool
+    var appPen: Bool
     var onClearPage: () -> Void
 
     private var eraserHint: String {
@@ -815,6 +822,17 @@ private struct ToolOptions: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 SliderRow(title: "굵기", value: $choice.penWidth, range: InkChoice.penWidths, shown: String(format: "%.1f", choice.penWidth), line: CGFloat(choice.penWidth))
+                if choice.usesAppPen(appPen) {
+                    // The app's own pen: these two are worked into the line while it is being written.
+                    SliderRow(title: "필압 감도", value: $choice.penSense, range: 0...1, shown: "\(Int((choice.penSense * 100).rounded()))%", line: nil)
+                        .disabled(choice.penKind != .fountain)
+                        .opacity(choice.penKind != .fountain ? 0.4 : 1)
+                    SliderRow(title: "획 안정화", value: $choice.penSteady, range: 0...1, shown: "\(Int((choice.penSteady * 100).rounded()))%", line: nil)
+                    Text("필압 감도는 만년필에서 누르는 힘이 굵기를 얼마나 바꿀지, 획 안정화는 손떨림을 얼마나 펴 줄지예요. 안정화를 높이면 선이 펜을 조금 늦게 따라와요.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 ColorGrid(palette: InkChoice.penPalette, selection: $choice.penColor, darkPaper: darkPaper)
             case .highlighter:
                 SliderRow(title: "굵기", value: $choice.highlighterWidth, range: InkChoice.highlighterWidths, shown: String(format: "%.0f", choice.highlighterWidth), line: CGFloat(choice.highlighterWidth) * 0.8)

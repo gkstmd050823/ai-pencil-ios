@@ -35,6 +35,8 @@ struct NavigatorSheet: View {
     @State private var hits: [SearchHit] = []
     @State private var searchedFor = ""
     @State private var outline: [OutlineEntry] = []
+    /// Draws the small pictures of the pages, from a copy of the document of its own.
+    @State private var thumbnails: ThumbnailSource?
     @FocusState private var typing: Bool
 
     private let columns = [GridItem(.adaptive(minimum: 120, maximum: 170), spacing: 18)]
@@ -74,6 +76,9 @@ struct NavigatorSheet: View {
             }
         }
         .onAppear {
+            if thumbnails == nil, let url = controller.pdfURL {
+                thumbnails = ThumbnailSource(url: url)
+            }
             if let document = controller.document, let root = document.outlineRoot, outline.isEmpty {
                 var list: [OutlineEntry] = []
                 Self.flatten(root, level: 0, document: document, into: &list)
@@ -108,7 +113,7 @@ struct NavigatorSheet: View {
                             go(index)
                         } label: {
                             PageThumbnail(
-                                document: controller.document, index: index,
+                                source: thumbnails, index: index,
                                 current: index == controller.pageIndex, marked: bookmarks.contains(index)
                             )
                         }
@@ -286,7 +291,7 @@ struct NavigatorSheet: View {
 
 /// A page as a small picture, with its number under it.
 struct PageThumbnail: View {
-    let document: PDFDocument?
+    let source: ThumbnailSource?
     let index: Int
     let current: Bool
     var marked = false
@@ -319,12 +324,17 @@ struct PageThumbnail: View {
                 .font(.caption.weight(current ? .bold : .regular).monospacedDigit())
                 .foregroundStyle(current ? Color.accentColor : Color.secondary)
         }
-        .task(id: index) {
-            guard picture == nil, let page = document?.page(at: index) else { return }
+        .task(id: "\(index) \(source == nil)") {
+            guard picture == nil, let source else { return }
             // Drawn off the main thread: a grid of pages scrolling by asks for many of these at once.
-            picture = await Task.detached(priority: .userInitiated) {
-                page.thumbnail(of: CGSize(width: 340, height: 480), for: .cropBox)
-            }.value
+            // One that has scrolled out of the grid before its turn came is not drawn.
+            let wanted = Ticket()
+            let number = wanted.current
+            picture = await withTaskCancellationHandler {
+                await source.picture(of: index, size: CGSize(width: 340, height: 480)) { wanted.current == number }
+            } onCancel: {
+                wanted.next()
+            }
         }
     }
 }

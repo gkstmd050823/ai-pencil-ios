@@ -85,6 +85,28 @@ final class TouchTests: XCTestCase {
         start(["-demoTool", "shape", "-demoHighlighterOnly", "NO", "-demoEraserAuto", "NO"])
         drag(from: (350, 620), to: (520, 720))
         shot("35-touch-shape")
+
+        // The app's own pen: three lines one after another without a pause, then a look once it has paused.
+        start(["-demoTool", "pen"])
+        drag(from: (60, 760), to: (300, 772))
+        place(60, 790).press(forDuration: 0.15, thenDragTo: place(300, 800), withVelocity: .fast, thenHoldForDuration: 0.05)
+        place(60, 815).press(forDuration: 0.15, thenDragTo: place(300, 808), withVelocity: .fast, thenHoldForDuration: 0.05)
+        shot("36-touch-own-pen-just-written")
+        sleep(2)
+        shot("36-touch-own-pen-settled")
+        // Undo takes the last of them back.
+        let undoPen = app.buttons["실행 취소"]
+        if undoPen.waitForExistence(timeout: 3), undoPen.isEnabled {
+            undoPen.tap()
+            sleep(2)
+        }
+        shot("36-touch-own-pen-undone")
+
+        // The same with PencilKit's pen, which the setting falls back to.
+        start(["-demoTool", "pen", "-appPen", "NO"])
+        drag(from: (330, 770), to: (540, 800))
+        sleep(1)
+        shot("37-touch-pencilkit-pen")
         app.terminate()
     }
 }

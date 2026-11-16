@@ -32,6 +32,9 @@ struct SettingsView: View {
     @AppStorage("pageLayout") private var layoutMode = PageLayoutMode.vertical
     @AppStorage("darkPaper") private var darkPaper = true
     @AppStorage("sharpPages") private var sharpPages = true
+    @AppStorage("appPen") private var appPen = true
+    @State private var diagnosticsCopied = false
+    @State private var diagnosticsCleared = 0
     @State private var typedKey = ""
     @State private var savedKey = KeyStore.load()
     @State private var checking = false
@@ -49,6 +52,7 @@ struct SettingsView: View {
                 askingSection
                 writingSection
                 lookSection
+                diagnosticsSection
                 Section {
                     HStack {
                         Text("버전")
@@ -174,6 +178,7 @@ struct SettingsView: View {
     private var writingSection: some View {
         Section {
             Toggle("손가락으로도 필기", isOn: $fingerDraws)
+            Toggle("앱 자체 펜으로 쓰기", isOn: $appPen)
             Picker("펜슬 두 번 탭", selection: $pencilTap) {
                 ForEach(PencilChoice.all) { item in
                     Text(item.label).tag(item.id)
@@ -187,8 +192,47 @@ struct SettingsView: View {
         } header: {
             Text("필기")
         } footer: {
-            Text("손가락 필기를 끄면 애플 펜슬로만 쓰고 손가락으로는 화면을 움직여요. 두 번 탭은 애플 펜슬 2세대와 프로에서, 꽉 쥐기는 프로에서 돼요. 누르는 힘에 따라 굵기가 달라지게 하려면 펜 종류를 만년필로 고르세요(펜을 한 번 더 누르면 나오는 설정).")
+            Text("손가락 필기를 끄면 애플 펜슬로만 쓰고 손가락으로는 화면을 움직여요. 두 번 탭은 애플 펜슬 2세대와 프로에서, 꽉 쥐기는 프로에서 돼요. 누르는 힘에 따라 굵기가 달라지게 하려면 펜 종류를 만년필로 고르세요(펜을 한 번 더 누르면 나오는 설정).\n\n\"앱 자체 펜\"을 켜면 펜(연필 제외)의 선을 앱이 직접 그려요. 펜 설정에 필압 감도와 획 안정화가 생기고, 쓴 선이 화면 해상도로 보여요. 끄면 애플의 필기 엔진이 그리는 예전 방식으로 돌아가요. 펜이 손을 따라오는 느낌이 예전만 못하면 꺼 보세요.")
         }
+    }
+
+    /// What has gone wrong on this iPad, counted, with a way to copy it out.
+    private var diagnosticsSection: some View {
+        let diagnostics = Diagnostics.shared
+        return Section {
+            HStack {
+                Text("화면에 떠 있다가 끝난 실행")
+                Spacer()
+                Text("\(diagnostics.cutShort)회")
+                    .foregroundStyle(.secondary)
+            }
+            HStack {
+                Text("메모리 부족 경고")
+                Spacer()
+                Text("\(diagnostics.memoryWarnings)회")
+                    .foregroundStyle(.secondary)
+            }
+            HStack {
+                Text("시스템이 알려 준 충돌")
+                Spacer()
+                Text("\(diagnostics.crashes)건")
+                    .foregroundStyle(.secondary)
+            }
+            Button(diagnosticsCopied ? "복사했어요" : "진단 정보 복사") {
+                UIPasteboard.general.string = diagnostics.report
+                diagnosticsCopied = true
+            }
+            Button("기록 지우기", role: .destructive) {
+                diagnostics.clear()
+                diagnosticsCopied = false
+                diagnosticsCleared += 1
+            }
+        } header: {
+            Text("진단")
+        } footer: {
+            Text("앱이 멈추거나 꺼졌을 때 원인을 찾기 위한 기록이에요. 아이패드 안에만 있고 앱이 어디로도 보내지 않아요. 문서 내용이나 API 키는 들어 있지 않아요. \"화면에 떠 있다가 끝난 실행\"에는 앱을 쓰다가 위로 밀어 끈 경우도 들어가요.")
+        }
+        .id(diagnosticsCleared)
     }
 
     private var lookSection: some View {
