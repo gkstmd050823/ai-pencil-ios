@@ -431,7 +431,7 @@ final class PageOverlay: UIView {
             path.move(to: end)
             for sample in ahead { path.addLine(to: sample.point) }
             liveTail.path = path
-            liveTail.lineWidth = width
+            liveTail.lineWidth = width * PenLine.shownShare
             liveTail.strokeColor = color
             liveTail.contentsScale = fineness
             if liveTail.superlayer == nil { penMarks.layer.addSublayer(liveTail) }
@@ -1209,7 +1209,8 @@ struct PDFInkView: UIViewRepresentable {
                 path.move(to: first)
                 for next in outline.dropFirst() { path.addLine(to: next) }
                 overlay.shapePreview.path = path.cgPath
-                overlay.shapePreview.lineWidth = width
+                overlay.shapePreview.lineWidth = width * PenLine.shownShare
+                overlay.shapePreview.contentsScale = fineness
                 overlay.shapePreview.strokeColor = (darkPaper ? choice.penUIColor.onDarkPaper : choice.penUIColor).cgColor
             case .ended:
                 overlay.shapePreview.path = nil
@@ -1237,7 +1238,7 @@ struct PDFInkView: UIViewRepresentable {
                 shape.fillColor = nil
                 shape.lineCap = .round
                 shape.lineJoin = .round
-                shape.lineWidth = width
+                shape.lineWidth = width * PenLine.shownShare
                 shape.strokeColor = (darkPaper ? choice.penUIColor.onDarkPaper : choice.penUIColor).cgColor
                 shape.contentsScale = fineness
                 overlay.keep(shape, for: overlay.canvas.inkVersion)
@@ -1309,27 +1310,14 @@ struct PDFInkView: UIViewRepresentable {
             overlay.keepLive(for: canvas.inkVersion)
         }
 
-        /// For the build server: the same shaky line twice, pressed harder in the middle, once as the hand
-        /// made it and once steadied.
+        /// For the build server: a line of highlighter; the same shaky line twice, pressed harder in the
+        /// middle, once as the hand made it and once steadied; and straight lines of known widths, to set
+        /// the shapes shown while writing beside the strokes they become.
         func demoPen() {
             guard let view = pdfView, let page = view.currentPage, let overlay = overlays[page] else { return }
-            // (The last two are handed over in PencilKit's "pen" ink instead, to see what that does to them.)
-            let rows: [(Double, CGFloat, PKInkingTool.InkType)] = [(0, 0, .monoline), (1, 0.9, .monoline), (2, 0, .pen), (3, 0.9, .pen)]
-            for (row, steady, ink) in rows {
-                var line = PenLine(width: 2.6, sense: 1, steady: steady)
-                for step in 0...240 {
-                    let along = Double(step) / 240
-                    let shake = 2.2 * sin(Double(step) * 1.9) + 1.4 * cos(Double(step) * 3.1)
-                    let point = CGPoint(x: 70 + 440 * along, y: 540 + row * 52 + 14 * sin(along * 2 * Double.pi) + shake)
-                    line.add(PenSample(point: point, force: CGFloat(0.25 + 2.2 * sin(along * Double.pi)), time: Double(step) / 240))
-                }
-                commit(line, in: overlay, ink: ink)
-                DebugLog.write("pen: a line of \(line.points.count) points written, steadied \(steady)")
-            }
-            // And a line of highlighter across them, to set the picture's highlighter beside the canvas's.
             var points: [PKStrokePoint] = []
             for step in 0...60 {
-                let place = CGPoint(x: 90 + 6.5 * Double(step), y: 520 + 3.4 * Double(step))
+                let place = CGPoint(x: 300 + 3.4 * Double(step), y: 628 + 1.5 * Double(step))
                 points.append(PKStrokePoint(
                     location: place, timeOffset: Double(step) * 0.01, size: CGSize(width: 14, height: 14),
                     opacity: 1, force: 1, azimuth: 0, altitude: CGFloat.pi / 2
@@ -1340,11 +1328,29 @@ struct PDFInkView: UIViewRepresentable {
             let before = drawing
             drawing.strokes.append(marker)
             setDrawing(drawing, on: overlay.canvas, undoingTo: before)
+            for (row, steady) in [(0.0, CGFloat(0)), (1.0, CGFloat(0.9))] {
+                var line = PenLine(width: 2.6, sense: 1, steady: steady)
+                for step in 0...240 {
+                    let along = Double(step) / 240
+                    let shake = 2.2 * sin(Double(step) * 1.9) + 1.4 * cos(Double(step) * 3.1)
+                    let point = CGPoint(x: 70 + 440 * along, y: 540 + row * 52 + 14 * sin(along * 2 * Double.pi) + shake)
+                    line.add(PenSample(point: point, force: CGFloat(0.25 + 2.2 * sin(along * Double.pi)), time: Double(step) / 240))
+                }
+                commit(line, in: overlay)
+                DebugLog.write("pen: a line of \(line.points.count) points written, steadied \(steady)")
+            }
+            for (row, width) in [1.0, 2.0, 4.0, 8.0, 12.0].enumerated() {
+                var line = PenLine(width: CGFloat(width), sense: 0, steady: 0)
+                for step in 0...40 {
+                    line.add(PenSample(point: CGPoint(x: 70 + 5 * Double(step), y: 640 + 22 * Double(row)), force: 1, time: Double(step) / 240))
+                }
+                commit(line, in: overlay)
+            }
         }
 
         func clearPage() {
             guard let view = pdfView, let page = view.currentPage, let overlay = overlays[page] else { return }
-            let before = overlay.canvas.drawing
+            let before = overlay.canvas.ink
             guard !before.strokes.isEmpty else { return }
             setDrawing(PKDrawing(), on: overlay.canvas, undoingTo: before)
         }

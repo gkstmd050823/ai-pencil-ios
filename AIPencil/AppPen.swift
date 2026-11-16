@@ -117,6 +117,12 @@ struct PenLine {
         return PKStroke(ink: PKInk(ink, color: color), path: PKStrokePath(controlPoints: control, creationDate: Date()))
     }
 
+    /// How wide PencilKit draws a line whose points say they are one unit wide. The widths kept here are in
+    /// PencilKit's units, so that the app's pen writes as thick as PencilKit's at the same setting; what is
+    /// shown while writing has to be this much of them to match the stroke the line becomes. (Measured on
+    /// the build server: lines of several widths, as shapes and as strokes, side by side.)
+    static let shownShare: CGFloat = 0.47
+
     /// The line from point [from] onward as a shape to fill: a disc at every point and a band between each
     /// two. Every piece turns the same way round, so that where pieces overlap the filling does not cancel.
     func shape(from: Int) -> CGPath {
@@ -125,12 +131,12 @@ struct PenLine {
         let first = max(0, min(from, points.count - 1))
         for index in first..<points.count {
             let here = points[index]
-            let radius = widths[index] / 2
+            let radius = widths[index] * Self.shownShare / 2
             path.addArc(center: here, radius: radius, startAngle: 0, endAngle: 2 * .pi, clockwise: false)
             path.closeSubpath()
             guard index > first else { continue }
             let before = points[index - 1]
-            let radiusBefore = widths[index - 1] / 2
+            let radiusBefore = widths[index - 1] * Self.shownShare / 2
             let dx = here.x - before.x, dy = here.y - before.y
             let length = hypot(dx, dy)
             guard length > 0.01 else { continue }
