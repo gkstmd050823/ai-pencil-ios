@@ -32,9 +32,10 @@ struct ReaderView: View {
     @AppStorage("showAiMarks") private var showAiMarks = true
     @AppStorage("pageLayout") private var layoutMode = PageLayoutMode.vertical
     @AppStorage("darkPaper") private var darkPaper = true
-    @AppStorage("appPen") private var appPen = false
     /// How much of the screen the explanation takes: of its width beside the pages, of its height below them.
+    /// While its edge is being dragged the share is kept here and written to the settings once, at the end.
     @AppStorage("panelShare") private var panelShare = 0.44
+    @State private var liveShare: Double?
     @State private var choice = InkChoice.saved()
     /// The tool that was in hand before the one that is now, for the Pencil's "back to the last tool".
     @State private var previousTool = InkTool.eraser
@@ -83,10 +84,12 @@ struct ReaderView: View {
             let wide = UserDefaults.standard.bool(forKey: "demoWide")
                 || (geometry.size.width >= 820 && geometry.size.width > geometry.size.height)
             let total = wide ? geometry.size.width : geometry.size.height
-            let length = min(max(wide ? 320 : 280, total * CGFloat(panelShare)), max(240, total - (wide ? 380 : 240)))
+            let length = min(max(wide ? 320 : 280, total * CGFloat(liveShare ?? panelShare)), max(240, total - (wide ? 380 : 240)))
             let layout = wide ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
+            // How wide the pages are, which is what the tool bar has to fit in.
+            let across = wide && session.panel != nil ? geometry.size.width - length : geometry.size.width
             layout {
-                pages
+                pages(roomy: across >= 790)
                 if session.panel != nil {
                     panel(wide: wide, total: total)
                         .frame(width: wide ? length : nil, height: wide ? nil : length)
@@ -162,7 +165,22 @@ struct ReaderView: View {
             Text(errorText ?? "")
         }
         .onChange(of: choice) {
-            choice.save()
+            choice.saveSoon()
+        }
+        .onChange(of: showingOptions) {
+            Diagnostics.shared.step(showingOptions ? "tool settings opened" : "tool settings closed")
+        }
+        .onChange(of: showingSettings) {
+            Diagnostics.shared.step(showingSettings ? "settings opened" : "settings closed")
+        }
+        .onChange(of: showingQuestions) {
+            Diagnostics.shared.step(showingQuestions ? "questions opened" : "questions closed")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            InkChoice.saveWaiting()
+        }
+        .onDisappear {
+            InkChoice.saveWaiting()
         }
         .onChange(of: bookmarks) {
             BookmarkStore(folder: folder).save(bookmarks)
@@ -228,10 +246,10 @@ struct ReaderView: View {
     }
 
     /// The tool bar has a strip of its own above the pages, so that it never covers the top of a page.
-    private var pages: some View {
+    private func pages(roomy: Bool) -> some View {
         VStack(spacing: 0) {
             ToolBar(
-                choice: $choice, showingOptions: $showingOptions, darkPaper: showsDark, appPen: appPen,
+                choice: $choice, showingOptions: $showingOptions, darkPaper: showsDark, roomy: roomy,
                 canUndo: controller.canUndo, canRedo: controller.canRedo, questions: answered,
                 onPick: pick, onUndo: controller.undo, onRedo: controller.redo,
                 onQuestions: { showingQuestions = true }, onClearPage: controller.clearPage
@@ -247,7 +265,6 @@ struct ReaderView: View {
                 mathStore: mathStore,
                 choice: choice,
                 fingerDraws: fingerDraws,
-                appPen: appPen,
                 layout: layoutMode,
                 darkPaper: showsDark,
                 startPage: startPage,
@@ -315,9 +332,13 @@ struct ReaderView: View {
                             let from = dragStart ?? panelShare
                             dragStart = from
                             let moved = wide ? -value.translation.width : -value.translation.height
-                            panelShare = min(0.72, max(0.24, from + Double(moved / max(total, 1))))
+                            liveShare = min(0.72, max(0.24, from + Double(moved / max(total, 1))))
                         }
-                        .onEnded { _ in dragStart = nil }
+                        .onEnded { _ in
+                            if let liveShare { panelShare = liveShare }
+                            liveShare = nil
+                            dragStart = nil
+                        }
                 )
                 .accessibilityLabel("설명 창 크기 조절")
             ExplainPanel(
@@ -443,7 +464,7 @@ struct ReaderView: View {
         let folder = self.folder
         let title = doc.title
         let withMarks = showAiMarks
-        Task {
+        Task { @MainActor in
             let url = await Task.detached(priority: .userInitiated) {
                 Exporter.export(pdfURL: pdfURL, folder: folder, title: title, withMarks: withMarks)
             }.value
@@ -522,6 +543,12 @@ struct ReaderView: View {
         if let kind = EraserKind(rawValue: defaults.string(forKey: "demoEraserKind") ?? "") { choice.eraserKind = kind }
         if defaults.double(forKey: "demoEraserWidth") > 0 { choice.eraserWidth = defaults.double(forKey: "demoEraserWidth") }
         if defaults.object(forKey: "demoHighlighterOnly") != nil { choice.eraserHighlighterOnly = defaults.bool(forKey: "demoHighlighterOnly") }
+        if defaults.object(forKey: "demoHighlighterAuto") != nil { choice.highlighterAuto = defaults.bool(forKey: "demoHighlighterAuto") }
+        // The pen's, too: its kind, and the width in millimetres of the one in use.
+        if let kind = PenKind(rawValue: defaults.string(forKey: "demoPenKind") ?? "") { choice.penKind = kind }
+        if defaults.double(forKey: "demoPenSize") > 0 {
+            choice.penSize = InkChoice.tidy(defaults.double(forKey: "demoPenSize"), in: InkChoice.penSizeRange)
+        }
         let dense = defaults.integer(forKey: "demoDense")
         if dense > 0 {
             later(2.5) { controller.demoDense(dense) }
@@ -564,14 +591,18 @@ struct ReaderView: View {
     }
 }
 
-/// The tool bar: undo and redo, the tools, and a part for the tool in hand, which is the same width
-/// whatever the tool, so that the bar keeps its size and its place. Touching the tool in hand again
-/// opens its settings.
+/// The tool bar: undo and redo, the tools, and a part for the tool in hand (its widths, its colours),
+/// which is the same width whatever the tool, so that the bar keeps its size and its place. Touching the
+/// tool in hand again opens its settings.
+///
+/// Whether there is room for the tool's own part is worked out by the screen above from the width it has,
+/// and handed down: the bar does not measure itself. Everything on it is drawn by SwiftUI itself.
 private struct ToolBar: View {
     @Binding var choice: InkChoice
     @Binding var showingOptions: Bool
     var darkPaper: Bool
-    var appPen: Bool
+    /// There is room for the tool's own part beside the tools.
+    var roomy: Bool
     var canUndo: Bool
     var canRedo: Bool
     /// How many questions the document has, shown beside the AI pen.
@@ -583,7 +614,7 @@ private struct ToolBar: View {
     var onClearPage: () -> Void
 
     /// The width kept for the tool's own part.
-    private static let room: CGFloat = 232
+    private static let room: CGFloat = 304
 
     private func tint(_ tool: InkTool) -> Color {
         tool == .ai ? Color(uiColor: InkChoice.markColor) : Color.accentColor
@@ -599,22 +630,7 @@ private struct ToolBar: View {
         return Color(uiColor: darkPaper ? color.onDarkPaper : color)
     }
 
-    // Where the whole bar does not fit on one line, the tool's own part is left out; what it holds is
-    // in the tool's settings as well.
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            bar(withRoom: true)
-            bar(withRoom: false)
-        }
-        .popover(isPresented: $showingOptions) {
-            ToolOptions(choice: $choice, darkPaper: darkPaper, appPen: appPen) {
-                showingOptions = false
-                onClearPage()
-            }
-        }
-    }
-
-    private func bar(withRoom: Bool) -> some View {
         HStack(spacing: 1) {
             step("arrow.uturn.backward", "실행 취소", enabled: canUndo, action: onUndo)
             step("arrow.uturn.forward", "다시 실행", enabled: canRedo, action: onRedo)
@@ -637,27 +653,33 @@ private struct ToolBar: View {
                             .frame(width: 18, height: 3)
                     }
                     .frame(width: 44, height: 42)
-                    .foregroundStyle(choice.tool == tool ? tint(tool) : Color.secondary)
-                    .background(choice.tool == tool ? tint(tool).opacity(0.15) : Color.clear, in: RoundedRectangle(cornerRadius: 12))
+                    .foregroundStyle(choice.tool == tool ? tint(tool) : Color.primary.opacity(0.62))
+                    .background(choice.tool == tool ? tint(tool).opacity(0.13) : Color.clear, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                 }
                 .accessibilityLabel(tool.label)
             }
-            if withRoom {
+            if roomy {
                 rule
                 own
                     .frame(width: Self.room, height: 42)
             }
         }
-        .padding(.horizontal, 7)
+        .padding(.horizontal, 8)
         .padding(.vertical, 5)
-        .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 20))
-        .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.primary.opacity(0.07), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.12), radius: 10, y: 3)
+        .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.10), radius: 12, y: 4)
+        .popover(isPresented: $showingOptions) {
+            ToolOptions(choice: $choice, darkPaper: darkPaper) {
+                showingOptions = false
+                onClearPage()
+            }
+        }
     }
 
     private var rule: some View {
         Rectangle()
-            .fill(Color.primary.opacity(0.12))
+            .fill(Color.primary.opacity(0.10))
             .frame(width: 1, height: 24)
             .padding(.horizontal, 6)
     }
@@ -677,39 +699,56 @@ private struct ToolBar: View {
     private var own: some View {
         switch choice.tool {
         case .pen:
-            quick(InkChoice.penPalette, selected: choice.penColor) { choice.penColor = $0 }
+            HStack(spacing: 0) {
+                ForEach(0..<3, id: \.self) { slot in
+                    penSize(slot)
+                }
+                rule
+                quick(InkChoice.penPalette, count: 4, selected: choice.penColor) { choice.penColor = $0 }
+            }
         case .highlighter:
-            quick(InkChoice.highlighterPalette, selected: choice.highlighterColor) { choice.highlighterColor = $0 }
+            quick(InkChoice.highlighterPalette, count: 6, selected: choice.highlighterColor) { choice.highlighterColor = $0 }
         case .shape:
-            HStack(spacing: 4) {
+            HStack(spacing: 0) {
                 ForEach(ShapeKind.allCases) { kind in
                     Button {
                         choice.shapeKind = kind
                     } label: {
                         Image(systemName: kind.symbol)
                             .font(.system(size: 16, weight: .medium))
-                            .frame(width: 40, height: 34)
-                            .foregroundStyle(choice.shapeKind == kind ? Color.accentColor : Color.secondary)
-                            .background(choice.shapeKind == kind ? Color.accentColor.opacity(0.15) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
+                            .frame(width: 36, height: 34)
+                            .foregroundStyle(choice.shapeKind == kind ? Color.accentColor : Color.primary.opacity(0.62))
+                            .background(choice.shapeKind == kind ? Color.accentColor.opacity(0.13) : Color.clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                     }
                     .accessibilityLabel(kind.label)
                 }
-                Spacer(minLength: 0)
-                more(current: choice.penColor)
+                rule
+                quick(InkChoice.penPalette, count: 2, selected: choice.penColor) { choice.penColor = $0 }
             }
         case .eraser:
-            HStack(spacing: 2) {
+            HStack(spacing: 0) {
                 if choice.eraserHighlighterOnly {
-                    hint("형광펜만 지워요")
+                    hint("형광펜만")
+                        .frame(width: 96)
                 } else {
-                    Picker("지우개 종류", selection: $choice.eraserKind) {
-                        ForEach(EraserKind.allCases) { kind in
-                            Text(kind.label + " 지우개").tag(kind)
+                    ForEach(EraserKind.allCases) { kind in
+                        Button {
+                            choice.eraserKind = kind
+                        } label: {
+                            Text(kind.label)
+                                .font(.footnote.weight(.semibold))
+                                .frame(width: 46, height: 30)
+                                .foregroundStyle(choice.eraserKind == kind ? Color.accentColor : Color.primary.opacity(0.62))
+                                .background(choice.eraserKind == kind ? Color.accentColor.opacity(0.13) : Color.clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                         }
+                        .accessibilityLabel(kind.label + " 지우개")
                     }
-                    .pickerStyle(.segmented)
-                    .padding(.leading, 6)
                 }
+                rule
+                ForEach(InkChoice.eraserQuick, id: \.self) { size in
+                    eraserSize(size)
+                }
+                Spacer(minLength: 0)
                 more(current: nil)
             }
         case .ai:
@@ -746,24 +785,69 @@ private struct ToolBar: View {
             .frame(maxWidth: .infinity)
     }
 
-    /// The first five colours of a palette, and a way to the rest.
-    private func quick(_ palette: [UInt32], selected: UInt32, pick: @escaping (UInt32) -> Void) -> some View {
+    /// One of the pen's three widths: a dot as thick as the line, and the width in millimetres under it.
+    /// Touching the one in use opens the pen's settings, where its width can be changed.
+    private func penSize(_ slot: Int) -> some View {
+        let size = choice.penSizes.indices.contains(slot) ? choice.penSizes[slot] : 0.5
+        let selected = choice.penSlot == slot
+        let dot = min(17, max(3, CGFloat(size) * InkChoice.pointsPerMillimetre * 2.4))
+        return Button {
+            if selected {
+                showingOptions = true
+            } else {
+                choice.penSlot = slot
+            }
+        } label: {
+            VStack(spacing: 1) {
+                Circle()
+                    .fill(selected ? shown(choice.penColor) : Color.primary.opacity(0.5))
+                    .overlay(Circle().stroke(Color.primary.opacity(0.18), lineWidth: 0.5))
+                    .frame(width: dot, height: dot)
+                    .frame(height: 19)
+                Text(InkChoice.sizeLabel(size))
+                    .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+            }
+            .frame(width: 36, height: 38)
+            .background(selected ? Color.accentColor.opacity(0.13) : Color.clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+        .accessibilityLabel("굵기 \(InkChoice.sizeLabel(size))밀리미터")
+    }
+
+    /// One of the eraser's sizes: a ring that grows with it.
+    private func eraserSize(_ size: Double) -> some View {
+        let selected = abs(choice.eraserWidth - size) < 0.5
+        let ring = 8 + CGFloat(size) * 0.32
+        return Button {
+            choice.eraserWidth = size
+        } label: {
+            Circle()
+                .stroke(selected ? Color.accentColor : Color.primary.opacity(0.5), lineWidth: selected ? 2 : 1.4)
+                .frame(width: ring, height: ring)
+                .frame(width: 34, height: 34)
+                .background(selected ? Color.accentColor.opacity(0.13) : Color.clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+        .accessibilityLabel("지우개 크기 \(Int(size))")
+    }
+
+    /// The first colours of a palette, and a way to the rest.
+    private func quick(_ palette: [UInt32], count: Int, selected: UInt32, pick: @escaping (UInt32) -> Void) -> some View {
         HStack(spacing: 0) {
-            ForEach(palette.prefix(5), id: \.self) { rgb in
+            ForEach(palette.prefix(count), id: \.self) { rgb in
                 Button {
                     pick(rgb)
                 } label: {
                     Swatch(color: shown(rgb), selected: rgb == selected)
-                        .frame(width: 37, height: 42)
+                        .frame(width: 35, height: 42)
                 }
                 .accessibilityLabel("색 \((palette.firstIndex(of: rgb) ?? 0) + 1)")
             }
             Spacer(minLength: 0)
-            more(current: palette.prefix(5).contains(selected) ? nil : selected)
+            more(current: palette.prefix(count).contains(selected) ? nil : selected)
         }
     }
 
-    /// Opens the tool's settings. It wears the colour in use when that is not one of the five beside it.
+    /// Opens the tool's settings. It wears the colour in use when that is not one of those beside it.
     private func more(current: UInt32?) -> some View {
         Button {
             showingOptions = true
@@ -774,10 +858,10 @@ private struct ToolBar: View {
                 } else {
                     Image(systemName: "slider.horizontal.3")
                         .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(Color.secondary)
+                        .foregroundStyle(Color.primary.opacity(0.62))
                 }
             }
-            .frame(width: 40, height: 42)
+            .frame(width: 38, height: 42)
         }
         .accessibilityLabel("도구 설정 더 보기")
     }
@@ -798,17 +882,50 @@ private struct Swatch: View {
     }
 }
 
+/// A line as the tool in hand would write it, on a piece of the paper: about as large as it comes out on
+/// a page that fills the screen's width.
+private struct StrokeSample: View {
+    var color: Color
+    var width: CGFloat
+    var tint = false
+    var darkPaper: Bool
+
+    var body: some View {
+        Canvas { context, size in
+            var path = Path()
+            let inset: CGFloat = 22
+            let span = size.width - 2 * inset
+            for step in 0...80 {
+                let along = CGFloat(step) / 80
+                let point = CGPoint(x: inset + span * along, y: size.height / 2 + sin(along * 2 * .pi) * size.height * 0.2)
+                if step == 0 { path.move(to: point) } else { path.addLine(to: point) }
+            }
+            context.stroke(
+                path, with: .color(color.opacity(tint ? Double(InkChoice.highlighterStrength) : 1)),
+                style: StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round)
+            )
+        }
+        .frame(height: 58)
+        .background(darkPaper ? Color(white: 0.11) : Color.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Color.primary.opacity(0.12), lineWidth: 0.75))
+    }
+}
+
 /// The settings of the tool in hand: the kind of pen, how thick, which colour; what the eraser takes;
 /// whether the tool is put down by itself once it has been used.
 private struct ToolOptions: View {
     @Binding var choice: InkChoice
     var darkPaper: Bool
-    var appPen: Bool
     var onClearPage: () -> Void
 
     private var eraserHint: String {
         if choice.eraserHighlighterOnly { return "형광펜으로 그은 선만 통째로 지우고, 펜으로 쓴 것은 그대로 둬요." }
-        return choice.eraserKind == .stroke ? "닿은 획을 통째로 지워요." : "문지른 자리만 지워요."
+        return choice.eraserKind == .stroke ? "원에 닿은 획을 통째로 지워요." : "원이 지나간 자리만 지워요."
+    }
+
+    private func shown(_ rgb: UInt32) -> Color {
+        let color = InkChoice.color(rgb)
+        return Color(uiColor: darkPaper ? color.onDarkPaper : color)
     }
 
     /// A switch for putting the tool down after one use.
@@ -817,10 +934,29 @@ private struct ToolOptions: View {
             .font(.subheadline)
     }
 
+    /// The width of the pen in use, kept to twentieths of a millimetre.
+    private var penSize: Binding<Double> {
+        Binding(
+            get: { choice.penSize },
+            set: { choice.penSize = InkChoice.tidy($0, in: InkChoice.penSizeRange) }
+        )
+    }
+
+    private var highlighterSize: Binding<Double> {
+        Binding(
+            get: { choice.highlighterSize },
+            set: { choice.highlighterSize = ($0 * 2).rounded() / 2 }
+        )
+    }
+
+    /// About how many points of the screen a point of the page takes when a page fills the screen's width.
+    private static let shownAt: CGFloat = 2
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 15) {
             switch choice.tool {
             case .pen:
+                StrokeSample(color: shown(choice.penColor), width: choice.penSeenWidth * Self.shownAt, darkPaper: darkPaper)
                 Picker("펜 종류", selection: $choice.penKind) {
                     ForEach(PenKind.allCases) { kind in
                         Text(kind.label).tag(kind)
@@ -830,27 +966,61 @@ private struct ToolOptions: View {
                 Text(choice.penKind.hint)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                SliderRow(title: "굵기", value: $choice.penWidth, range: InkChoice.penWidths, shown: String(format: "%.1f", choice.penWidth), line: CGFloat(choice.penWidth))
-                if choice.usesAppPen(appPen) {
-                    // The app's own pen: these two are worked into the line while it is being written.
-                    SliderRow(title: "필압 감도", value: $choice.penSense, range: 0...1, shown: "\(Int((choice.penSense * 100).rounded()))%", line: nil)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Text("굵기")
+                            .font(.subheadline.weight(.semibold))
+                        Spacer()
+                        // The three widths kept on the tool bar; the slider changes the one picked.
+                        ForEach(0..<3, id: \.self) { slot in
+                            Button {
+                                choice.penSlot = slot
+                            } label: {
+                                Text(InkChoice.sizeLabel(choice.penSizes.indices.contains(slot) ? choice.penSizes[slot] : 0.5))
+                                    .font(.footnote.weight(.semibold).monospacedDigit())
+                                    .frame(width: 46, height: 28)
+                                    .foregroundStyle(choice.penSlot == slot ? Color.white : Color.primary)
+                                    .background(choice.penSlot == slot ? Color.accentColor : Color.primary.opacity(0.07), in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    HStack(spacing: 10) {
+                        Slider(value: penSize, in: InkChoice.penSizeRange, step: 0.05)
+                        Text(InkChoice.sizeLabel(choice.penSize) + " mm")
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .frame(width: 64, alignment: .trailing)
+                    }
+                }
+                if choice.penKind != .pencil {
+                    // These two are worked into the line while it is being written.
+                    SliderRow(title: "필압 감도", value: $choice.penSense, range: 0...1, shown: "\(Int((choice.penSense * 100).rounded()))%")
                         .disabled(choice.penKind != .fountain)
                         .opacity(choice.penKind != .fountain ? 0.4 : 1)
-                    SliderRow(title: "획 안정화", value: $choice.penSteady, range: 0...1, shown: "\(Int((choice.penSteady * 100).rounded()))%", line: nil)
+                    SliderRow(title: "획 안정화", value: $choice.penSteady, range: 0...1, shown: "\(Int((choice.penSteady * 100).rounded()))%")
                     Text("필압 감도는 만년필에서 누르는 힘이 굵기를 얼마나 바꿀지, 획 안정화는 손떨림을 얼마나 펴 줄지예요. 안정화를 높이면 선이 펜을 조금 늦게 따라와요.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if !appPen, choice.penKind != .pencil {
-                    Text("필압 감도와 획 안정화는 설정 → 필기에서 \"앱 자체 펜으로 쓰기\"를 켜면 여기에 나와요.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 ColorGrid(palette: InkChoice.penPalette, selection: $choice.penColor, darkPaper: darkPaper)
             case .highlighter:
-                SliderRow(title: "굵기", value: $choice.highlighterWidth, range: InkChoice.highlighterWidths, shown: String(format: "%.0f", choice.highlighterWidth), line: CGFloat(choice.highlighterWidth) * 0.8)
+                StrokeSample(color: shown(choice.highlighterColor), width: choice.highlighterSeenWidth * Self.shownAt, tint: true, darkPaper: darkPaper)
+                HStack(spacing: 10) {
+                    Text("굵기")
+                        .font(.subheadline.weight(.semibold))
+                    Slider(value: highlighterSize, in: InkChoice.highlighterSizes, step: 0.5)
+                    Text(InkChoice.sizeLabel(choice.highlighterSize) + " mm")
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 64, alignment: .trailing)
+                }
+                SliderRow(title: "획 안정화", value: $choice.penSteady, range: 0...1, shown: "\(Int((choice.penSteady * 100).rounded()))%")
+                Text("형광펜은 종이를 물들이고 글자는 가리지 않아요. 같은 자리를 여러 번 그어도 더 진해지지 않아요.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 ColorGrid(palette: InkChoice.highlighterPalette, selection: $choice.highlighterColor, darkPaper: darkPaper)
                 putDown("한 번 긋고 나면 이전 도구로 돌아가기", $choice.highlighterAuto)
             case .shape:
@@ -864,7 +1034,15 @@ private struct ToolOptions: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                SliderRow(title: "굵기", value: $choice.penWidth, range: InkChoice.penWidths, shown: String(format: "%.1f", choice.penWidth), line: CGFloat(choice.penWidth))
+                HStack(spacing: 10) {
+                    Text("굵기")
+                        .font(.subheadline.weight(.semibold))
+                    Slider(value: penSize, in: InkChoice.penSizeRange, step: 0.05)
+                    Text(InkChoice.sizeLabel(choice.penSize) + " mm")
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 64, alignment: .trailing)
+                }
                 ColorGrid(palette: InkChoice.penPalette, selection: $choice.penColor, darkPaper: darkPaper)
                 putDown("한 번 그리고 나면 이전 도구로 돌아가기", $choice.shapeAuto)
             case .eraser:
@@ -879,10 +1057,16 @@ private struct ToolOptions: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                // The eraser that takes whole strokes has no size: it takes what its tip touches.
-                SliderRow(title: "크기", value: $choice.eraserWidth, range: InkChoice.eraserWidths, shown: "\(Int(choice.eraserWidth.rounded()))", line: nil)
-                    .disabled(choice.eraserKind == .stroke && !choice.eraserHighlighterOnly)
-                    .opacity(choice.eraserKind == .stroke && !choice.eraserHighlighterOnly ? 0.4 : 1)
+                // Every eraser has a size: the ring on the page is what it takes.
+                HStack(spacing: 12) {
+                    Text("크기")
+                        .font(.subheadline.weight(.semibold))
+                    Slider(value: $choice.eraserWidth, in: InkChoice.eraserWidths, step: 1)
+                    Circle()
+                        .stroke(Color.primary.opacity(0.55), lineWidth: 1.4)
+                        .frame(width: CGFloat(choice.eraserWidth), height: CGFloat(choice.eraserWidth))
+                        .frame(width: 62, height: 62)
+                }
                 VStack(alignment: .leading, spacing: 10) {
                     Toggle("형광펜만 지우기", isOn: $choice.eraserHighlighterOnly)
                     Toggle("AI 펜 표시도 지우기", isOn: $choice.eraserTakesMarks)
@@ -904,30 +1088,23 @@ private struct ToolOptions: View {
             }
         }
         .padding(18)
-        .frame(width: 372)
+        .frame(width: 380)
         .presentationCompactAdaptation(.popover)
     }
 }
 
-/// A named slider with its value beside the name, and for a thickness a line that thick.
+/// A named slider with its value beside the name.
 private struct SliderRow: View {
     let title: String
     @Binding var value: Double
     let range: ClosedRange<Double>
     let shown: String
-    /// The height of the sample line, when the slider sets a thickness.
-    let line: CGFloat?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 10) {
                 Text(title)
                     .font(.subheadline.weight(.semibold))
-                if let line {
-                    Capsule()
-                        .fill(Color.primary)
-                        .frame(width: 54, height: max(1, min(line * 1.6, 20)))
-                }
                 Spacer()
                 Text(shown)
                     .font(.subheadline.monospacedDigit())

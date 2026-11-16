@@ -110,16 +110,20 @@ struct InkChoice: Equatable, Codable {
     var tool: InkTool = .pen
     var penKind = PenKind.fountain
     var penColor: UInt32 = 0x1C1C1F
-    /// The pen's line width in page points.
-    var penWidth = 2.6
+    /// The pen's widths in millimetres on the paper, as pens are sold by (0.5, 0.8): three kept on the
+    /// tool bar to switch between, and which of the three is in use. The slider in the pen's settings
+    /// changes the one in use.
+    var penSizes: [Double] = [0.3, 0.5, 0.8]
+    var penSlot = 1
     /// For the app's own pen. How much pressure changes the line's width, from 0 (not at all) to 1; and
     /// how far a shaky line is steadied, from 0 (the line goes exactly where the pen goes) to 1.
     var penSense = 0.5
     var penSteady = 0.25
     var highlighterColor: UInt32 = 0xFFD60A
-    var highlighterWidth = 14.0
+    /// The highlighter's width in millimetres on the paper.
+    var highlighterSize = 5.0
     var eraserKind = EraserKind.stroke
-    /// How wide the eraser that rubs out part of a line is, in page points.
+    /// How wide the eraser is, in points of the screen, whichever kind it is.
     var eraserWidth = 16.0
     /// The eraser leaves everything but highlighter alone.
     var eraserHighlighterOnly = false
@@ -142,11 +146,12 @@ struct InkChoice: Equatable, Codable {
         tool = read(.tool, tool)
         penKind = read(.penKind, penKind)
         penColor = read(.penColor, penColor)
-        penWidth = read(.penWidth, penWidth)
+        penSizes = read(.penSizes, penSizes)
+        penSlot = read(.penSlot, penSlot)
         penSense = read(.penSense, penSense)
         penSteady = read(.penSteady, penSteady)
         highlighterColor = read(.highlighterColor, highlighterColor)
-        highlighterWidth = read(.highlighterWidth, highlighterWidth)
+        highlighterSize = read(.highlighterSize, highlighterSize)
         eraserKind = read(.eraserKind, eraserKind)
         eraserWidth = read(.eraserWidth, eraserWidth)
         eraserHighlighterOnly = read(.eraserHighlighterOnly, eraserHighlighterOnly)
@@ -155,7 +160,47 @@ struct InkChoice: Equatable, Codable {
         eraserAuto = read(.eraserAuto, eraserAuto)
         highlighterAuto = read(.highlighterAuto, highlighterAuto)
         shapeAuto = read(.shapeAuto, shapeAuto)
+        // Settings saved before 0.8.0 had one pen width, on a scale of PencilKit's own, and a highlighter
+        // width in points. The pen in use keeps the width it had; the highlighter too.
+        let old = try? decoder.container(keyedBy: OldKeys.self)
+        if !saved.contains(.penSizes), let width = try? old?.decodeIfPresent(Double.self, forKey: .penWidth) {
+            let size = Double(InkWidth.seen(setting: CGFloat(width)) / Self.pointsPerMillimetre)
+            penSizes[1] = Self.tidy(size, in: Self.penSizeRange)
+        }
+        if !saved.contains(.highlighterSize), let width = try? old?.decodeIfPresent(Double.self, forKey: .highlighterWidth) {
+            highlighterSize = Self.tidy(width / Double(Self.pointsPerMillimetre), in: Self.highlighterSizes)
+        }
+        if penSizes.count != 3 { penSizes = [0.3, 0.5, 0.8] }
+        penSizes = penSizes.map { Self.tidy($0, in: Self.penSizeRange) }
+        penSlot = min(max(penSlot, 0), 2)
     }
+
+    private enum OldKeys: String, CodingKey {
+        case penWidth, highlighterWidth
+    }
+
+    /// A page point is 1/72 of an inch.
+    static let pointsPerMillimetre: CGFloat = 72 / 25.4
+
+    /// A size kept within its range and to a twentieth of a millimetre.
+    static func tidy(_ size: Double, in range: ClosedRange<Double>) -> Double {
+        min(max((size * 20).rounded() / 20, range.lowerBound), range.upperBound)
+    }
+
+    /// A size in millimetres as it is written: "0.5", and "0.35" where a tenth does not say it.
+    static func sizeLabel(_ size: Double) -> String {
+        abs(size * 10 - (size * 10).rounded()) < 0.001 ? String(format: "%.1f", size) : String(format: "%.2f", size)
+    }
+
+    /// The width in use, in millimetres.
+    var penSize: Double {
+        get { penSizes.indices.contains(penSlot) ? penSizes[penSlot] : 0.5 }
+        set { if penSizes.indices.contains(penSlot) { penSizes[penSlot] = newValue } }
+    }
+
+    /// The pen's and the highlighter's line as wide as they are seen on the page, in page points.
+    var penSeenWidth: CGFloat { CGFloat(penSize) * Self.pointsPerMillimetre }
+    var highlighterSeenWidth: CGFloat { CGFloat(highlighterSize) * Self.pointsPerMillimetre }
 
     /// The colours offered for the pen: the first five are on the tool bar itself.
     static let penPalette: [UInt32] = [
@@ -168,11 +213,16 @@ struct InkChoice: Equatable, Codable {
         0xFFD60A, 0x5EDC8A, 0xFF8FB8, 0x64B5FF, 0xFFA94D,
         0xB69CFF, 0x7FE3D4, 0xD0D4DA,
     ]
-    static let penWidths: ClosedRange<Double> = 0.6...9
-    static let highlighterWidths: ClosedRange<Double> = 6...30
-    static let eraserWidths: ClosedRange<Double> = 6...48
+    static let penSizeRange: ClosedRange<Double> = 0.1...2.0
+    static let highlighterSizes: ClosedRange<Double> = 2...12
+    static let eraserWidths: ClosedRange<Double> = 6...60
+    /// The eraser sizes kept on the tool bar.
+    static let eraserQuick: [Double] = [10, 22, 40]
     /// The colour of the AI pen and of the marks it leaves on the page.
-    static let markColor = UIColor(red: 0x6D / 255.0, green: 0x5B / 255.0, blue: 0xF6 / 255.0, alpha: 1)
+    static let markColor = UIColor(red: 0x0F / 255.0, green: 0xA3 / 255.0, blue: 0x9B / 255.0, alpha: 1)
+    /// How strong a highlighter line is where it is laid over the page. (It is laid as a tint that darkens
+    /// the paper and leaves what is printed on it as dark as it was, so writing under it stays readable.)
+    static let highlighterStrength: CGFloat = 0.5
 
     static func color(_ rgb: UInt32, alpha: CGFloat = 1) -> UIColor {
         UIColor(
@@ -191,16 +241,29 @@ struct InkChoice: Equatable, Codable {
     var penUIColor: UIColor { Self.color(penColor) }
     var highlighterUIColor: UIColor { Self.color(highlighterColor) }
 
-    /// The pen's width as its ink allows it.
-    var penLineWidth: CGFloat {
-        let allowed = penKind.ink.validWidthRange
-        return min(max(CGFloat(penWidth), allowed.lowerBound), allowed.upperBound)
+    /// The pencil's width as PencilKit takes it: about three of its units to the millimetre, within
+    /// what its pencil allows.
+    var pencilWidth: CGFloat {
+        let allowed = PKInkingTool.InkType.pencil.validWidthRange
+        return min(max(CGFloat(penSize) * 6, allowed.lowerBound), allowed.upperBound)
     }
 
-    /// Whether the pen in hand is the app's own, given that the app's own pen is switched on. The pencil
-    /// stays PencilKit's: its grain is PencilKit's to draw.
-    func usesAppPen(_ on: Bool) -> Bool {
-        on && tool == .pen && penKind != .pencil
+    /// Whether the tool in hand writes through the app itself: the pen (all but the pencil, whose grain
+    /// is PencilKit's to draw), the highlighter and the AI pen. The app takes their touches, works out the
+    /// line and draws it.
+    var ownPen: Bool {
+        (tool == .pen && penKind != .pencil) || tool == .highlighter || tool == .ai
+    }
+
+    /// Whether the eraser in hand is the app's own: the one that takes whole lines, of any size, and the
+    /// one that only takes highlighter. Rubbing out part of a line is PencilKit's.
+    var ownEraser: Bool {
+        tool == .eraser && (eraserHighlighterOnly || eraserKind == .stroke)
+    }
+
+    /// Whether the tool in hand works on PencilKit's canvas itself, which then has to be what shows.
+    var needsCanvas: Bool {
+        tool == .lasso || (tool == .eraser && !ownEraser) || (tool == .pen && penKind == .pencil)
     }
 
     /// How much the app's own pen answers to pressure, by the kind of pen: the fountain pen as much as
@@ -232,16 +295,15 @@ struct InkChoice: Equatable, Codable {
     /// PencilKit; while one is chosen the canvases are switched off and keep whatever they had.
     var pencilKitTool: PKTool {
         switch tool {
-        case .pen, .formula, .shape:
-            return PKInkingTool(penKind.ink, color: penUIColor, width: penLineWidth)
-        case .highlighter:
-            return PKInkingTool(.marker, color: highlighterUIColor, width: CGFloat(highlighterWidth))
         case .eraser:
             return eraserKind == .stroke ? PKEraserTool(.vector) : PKEraserTool(.bitmap, width: CGFloat(eraserWidth))
-        case .ai:
-            return PKInkingTool(.monoline, color: Self.markColor, width: 2.6)
         case .lasso:
             return PKLassoTool()
+        case .ai:
+            return PKInkingTool(.monoline, color: Self.markColor, width: 2.6)
+        case .pen, .formula, .shape, .highlighter:
+            // (Of these only the pencil writes on the canvas; the rest are the app's own.)
+            return PKInkingTool(.pencil, color: penUIColor, width: pencilWidth)
         }
     }
 
@@ -259,6 +321,28 @@ struct InkChoice: Equatable, Codable {
         if let data = try? JSONEncoder().encode(self) {
             UserDefaults.standard.set(data, forKey: "inkChoice2")
         }
+    }
+
+    private static var waiting: DispatchWorkItem?
+
+    /// Saves the choice a moment from now, once it has stopped changing: a slider being dragged changes
+    /// it many times a second, and every save is a write to the settings store that the screens watch.
+    func saveSoon() {
+        Self.waiting?.cancel()
+        let choice = self
+        let work = DispatchWorkItem {
+            Self.waiting = nil
+            choice.save()
+        }
+        Self.waiting = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
+    }
+
+    /// Saves now whatever is waiting to be saved.
+    static func saveWaiting() {
+        guard let work = waiting else { return }
+        work.perform()
+        work.cancel()
     }
 }
 

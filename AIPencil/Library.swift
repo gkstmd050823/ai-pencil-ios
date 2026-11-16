@@ -181,14 +181,15 @@ final class Library: ObservableObject {
         return "\(base) \(n)"
     }
 
-    /// Makes a notebook of one A4 page of the paper asked for.
+    /// Makes a notebook of one page of the paper asked for, A4 unless another size is given. (Pages added
+    /// to it later are as large as the page they are added after.)
     @discardableResult
-    func createNote(in place: UUID? = nil, paper: PaperKind = .blank) throws -> Doc {
+    func createNote(in place: UUID? = nil, paper: PaperKind = .blank, size: CGSize = Paper.a4) throws -> Doc {
         let id = UUID()
         let directory = folder(for: id)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         do {
-            try Paper.data(paper).write(to: pdfURL(for: id), options: .atomic)
+            try Paper.data(paper, size: size).write(to: pdfURL(for: id), options: .atomic)
         } catch {
             try? FileManager.default.removeItem(at: directory)
             throw ImportError.unwritable

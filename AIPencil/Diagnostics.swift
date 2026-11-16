@@ -15,6 +15,14 @@ final class Diagnostics: NSObject, MXMetricManagerSubscriber {
     var viewNote = ""
     private var started = false
     private var watching: [NSObjectProtocol] = []
+    /// The notes file is written from one queue only: notes come from the main thread, from the system's
+    /// reports (which arrive on a thread of their own) and from the thread that watches for a stuck app.
+    private let writing = DispatchQueue(label: "app.aipencil.diagnostics", qos: .utility)
+    /// The last things the app did, newest last, and when the main thread last answered.
+    private let lock = NSLock()
+    private var steps: [String] = []
+    private var beat = CACurrentMediaTime()
+    private var stuckNoted = false
 
     private var notes: URL {
         let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -35,13 +43,72 @@ final class Diagnostics: NSObject, MXMetricManagerSubscriber {
 
     private func note(_ line: String) {
         let data = Data(("[\(stamp())] " + line + "\n").utf8)
-        if let handle = try? FileHandle(forWritingTo: notes) {
-            _ = try? handle.seekToEnd()
-            try? handle.write(contentsOf: data)
-            try? handle.close()
-        } else {
-            try? data.write(to: notes)
+        let notes = self.notes
+        writing.async {
+            if let handle = try? FileHandle(forWritingTo: notes) {
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: data)
+                try? handle.close()
+            } else {
+                try? data.write(to: notes)
+            }
         }
+    }
+
+    /// Something the app just did, in a few words. The last of these are written down when the app is
+    /// found stuck, to say what it was in the middle of. Cheap enough to call from anywhere.
+    func step(_ what: String) {
+        lock.lock()
+        steps.append(String(format: "%.1f ", CACurrentMediaTime()) + what)
+        if steps.count > 14 { steps.removeFirst(steps.count - 14) }
+        lock.unlock()
+    }
+
+    /// A thread of its own asks the main thread to answer once a second. When it has not answered for
+    /// three seconds the app is stuck (what the user sees as a freeze, and what the system ends as a
+    /// "watchdog" kill): that, and what the app last did, is noted once per freeze. Nothing is noted while
+    /// the app is in the background, where the main thread is not run.
+    private func watchForStuck() {
+        let me = self
+        let thread = Thread {
+            var looked = CACurrentMediaTime()
+            while true {
+                Thread.sleep(forTimeInterval: 1)
+                DispatchQueue.main.async {
+                    me.lock.lock()
+                    me.beat = CACurrentMediaTime()
+                    me.stuckNoted = false
+                    me.lock.unlock()
+                }
+                let now = CACurrentMediaTime()
+                // (This thread itself held up for longer than its nap: the whole app was, in the
+                // background. That is not a freeze, and the count starts again.)
+                let held = now - looked > 2.5
+                looked = now
+                me.lock.lock()
+                if held { me.beat = now }
+                let silent = now - me.beat
+                let fresh = silent > 3 && !me.stuckNoted
+                if fresh { me.stuckNoted = true }
+                let last = me.steps
+                me.lock.unlock()
+                if fresh {
+                    let text = String(format: "the app did not answer for %.0f s; the last it did: ", silent)
+                    me.note(text + last.suffix(8).joined(separator: " | "))
+                }
+            }
+        }
+        thread.name = "app.aipencil.stuck"
+        thread.qualityOfService = .utility
+        thread.start()
+    }
+
+    private func setOnScreen(_ value: Bool) {
+        lock.lock()
+        beat = CACurrentMediaTime()
+        lock.unlock()
+        defaults.set(value, forKey: "diag.onScreen")
+        step(value ? "on screen" : "off screen")
     }
 
     /// Called once, when the app starts.
@@ -57,16 +124,24 @@ final class Diagnostics: NSObject, MXMetricManagerSubscriber {
         }
         bump("diag.launches")
         defaults.set(true, forKey: "diag.onScreen")
+        step("started")
         let center = NotificationCenter.default
         watching.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.defaults.set(false, forKey: "diag.onScreen")
+            self?.setOnScreen(false)
         })
         watching.append(center.addObserver(forName: UIApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.defaults.set(false, forKey: "diag.onScreen")
+            self?.setOnScreen(false)
         })
         watching.append(center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.defaults.set(true, forKey: "diag.onScreen")
+            self?.setOnScreen(true)
         })
+        watching.append(center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.step("leaving the front")
+        })
+        watching.append(center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.step("at the front")
+        })
+        watchForStuck()
         watching.append(center.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
             self.bump("diag.memoryWarnings")
@@ -79,23 +154,38 @@ final class Diagnostics: NSObject, MXMetricManagerSubscriber {
     // MARK: what the system reports
 
     /// Crashes and hangs, as the system hands them over the next time the app runs.
+    ///
+    /// The system calls this on a thread of its own. The counts are kept in the app's settings store,
+    /// and the screens watch that store: a count written from this thread had them redraw from this
+    /// thread, at the same time as the main thread was drawing them. (0.7.1 did that, and its three
+    /// reported crashes and freezes all ended inside the code that draws the screens; two of them came
+    /// within minutes of a report being handed over.) So the text is put together here and everything
+    /// that touches the store is done on the main thread.
     func didReceive(_ payloads: [MXDiagnosticPayload]) {
+        var lines: [String] = []
+        var crashes = 0, hangs = 0
         for payload in payloads {
             for crash in payload.crashDiagnostics ?? [] {
-                bump("diag.crashes")
+                crashes += 1
                 var line = "crash in version \(crash.metaData.applicationBuildVersion):"
                 if let type = crash.exceptionType { line += " exception \(type)" }
                 if let code = crash.exceptionCode { line += " code \(code)" }
                 if let signal = crash.signal { line += " signal \(signal)" }
                 if let reason = crash.terminationReason { line += " (\(reason))" }
-                note(line)
-                note("  where: " + Self.frames(of: crash.callStackTree))
+                lines.append(line)
+                lines.append("  where: " + Self.frames(of: crash.callStackTree))
             }
             for hang in payload.hangDiagnostics ?? [] {
-                bump("diag.hangs")
+                hangs += 1
                 let seconds = hang.hangDuration.converted(to: .seconds).value
-                note(String(format: "hang of %.1f s; where: ", seconds) + Self.frames(of: hang.callStackTree))
+                lines.append(String(format: "hang of %.1f s; where: ", seconds) + Self.frames(of: hang.callStackTree))
             }
+        }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            for _ in 0..<crashes { self.bump("diag.crashes") }
+            for _ in 0..<hangs { self.bump("diag.hangs") }
+            lines.forEach { self.note($0) }
         }
     }
 
@@ -115,21 +205,61 @@ final class Diagnostics: NSObject, MXMetricManagerSubscriber {
         }
     }
 
-    /// The first frames of the thread a report is about: which library, and how far into it.
+    /// The frames of the thread a report is about, innermost first: which library, and how far into it.
+    /// All of them, down to where the thread began: the first twenty-four of 0.7.1's reports were all
+    /// inside the system and never reached the app's own code. A run of frames that repeats (a function
+    /// calling itself down the views) is written once with a count, and every frame of the app's own is
+    /// kept, since those are the ones that can be looked up afterwards.
     private static func frames(of tree: MXCallStackTree) -> String {
         guard let root = try? JSONSerialization.jsonObject(with: tree.jsonRepresentation()) as? [String: Any],
               let stacks = root["callStacks"] as? [[String: Any]]
         else { return "unknown" }
         let stack = stacks.first { ($0["threadAttributed"] as? Bool) == true } ?? stacks.first
         var frame = (stack?["callStackRootFrames"] as? [[String: Any]])?.first
-        var parts: [String] = []
-        while let here = frame, parts.count < 24 {
+        var names: [String] = []
+        while let here = frame, names.count < 400 {
             let name = here["binaryName"] as? String ?? "?"
             let offset = (here["offsetIntoBinaryTextSegment"] as? NSNumber)?.uint64Value ?? 0
-            parts.append("\(name)+\(offset)")
+            names.append("\(name)+\(offset)")
             frame = (here["subFrames"] as? [[String: Any]])?.first
         }
-        return parts.isEmpty ? "unknown" : parts.joined(separator: " > ")
+        guard !names.isEmpty else { return "unknown" }
+        // Runs of one or two frames repeating are folded.
+        var parts: [String] = []
+        var at = 0
+        while at < names.count {
+            var folded = false
+            for span in [1, 2] where at + 2 * span <= names.count {
+                var times = 1
+                let first = names[at..<(at + span)]
+                while at + (times + 1) * span <= names.count {
+                    let from = at + times * span
+                    guard names[from..<(from + span)].elementsEqual(first) else { break }
+                    times += 1
+                }
+                if times >= 3 {
+                    parts.append("(" + names[at..<(at + span)].joined(separator: " > ") + ") x\(times)")
+                    at += times * span
+                    folded = true
+                    break
+                }
+            }
+            if !folded {
+                parts.append(names[at])
+                at += 1
+            }
+        }
+        // The innermost thirty, the app's own wherever they are, and the outermost six.
+        let own = Bundle.main.executableURL?.lastPathComponent ?? "AIPencil"
+        var kept: [String] = []
+        for (index, part) in parts.enumerated() {
+            if index < 30 || index >= parts.count - 6 || part.contains(own + "+") {
+                kept.append(part)
+            } else if kept.last != "..." {
+                kept.append("...")
+            }
+        }
+        return kept.joined(separator: " > ") + " [\(names.count) frames]"
     }
 
     // MARK: for the settings screen
@@ -152,13 +282,19 @@ final class Diagnostics: NSObject, MXMetricManagerSubscriber {
         lines.append("memory: \(used), \(ProcessInfo.processInfo.physicalMemory / 1_048_576) MB in the device")
         lines.append("runs \(count("diag.launches")), ended while on screen \(cutShort), memory warnings \(memoryWarnings)")
         lines.append("crashes reported \(crashes), hangs reported \(count("diag.hangs"))")
-        lines.append("settings: own pen \(defaults.bool(forKey: "appPen")), page pictures \(flag("sharpPages")), dark paper \(flag("darkPaper")), finger writes \(defaults.bool(forKey: "fingerDraws"))")
+        lines.append("settings: dark paper \(flag("darkPaper")), finger writes \(defaults.bool(forKey: "fingerDraws")), theme \(defaults.string(forKey: "theme") ?? "system")")
+        lock.lock()
+        let last = steps
+        lock.unlock()
+        lines.append("last steps: " + last.suffix(8).joined(separator: " | "))
         lines.append("")
         if !viewNote.isEmpty {
             lines.append("page view as last seen:")
             lines.append(viewNote)
             lines.append("")
         }
+        // (Whatever is still on its way to the file is written first.)
+        writing.sync {}
         if let text = try? String(contentsOf: notes, encoding: .utf8) {
             // The newest notes; a long history is of no more use than its end.
             lines.append(contentsOf: text.split(separator: "\n").suffix(60).map(String.init))
@@ -176,7 +312,8 @@ final class Diagnostics: NSObject, MXMetricManagerSubscriber {
         for key in ["diag.cutShort", "diag.memoryWarnings", "diag.crashes", "diag.hangs", "diag.launches"] {
             defaults.removeObject(forKey: key)
         }
-        try? FileManager.default.removeItem(at: notes)
+        let notes = self.notes
+        writing.async { try? FileManager.default.removeItem(at: notes) }
     }
 
     /// The kind of device, as the system names it ("iPad13,18").

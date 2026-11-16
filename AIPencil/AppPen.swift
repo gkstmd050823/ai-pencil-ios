@@ -3,10 +3,11 @@ import UIKit
 import UIKit.UIGestureRecognizerSubclass
 
 // The app's own pen. PencilKit draws a line as it is written and takes no say in how: it cannot be asked
-// to steady a shaky hand or to answer more or less to pressure. So for the pen the app takes the touches
-// itself, works out the line (steadied, as thick as the pen pressed), and shows it as a plain filled shape
-// while it is being written. When the pen lifts the line is handed to PencilKit as a stroke like any
-// other, so the eraser, the lasso, undo and the export all work on it as before.
+// to steady a shaky hand or to answer more or less to pressure. So for the pen, the highlighter and the AI
+// pen the app takes the touches itself, works out the line (steadied, as thick as the pen pressed), and
+// shows it as a plain filled shape while it is being written. When the pen lifts the line is handed to
+// PencilKit as a stroke like any other, so the lasso, undo and the export all work on it as before; what
+// is seen of it on the page from then on is the same shape, drawn by the app (InkPaint).
 
 /// How wide lines come out. PencilKit does not draw a stroke as wide as its points say: its "monoline"
 /// ink, which the app's own pen and the shape tool hand their lines over in, draws nothing for a point
@@ -23,7 +24,14 @@ enum InkWidth {
         floor + max(width, 0.05) / rise
     }
 
-    /// How wide a line is seen for a setting of the width slider. From 2.3 up it is what PencilKit's
+    /// How wide a stroke's point of this size is seen: the other way round. (A size of 2 or less, which
+    /// PencilKit draws as next to nothing, is drawn as a hairline.)
+    static func width(ofSize size: CGFloat) -> CGFloat {
+        max(0.2, rise * (size - floor))
+    }
+
+    /// How wide a line was seen for a setting of the width slider that the pen had before 0.8.0; used
+    /// to carry a saved setting over to the millimetres the pen is set in now. From 2.3 up it is what PencilKit's
     /// monoline pen draws at that setting; below, where PencilKit would draw nearly nothing, it runs
     /// evenly down to a fine line that can still be seen.
     static func seen(setting: CGFloat) -> CGFloat {
@@ -145,41 +153,9 @@ struct PenLine {
         return PKStroke(ink: PKInk(ink, color: color), path: PKStrokePath(controlPoints: control, creationDate: Date()))
     }
 
-    /// The line from point [from] onward as a shape to fill: a disc at every point and a band between each
-    /// two. Every piece turns the same way round, so that where pieces overlap the filling does not cancel.
+    /// The line from point [from] onward as a shape to fill.
     func shape(from: Int) -> CGPath {
-        let path = CGMutablePath()
-        guard !points.isEmpty else { return path }
-        let first = max(0, min(from, points.count - 1))
-        for index in first..<points.count {
-            let here = points[index]
-            let radius = widths[index] / 2
-            path.addArc(center: here, radius: radius, startAngle: 0, endAngle: 2 * .pi, clockwise: false)
-            path.closeSubpath()
-            guard index > first else { continue }
-            let before = points[index - 1]
-            let radiusBefore = widths[index - 1] / 2
-            let dx = here.x - before.x, dy = here.y - before.y
-            let length = hypot(dx, dy)
-            guard length > 0.01 else { continue }
-            let nx = -dy / length, ny = dx / length
-            var corners = [
-                CGPoint(x: before.x + nx * radiusBefore, y: before.y + ny * radiusBefore),
-                CGPoint(x: here.x + nx * radius, y: here.y + ny * radius),
-                CGPoint(x: here.x - nx * radius, y: here.y - ny * radius),
-                CGPoint(x: before.x - nx * radiusBefore, y: before.y - ny * radiusBefore),
-            ]
-            var area: CGFloat = 0
-            for corner in 0..<4 {
-                let a = corners[corner], b = corners[(corner + 1) % 4]
-                area += a.x * b.y - b.x * a.y
-            }
-            // (The discs go round the way that makes this sum positive.)
-            if area < 0 { corners.reverse() }
-            path.addLines(between: corners)
-            path.closeSubpath()
-        }
-        return path
+        InkPaint.shape(points: points, widths: widths, from: from)
     }
 }
 

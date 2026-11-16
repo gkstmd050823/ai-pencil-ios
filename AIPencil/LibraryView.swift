@@ -18,11 +18,15 @@ struct LibraryView: View {
                     ReaderView(doc: doc)
                 }
         }
-        // A PDF handed over by another app ("open in", share sheet).
+        // A PDF handed over by another app ("open in", share sheet): it is copied in and opened at once,
+        // whatever was on screen.
         .onOpenURL { url in
+            Diagnostics.shared.step("handed a file")
             Task { @MainActor in
                 do {
-                    path.append(try await library.bringIn(url))
+                    let doc = try await library.bringIn(url)
+                    path = NavigationPath()
+                    path.append(doc)
                 } catch {
                     errorText = error.localizedDescription
                 }
@@ -52,8 +56,11 @@ struct LibraryView: View {
                 path.append(doc)
             }
         } else if arguments.contains("-demoNote") {
-            let paper = PaperKind(rawValue: UserDefaults.standard.string(forKey: "demoPaper") ?? "") ?? .blank
-            if let note = try? library.createNote(paper: paper) { path.append(note) }
+            let defaults = UserDefaults.standard
+            let paper = PaperKind(rawValue: defaults.string(forKey: "demoPaper") ?? "") ?? .blank
+            // ("-demoPaperSize a5 -demoLandscape YES" for another size of paper.)
+            let size = (PaperSize(rawValue: defaults.string(forKey: "demoPaperSize") ?? "") ?? .a4).points(landscape: defaults.bool(forKey: "demoLandscape"))
+            if let note = try? library.createNote(paper: paper, size: size) { path.append(note) }
         } else if let name = UserDefaults.standard.string(forKey: "demoImport") {
             let title = (name as NSString).deletingPathExtension
             let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -127,6 +134,9 @@ private struct Shelf: View {
         }
         .navigationTitle(folder?.name ?? "문서")
         .searchable(text: $search, prompt: "문서 찾기")
+        .onChange(of: choosingPaper) {
+            Diagnostics.shared.step(choosingPaper ? "paper sheet opened" : "paper sheet closed")
+        }
         .toolbar {
             if folder == nil {
                 ToolbarItem(placement: .navigationBarLeading) {
@@ -213,8 +223,8 @@ private struct Shelf: View {
             SettingsView()
         }
         .sheet(isPresented: $choosingPaper) {
-            PaperSheet { paper in
-                newNote(paper)
+            PaperSheet { paper, size in
+                newNote(paper, size)
             }
         }
         .alert("이름 바꾸기", isPresented: Binding(get: { renamingDoc != nil || renamingFolder != nil }, set: { if !$0 { renamingDoc = nil; renamingFolder = nil } })) {
@@ -265,37 +275,112 @@ private struct Shelf: View {
         }
     }
 
+    /// The documents opened last, from any folder: the ones most likely to be wanted again.
+    private var recent: [Doc] {
+        guard folder == nil, !searching else { return [] }
+        return Array(library.docs.filter { $0.openedAt != nil }.sorted { ($0.openedAt ?? $0.addedAt) > ($1.openedAt ?? $1.addedAt) }.prefix(8))
+    }
+
     private var grid: some View {
         ScrollView {
-            LazyVGrid(columns: columns, spacing: 22) {
-                ForEach(folders) { item in
-                    NavigationLink(value: item) {
-                        FolderCard(folder: item, count: count(in: item))
-                    }
-                    .buttonStyle(.plain)
-                    .contextMenu {
-                        Button {
-                            newName = item.name
-                            renamingFolder = item
-                        } label: {
-                            Label("이름 바꾸기", systemImage: "pencil")
-                        }
-                        Button(role: .destructive) {
-                            deletingFolder = item
-                        } label: {
-                            Label("폴더 삭제", systemImage: "trash")
+            VStack(alignment: .leading, spacing: 28) {
+                if !searching {
+                    quickActions
+                }
+                if recent.count > 1 {
+                    VStack(alignment: .leading, spacing: 12) {
+                        heading("이어서 보기", count: nil)
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 14) {
+                                ForEach(recent) { doc in
+                                    NavigationLink(value: doc) {
+                                        RecentCard(doc: doc)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .contextMenu { docMenu(doc) }
+                                }
+                            }
+                            .padding(.vertical, 4)
+                            .padding(.horizontal, 2)
                         }
                     }
                 }
-                ForEach(docs) { doc in
-                    NavigationLink(value: doc) {
-                        DocCard(doc: doc, folderName: folderName(for: doc))
+                if !folders.isEmpty {
+                    VStack(alignment: .leading, spacing: 14) {
+                        heading("폴더", count: folders.count)
+                        LazyVGrid(columns: columns, alignment: .leading, spacing: 22) {
+                            ForEach(folders) { item in
+                                NavigationLink(value: item) {
+                                    FolderCard(folder: item, count: count(in: item))
+                                }
+                                .buttonStyle(.plain)
+                                .contextMenu {
+                                    Button {
+                                        newName = item.name
+                                        renamingFolder = item
+                                    } label: {
+                                        Label("이름 바꾸기", systemImage: "pencil")
+                                    }
+                                    Button(role: .destructive) {
+                                        deletingFolder = item
+                                    } label: {
+                                        Label("폴더 삭제", systemImage: "trash")
+                                    }
+                                }
+                            }
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .contextMenu { docMenu(doc) }
+                }
+                if !docs.isEmpty {
+                    VStack(alignment: .leading, spacing: 14) {
+                        heading(searching ? "찾은 문서" : "문서", count: docs.count)
+                        LazyVGrid(columns: columns, alignment: .leading, spacing: 24) {
+                            ForEach(docs) { doc in
+                                NavigationLink(value: doc) {
+                                    DocCard(doc: doc, folderName: folderName(for: doc))
+                                }
+                                .buttonStyle(.plain)
+                                .contextMenu { docMenu(doc) }
+                            }
+                        }
+                    }
                 }
             }
-            .padding(22)
+            .padding(.horizontal, 26)
+            .padding(.top, 14)
+            .padding(.bottom, 40)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(Color(uiColor: .systemGroupedBackground))
+    }
+
+    private func heading(_ title: String, count: Int?) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(title)
+                .font(.title3.weight(.bold))
+            if let count {
+                Text("\(count)")
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// The ways to get a document, as large buttons at the top of the shelf.
+    private var quickActions: some View {
+        HStack(spacing: 14) {
+            QuickAction(symbol: "square.and.pencil", title: "새 노트", detail: "종이와 크기를 골라요") {
+                choosingPaper = true
+            }
+            QuickAction(symbol: "arrow.down.doc", title: "PDF 가져오기", detail: "파일 앱에서 골라요") {
+                importing = true
+            }
+            if folder == nil {
+                QuickAction(symbol: "folder.badge.plus", title: "새 폴더", detail: "문서를 묶어 둬요") {
+                    newName = ""
+                    makingFolder = true
+                }
+            }
         }
     }
 
@@ -372,7 +457,7 @@ private struct Shelf: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             } else {
-                Image(systemName: "scribble.variable")
+                Image(systemName: "pencil.and.scribble")
                     .font(.system(size: 54))
                     .foregroundStyle(.tint)
                 Text("읽다가 막히면 동그라미")
@@ -394,46 +479,114 @@ private struct Shelf: View {
         }
         .padding(36)
         .frame(maxWidth: 520)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(uiColor: .systemGroupedBackground))
     }
 
-    private func newNote(_ paper: PaperKind) {
+    private func newNote(_ paper: PaperKind, _ size: CGSize) {
         do {
-            path.append(try library.createNote(in: folder?.id, paper: paper))
+            path.append(try library.createNote(in: folder?.id, paper: paper, size: size))
         } catch {
             errorText = error.localizedDescription
         }
     }
 }
 
-/// Choosing the paper of a new notebook.
+/// One of the large buttons at the top of the shelf.
+private struct QuickAction: View {
+    let symbol: String
+    let title: String
+    let detail: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: symbol)
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 42, height: 42)
+                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Choosing the paper of a new notebook: how large, which way up, and what is printed on it.
 private struct PaperSheet: View {
-    let onPick: (PaperKind) -> Void
+    let onPick: (PaperKind, CGSize) -> Void
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("noteSize") private var size = PaperSize.a4
+    @AppStorage("noteLandscape") private var landscape = false
 
     private let columns = [GridItem(.adaptive(minimum: 130, maximum: 170), spacing: 20)]
+
+    private var points: CGSize { size.points(landscape: landscape) }
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                LazyVGrid(columns: columns, spacing: 22) {
-                    ForEach(PaperKind.allCases) { kind in
-                        Button {
-                            dismiss()
-                            onPick(kind)
-                        } label: {
-                            VStack(spacing: 9) {
-                                PaperPreview(kind: kind)
-                                Text(kind.label)
-                                    .font(.subheadline.weight(.medium))
-                                    .foregroundStyle(.primary)
+                VStack(alignment: .leading, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("종이 크기")
+                            .font(.subheadline.weight(.semibold))
+                        Picker("종이 크기", selection: $size) {
+                            ForEach(PaperSize.allCases) { item in
+                                Text(item.label).tag(item)
                             }
                         }
-                        .buttonStyle(.plain)
+                        .pickerStyle(.segmented)
+                        HStack {
+                            Picker("방향", selection: $landscape) {
+                                Text("세로").tag(false)
+                                Text("가로").tag(true)
+                            }
+                            .pickerStyle(.segmented)
+                            .frame(width: 170)
+                            Spacer()
+                            Text(size.millimetres(landscape: landscape))
+                                .font(.footnote.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Text("종이 종류")
+                        .font(.subheadline.weight(.semibold))
+                    LazyVGrid(columns: columns, spacing: 22) {
+                        ForEach(PaperKind.allCases) { kind in
+                            Button {
+                                let chosen = points
+                                dismiss()
+                                onPick(kind, chosen)
+                            } label: {
+                                VStack(spacing: 9) {
+                                    PaperPreview(kind: kind, size: points)
+                                        .frame(height: 190)
+                                    Text(kind.label)
+                                        .font(.subheadline.weight(.medium))
+                                        .foregroundStyle(.primary)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
                 }
                 .padding(24)
             }
-            .navigationTitle("새 노트의 종이")
+            .navigationTitle("새 노트")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -446,6 +599,7 @@ private struct PaperSheet: View {
 
 private struct PaperPreview: View {
     let kind: PaperKind
+    let size: CGSize
     @State private var picture: UIImage?
 
     var body: some View {
@@ -457,29 +611,39 @@ private struct PaperPreview: View {
                     .scaledToFit()
             }
         }
-        .aspectRatio(0.707, contentMode: .fit)
+        .aspectRatio(size.width / max(size.height, 1), contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.14), lineWidth: 1))
         .shadow(color: .black.opacity(0.10), radius: 6, y: 3)
-        .task {
-            if picture == nil { picture = Paper.preview(kind) }
+        .task(id: "\(kind.rawValue) \(Int(size.width)) \(Int(size.height))") {
+            picture = Paper.preview(kind, size: size)
         }
     }
 }
 
-/// A folder on the shelf.
+/// A folder on the shelf. Each folder has a colour of its own, the same every time.
 private struct FolderCard: View {
     let folder: Folder
     let count: Int
 
+    private static let tints: [Color] = [
+        Color(red: 0.20, green: 0.50, blue: 0.96), Color(red: 0.06, green: 0.64, blue: 0.61),
+        Color(red: 0.96, green: 0.58, blue: 0.14), Color(red: 0.90, green: 0.36, blue: 0.48),
+        Color(red: 0.36, green: 0.42, blue: 0.84), Color(red: 0.24, green: 0.66, blue: 0.36),
+    ]
+
+    private var tint: Color {
+        Self.tints[Int(folder.id.uuid.0) % Self.tints.count]
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ZStack {
-                RoundedRectangle(cornerRadius: 14)
-                    .fill(Color.accentColor.opacity(0.10))
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color(uiColor: .secondarySystemGroupedBackground))
                 Image(systemName: "folder.fill")
-                    .font(.system(size: 54))
-                    .foregroundStyle(Color.accentColor.opacity(0.85))
+                    .font(.system(size: 62))
+                    .foregroundStyle(tint.gradient)
             }
             .aspectRatio(0.84, contentMode: .fit)
 
@@ -489,6 +653,50 @@ private struct FolderCard: View {
             Text("문서 \(count)개")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// A document opened lately, in the row at the top of the shelf: smaller than on the shelf, and lying down.
+private struct RecentCard: View {
+    let doc: Doc
+    @EnvironmentObject private var library: Library
+    @State private var cover: UIImage?
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                Color.clear
+                if let cover {
+                    Image(uiImage: cover)
+                        .resizable()
+                        .scaledToFit()
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .shadow(color: .black.opacity(0.16), radius: 3, y: 1)
+                }
+            }
+            .frame(width: 62, height: 82)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(doc.title)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                Text("\(doc.pageCount)쪽")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let opened = doc.openedAt {
+                    Text(opened.formatted(.relative(presentation: .named)))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .frame(width: 236, height: 106, alignment: .leading)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .task(id: doc.id) {
+            cover = await library.cover(for: doc, width: 440)
         }
     }
 }
@@ -518,8 +726,9 @@ private struct DocCard: View {
                     Image(uiImage: cover)
                         .resizable()
                         .scaledToFit()
-                        .clipShape(RoundedRectangle(cornerRadius: 5))
-                        .shadow(color: .black.opacity(0.18), radius: 4, y: 2)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
+                        .shadow(color: .black.opacity(0.16), radius: 7, y: 3)
                 }
             }
             .aspectRatio(0.84, contentMode: .fit)

@@ -18,6 +18,47 @@ enum PaperKind: String, CaseIterable, Identifiable, Codable {
     }
 }
 
+/// The sizes of paper a notebook can be made of.
+enum PaperSize: String, CaseIterable, Identifiable, Codable {
+    case a3, a4, a5, b5, letter
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .a3: return "A3"
+        case .a4: return "A4"
+        case .a5: return "A5"
+        case .b5: return "B5"
+        case .letter: return "레터"
+        }
+    }
+
+    /// Width and height in millimetres, standing upright. (B5 is the one notebooks are sold in here: 182 x 257.)
+    private var upright: (Double, Double) {
+        switch self {
+        case .a3: return (297, 420)
+        case .a4: return (210, 297)
+        case .a5: return (148, 210)
+        case .b5: return (182, 257)
+        case .letter: return (215.9, 279.4)
+        }
+    }
+
+    /// The size in page points.
+    func points(landscape: Bool) -> CGSize {
+        let (width, height) = upright
+        let w = (width * 72 / 25.4 * 100).rounded() / 100, h = (height * 72 / 25.4 * 100).rounded() / 100
+        return landscape ? CGSize(width: h, height: w) : CGSize(width: w, height: h)
+    }
+
+    func millimetres(landscape: Bool) -> String {
+        let (width, height) = upright
+        func text(_ value: Double) -> String { value == value.rounded() ? String(Int(value)) : String(format: "%.1f", value) }
+        return landscape ? "\(text(height)) × \(text(width)) mm" : "\(text(width)) × \(text(height)) mm"
+    }
+}
+
 /// Makes notebook pages. A page is a real PDF page with its lines drawn on it, so the lines are there in
 /// other apps and in exports too.
 enum Paper {
@@ -91,7 +132,7 @@ enum Paper {
             out.dots = Art.Dots(color: strong, radius: 0.7, centres: centres)
         case .cornell:
             // A column for cues on the left, notes on the right, a box for the summary at the foot.
-            let cue: CGFloat = 158, foot = size.height - 150
+            let cue: CGFloat = min(158, size.width * 0.27), foot = size.height - min(150, size.height * 0.18)
             var rows: [(CGPoint, CGPoint)] = []
             var y: CGFloat = 76
             while y < foot - 8 {
@@ -196,7 +237,9 @@ enum Paper {
     }
 
     /// A small picture of the paper, for choosing one.
-    static func preview(_ kind: PaperKind) -> UIImage? {
-        page(kind)?.thumbnail(of: CGSize(width: 300, height: 424), for: .mediaBox)
+    static func preview(_ kind: PaperKind, size: CGSize = a4) -> UIImage? {
+        let longest = max(size.width, size.height, 1)
+        let small = CGSize(width: (size.width * 420 / longest).rounded(), height: (size.height * 420 / longest).rounded())
+        return page(kind, size: size)?.thumbnail(of: small, for: .mediaBox)
     }
 }

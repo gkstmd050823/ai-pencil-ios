@@ -85,7 +85,7 @@ final class TouchTests: XCTestCase {
         drag(from: (190, 610), to: (190, 730))
         shot("33-touch-highlighter-only")
 
-        // PencilKit's own eraser, put down after use: the pen line goes and the pen is back in hand.
+        // The eraser that takes whole lines, put down after use: the pen line goes and the pen is back in hand.
         start(["-demoTool", "eraser", "-demoEraserAuto", "YES", "-demoHighlighterOnly", "NO"])
         drag(from: (190, 610), to: (190, 730))
         shot("34-touch-erase-then-pen")
@@ -97,7 +97,7 @@ final class TouchTests: XCTestCase {
 
         // The app's own pen, on the blank page added earlier: three lines one after another without a
         // pause, then a look once it has paused.
-        start(["-demoTool", "pen", "-demoPage", "2", "-appPen", "YES"])
+        start(["-demoTool", "pen", "-demoPage", "2", "-demoPenKind", "fountain"])
         drag(from: (60, 200), to: (300, 212))
         place(60, 240).press(forDuration: 0.15, thenDragTo: place(300, 250), withVelocity: .fast, thenHoldForDuration: 0.05)
         place(60, 285).press(forDuration: 0.15, thenDragTo: place(300, 278), withVelocity: .fast, thenHoldForDuration: 0.05)
@@ -112,17 +112,26 @@ final class TouchTests: XCTestCase {
         }
         shot("36-touch-own-pen-undone")
 
-        // PencilKit's pen, which is what writes unless the app's own is switched on: right after the line
-        // the canvas shows; once the hand has rested, the app's picture of the handwriting does.
-        start(["-demoTool", "pen", "-demoPage", "2"])
+        // The pencil, which is PencilKit's: while it is in hand the canvas shows.
+        start(["-demoTool", "pen", "-demoPage", "2", "-demoPenKind", "pencil"])
         drag(from: (330, 380), to: (540, 410))
-        shot("37-touch-pencilkit-pen-just-written")
+        shot("37-touch-pencil-just-written")
         sleep(3)
-        shot("37-touch-pencilkit-pen-settled")
+        shot("37-touch-pencil-settled")
+
+        // The highlighter over print, twice over the same words and once across: the words stay as dark
+        // as they were, and where the lines cross it is no darker than one line.
+        start(["-demoTool", "highlighter", "-demoHighlighterAuto", "NO"])
+        drag(from: (40, 163), to: (330, 163))
+        drag(from: (60, 166), to: (300, 160))
+        drag(from: (150, 140), to: (210, 200))
+        shot("42-touch-highlighter-over-print-just-written")
+        sleep(2)
+        shot("42-touch-highlighter-over-print")
 
         // Zoomed in as far as the page view goes, the canvas lies over the part of the page in view only,
         // and is as fine as the screen. A line written there has to land under the finger.
-        start(["-demoTool", "pen", "-demoPage", "2", "-demoZoom", "3.7"])
+        start(["-demoTool", "pen", "-demoPage", "2", "-demoZoom", "3.7", "-demoPenKind", "fountain"])
         screenDrag(from: (150, 500), to: (650, 560))
         shot("39-zoom-pen-just-written")
         sleep(2)
@@ -133,14 +142,17 @@ final class TouchTests: XCTestCase {
         shot("39-zoom-before-scroll")
         screenDrag(from: (400, 800), to: (400, 650))
         shot("39-zoom-after-scroll")
+        // And dragged aslant it goes aslant: across and up the page at once.
+        screenDrag(from: (560, 760), to: (360, 560))
+        shot("43-zoom-after-slanted-scroll")
 
         // The eraser rubs the line out where it is seen.
         start(["-demoTool", "eraser", "-demoPage", "2", "-demoZoom", "3.7", "-demoEraserKind", "stroke", "-demoHighlighterOnly", "NO", "-demoEraserAuto", "NO"])
         screenDrag(from: (400, 440), to: (400, 620))
         shot("39-zoom-erased")
 
-        // The app's own pen, zoomed in.
-        start(["-demoTool", "pen", "-demoPage", "2", "-demoZoom", "3.7", "-appPen", "YES"])
+        // The pen once more, zoomed in, at 0.8 mm.
+        start(["-demoTool", "pen", "-demoPage", "2", "-demoZoom", "3.7", "-demoPenSize", "0.8"])
         screenDrag(from: (150, 700), to: (650, 740))
         shot("39-zoom-own-pen-just-written")
         sleep(2)
@@ -166,6 +178,21 @@ final class TouchTests: XCTestCase {
         shot("41-part-eraser-zoomed-before")
         screenDrag(from: (260, 760), to: (780, 760))
         shot("41-part-eraser-zoomed-after")
+
+        // The eraser that takes whole lines, at two sizes, on the page full of lines: a large one takes
+        // every line its ring touches, a small one only what it runs over.
+        start(["-demoTool", "eraser", "-demoPage", "4", "-demoEraserKind", "stroke", "-demoEraserWidth", "48", "-demoHighlighterOnly", "NO", "-demoEraserAuto", "NO"])
+        drag(from: (60, 420), to: (540, 420))
+        shot("44-line-eraser-large")
+        start(["-demoTool", "eraser", "-demoPage", "4", "-demoEraserKind", "stroke", "-demoEraserWidth", "8", "-demoHighlighterOnly", "NO", "-demoEraserAuto", "NO"])
+        drag(from: (60, 540), to: (540, 540))
+        shot("44-line-eraser-small")
+        let undoRub = app.buttons["실행 취소"]
+        if undoRub.waitForExistence(timeout: 3), undoRub.isEnabled {
+            undoRub.tap()
+            sleep(2)
+        }
+        shot("44-line-eraser-undone")
         app.terminate()
     }
 
