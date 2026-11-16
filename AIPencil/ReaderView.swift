@@ -36,6 +36,11 @@ struct ReaderView: View {
     /// While its edge is being dragged the share is kept here and written to the settings once, at the end.
     @AppStorage("panelShare") private var panelShare = 0.44
     @State private var liveShare: Double?
+    /// Reading only: fingers scroll and nothing else, and the pen is the AI pen whatever tool is in hand.
+    @AppStorage("readOnly") private var readOnly = false
+    /// Asking which pages to export, and what was typed.
+    @State private var askingPages = false
+    @State private var pagesText = ""
     @State private var choice = InkChoice.saved()
     /// The tool that was in hand before the one that is now, for the Pencil's "back to the last tool".
     @State private var previousTool = InkTool.eraser
@@ -108,17 +113,25 @@ struct ReaderView: View {
                     Label("질문 목록", systemImage: "text.bubble")
                 }
                 Button {
-                    mathDraft = MathDraft()
+                    readOnly.toggle()
+                    Diagnostics.shared.step(readOnly ? "reading only" : "reading and writing")
                 } label: {
-                    Label("수식 넣기", systemImage: "sum")
+                    Label(readOnly ? "읽기 전용 끄기" : "읽기 전용", systemImage: readOnly ? "eye.fill" : "eye")
                 }
-                Button {
-                    fingerDraws.toggle()
-                } label: {
-                    Label(
-                        fingerDraws ? "손가락 필기 끄기" : "손가락 필기 켜기",
-                        systemImage: fingerDraws ? "hand.draw.fill" : "hand.draw"
-                    )
+                if !readOnly {
+                    Button {
+                        mathDraft = MathDraft()
+                    } label: {
+                        Label("수식 넣기", systemImage: "sum")
+                    }
+                    Button {
+                        fingerDraws.toggle()
+                    } label: {
+                        Label(
+                            fingerDraws ? "손가락 필기 끄기" : "손가락 필기 켜기",
+                            systemImage: fingerDraws ? "hand.draw.fill" : "hand.draw"
+                        )
+                    }
                 }
                 Button {
                     openNavigator(.search)
@@ -158,6 +171,23 @@ struct ReaderView: View {
         }
         .sheet(item: $exported) { file in
             ActivityView(items: [file.url])
+        }
+        .alert("내보낼 쪽", isPresented: $askingPages) {
+            TextField("예: 1-3, 7", text: $pagesText)
+                .keyboardType(.numbersAndPunctuation)
+            Button("이 쪽만") {
+                export(toDocuments: false, pages: [controller.pageIndex])
+            }
+            Button("적은 쪽만") {
+                if let pages = PageRanges.parse(pagesText, count: controller.pageCount) {
+                    export(toDocuments: false, pages: pages)
+                } else {
+                    errorText = "쪽을 알아볼 수 없어요. 1-3, 7처럼 적어 주세요. 이 문서는 \(controller.pageCount)쪽까지 있어요."
+                }
+            }
+            Button("취소", role: .cancel) {}
+        } message: {
+            Text("쉼표로 나누고, 이어진 쪽은 1-3처럼 적어요. 전체 \(controller.pageCount)쪽.")
         }
         .alert("하지 못했어요", isPresented: Binding(get: { errorText != nil }, set: { if !$0 { errorText = nil } })) {
             Button("확인", role: .cancel) {}
@@ -225,6 +255,12 @@ struct ReaderView: View {
             } label: {
                 Label("PDF로 내보내기", systemImage: "square.and.arrow.up")
             }
+            Button {
+                pagesText = ""
+                askingPages = true
+            } label: {
+                Label("쪽을 골라 PDF로 내보내기", systemImage: "doc.on.doc")
+            }
             Divider()
             Toggle(isOn: $showAiMarks) {
                 Label("AI 표시 보이기", systemImage: "sparkles")
@@ -248,12 +284,35 @@ struct ReaderView: View {
     /// The tool bar has a strip of its own above the pages, so that it never covers the top of a page.
     private func pages(roomy: Bool) -> some View {
         VStack(spacing: 0) {
-            ToolBar(
-                choice: $choice, showingOptions: $showingOptions, darkPaper: showsDark, roomy: roomy,
-                canUndo: controller.canUndo, canRedo: controller.canRedo, questions: answered,
-                onPick: pick, onUndo: controller.undo, onRedo: controller.redo,
-                onQuestions: { showingQuestions = true }, onClearPage: controller.clearPage
-            )
+            Group {
+                if readOnly {
+                    // Reading only: no tools, and a word on what the pen and the fingers do.
+                    HStack(spacing: 10) {
+                        Image(systemName: "eye")
+                            .foregroundStyle(Color(uiColor: InkChoice.markColor))
+                        Text("읽기 전용 · 손가락은 넘기기만, 펜으로 동그라미를 치면 설명해 줘요")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                        Button("끄기") {
+                            readOnly = false
+                        }
+                        .font(.footnote.weight(.semibold))
+                    }
+                    .padding(.horizontal, 16)
+                    .frame(height: 42)
+                    .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
+                } else {
+                    ToolBar(
+                        choice: $choice, showingOptions: $showingOptions, darkPaper: showsDark, roomy: roomy,
+                        canUndo: controller.canUndo, canRedo: controller.canRedo, questions: answered,
+                        onPick: pick, onUndo: controller.undo, onRedo: controller.redo,
+                        onQuestions: { showingQuestions = true }, onClearPage: controller.clearPage
+                    )
+                }
+            }
             .padding(.vertical, 7)
             .frame(maxWidth: .infinity)
             .background(backdrop)
@@ -263,8 +322,8 @@ struct ReaderView: View {
                 url: library.pdfURL(for: doc.id),
                 store: DrawingStore(folder: folder),
                 mathStore: mathStore,
-                choice: choice,
-                fingerDraws: fingerDraws,
+                choice: inHand,
+                fingerDraws: fingerDraws && !readOnly,
                 layout: layoutMode,
                 darkPaper: showsDark,
                 startPage: startPage,
@@ -351,6 +410,14 @@ struct ReaderView: View {
         .shadow(color: .black.opacity(0.14), radius: 12, x: wide ? -2 : 0, y: wide ? 0 : -2)
     }
 
+    /// What the pages are written on with: the tool in hand, or, reading only, the AI pen.
+    private var inHand: InkChoice {
+        guard readOnly else { return choice }
+        var only = choice
+        only.tool = .ai
+        return only
+    }
+
     /// Takes a tool in hand, remembering the one put down.
     private func pick(_ tool: InkTool) {
         if tool != choice.tool {
@@ -361,6 +428,8 @@ struct ReaderView: View {
 
     /// A double tap or a squeeze of the Apple Pencil.
     private func pencil(_ action: PencilAction) {
+        // (Reading only, the pen has one tool and nothing to switch to.)
+        if readOnly { return }
         switch action {
         case .eraser:
             pick(choice.tool == .eraser ? (previousTool == .eraser ? .pen : previousTool) : .eraser)
@@ -422,7 +491,13 @@ struct ReaderView: View {
             pencil(action)
         }
         bookmarks = BookmarkStore(folder: folder).load()
-        library.touch(doc)
+        // Noted as opened once the screen has settled: it reorders the shelf this screen came from,
+        // and the shelf is not given a new order in the middle of being left.
+        let opened = doc
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak library] in
+            library?.touch(opened)
+        }
+        Diagnostics.shared.step("reader shown")
         session.attach(title: doc.title, pdfURL: library.pdfURL(for: doc.id), folder: folder, controller: controller)
         runDemoIfAsked()
     }
@@ -456,8 +531,9 @@ struct ReaderView: View {
 
     /// Makes a copy of the document with the handwriting drawn in and offers to send it somewhere.
     /// For the build server the copy is put in the app's Documents folder instead.
-    private func export(toDocuments: Bool) {
+    private func export(toDocuments: Bool, pages: [Int]? = nil) {
         guard !exporting else { return }
+        Diagnostics.shared.step(pages == nil ? "exporting" : "exporting \(pages?.count ?? 0) pages")
         exporting = true
         controller.save()
         let pdfURL = library.pdfURL(for: doc.id)
@@ -466,7 +542,7 @@ struct ReaderView: View {
         let withMarks = showAiMarks
         Task { @MainActor in
             let url = await Task.detached(priority: .userInitiated) {
-                Exporter.export(pdfURL: pdfURL, folder: folder, title: title, withMarks: withMarks)
+                Exporter.export(pdfURL: pdfURL, folder: folder, title: title, withMarks: withMarks, pages: pages)
             }.value
             exporting = false
             guard let url else {
@@ -581,7 +657,9 @@ struct ReaderView: View {
             later(2) { controller.demoShapes() }
         }
         if arguments.contains("-demoExport") {
-            later(3) { export(toDocuments: true) }
+            // ("-demoExportPages 2,4-5" exports those pages only.)
+            let fewer = defaults.string(forKey: "demoExportPages").flatMap { PageRanges.parse($0, count: 100_000) }
+            later(3) { export(toDocuments: true, pages: fewer) }
         }
         // "-demoZoom 2.5" zooms in that many times past fitting the page, to see how sharp ink stays.
         let zoom = defaults.double(forKey: "demoZoom")

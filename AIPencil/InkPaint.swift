@@ -78,16 +78,45 @@ enum InkPaint {
         return line
     }
 
+    /// The corners of a circle of one, for discs of so many sides, worked out once.
+    private static var rounds: [Int: [CGPoint]] = [:]
+    private static let roundsLock = NSLock()
+
+    private static func round(sides: Int) -> [CGPoint] {
+        roundsLock.lock()
+        defer { roundsLock.unlock() }
+        if let kept = rounds[sides] { return kept }
+        var made: [CGPoint] = []
+        for side in 0..<sides {
+            let angle = 2 * CGFloat.pi * CGFloat(side) / CGFloat(sides)
+            made.append(CGPoint(x: cos(angle), y: sin(angle)))
+        }
+        rounds[sides] = made
+        return made
+    }
+
     /// A line as a shape to fill: a disc at every point and a band between each two. Every piece turns
     /// the same way round, so that where pieces overlap the filling does not cancel.
-    static func shape(points: [CGPoint], widths: [CGFloat], from: Int) -> CGPath {
+    ///
+    /// The discs are many-sided shapes with straight sides, as many as it takes for a side to be about a
+    /// pixel and a half long at [fineness] pixels to a page point. A true circle would be left to whoever
+    /// draws the path to make into straight sides, and the layer that shows a line while it is being
+    /// written does that for the size of a page point, not for the page as it is zoomed on screen: the
+    /// outside of a curve, which is made of these discs, came out in visible corners.
+    static func shape(points: [CGPoint], widths: [CGFloat], from: Int, to: Int? = nil, fineness: CGFloat = 4) -> CGPath {
         let path = CGMutablePath()
-        guard !points.isEmpty else { return path }
-        let first = max(0, min(from, points.count - 1))
-        for index in first..<points.count {
+        let end = min(to ?? points.count, points.count)
+        guard end > 0 else { return path }
+        let first = max(0, min(from, end - 1))
+        for index in first..<end {
             let here = points[index]
             let radius = widths[index] / 2
-            path.addArc(center: here, radius: radius, startAngle: 0, endAngle: 2 * .pi, clockwise: false)
+            let sides = max(10, min(48, Int((2 * CGFloat.pi * radius * fineness / 1.5).rounded(.up))))
+            let unit = round(sides: sides)
+            path.move(to: CGPoint(x: here.x + unit[0].x * radius, y: here.y + unit[0].y * radius))
+            for side in 1..<sides {
+                path.addLine(to: CGPoint(x: here.x + unit[side].x * radius, y: here.y + unit[side].y * radius))
+            }
             path.closeSubpath()
             guard index > first else { continue }
             let before = points[index - 1]
@@ -116,7 +145,7 @@ enum InkPaint {
     }
 
     /// Draws a line in a colour.
-    static func draw(_ line: Line, color: CGColor, in context: CGContext) {
+    static func draw(_ line: Line, color: CGColor, in context: CGContext, fineness: CGFloat = 4) {
         guard let first = line.points.first else { return }
         if line.even {
             context.setStrokeColor(color)
@@ -130,7 +159,7 @@ enum InkPaint {
             context.strokePath()
         } else {
             context.setFillColor(color)
-            context.addPath(shape(points: line.points, widths: line.widths, from: 0))
+            context.addPath(shape(points: line.points, widths: line.widths, from: 0, fineness: fineness))
             context.fillPath()
         }
     }
@@ -202,7 +231,7 @@ enum InkPaint {
             guard box.intersects(region) else { continue }
             if isPlain(stroke) {
                 flush()
-                draw(line(of: stroke, step: step), color: color(of: stroke, dark: dark, solid: solid), in: context)
+                draw(line(of: stroke, step: step), color: color(of: stroke, dark: dark, solid: solid), in: context, fineness: scale)
             } else {
                 others.append(stroke)
                 othersBox = othersBox.union(box)

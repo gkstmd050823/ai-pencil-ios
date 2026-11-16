@@ -10,7 +10,7 @@ import XCTest
 final class TouchTests: XCTestCase {
     private let app = XCUIApplication()
     /// Where the first page's corner is on screen, and how many screen points a page point takes.
-    private let corner = CGPoint(x: 10, y: 159.3)
+    private let corner = CGPoint(x: 10, y: 195.3)
     private let zoom: CGFloat = 1.3576
 
     override func setUp() {
@@ -193,6 +193,34 @@ final class TouchTests: XCTestCase {
             sleep(2)
         }
         shot("44-line-eraser-undone")
+
+        // The tabs: another document's tab shows that document, the first one's brings it back, and a
+        // tab's cross closes it.
+        start(["-demoTool", "pen"])
+        let other = app.buttons["tricky 탭"]
+        if other.waitForExistence(timeout: 3) {
+            other.tap()
+            sleep(4)
+        }
+        shot("46-tab-other-document")
+        let back = app.buttons["샘플 탭"]
+        if back.waitForExistence(timeout: 3) {
+            back.tap()
+            sleep(4)
+        }
+        shot("46-tab-back")
+        let close = app.buttons["tricky 탭 닫기"]
+        if close.waitForExistence(timeout: 3) {
+            close.tap()
+            sleep(2)
+        }
+        shot("46-tab-closed")
+
+        // Reading only: a finger does not write, whatever tool is in hand and whatever the setting for
+        // writing with fingers; it scrolls the page.
+        start(["-demoTool", "pen", "-readOnly", "YES"])
+        drag(from: (300, 420), to: (300, 300))
+        shot("47-read-only-finger-scrolls")
         app.terminate()
     }
 

@@ -15,7 +15,7 @@ struct LibraryView: View {
                     Shelf(folder: folder, path: $path)
                 }
                 .navigationDestination(for: Doc.self) { doc in
-                    ReaderView(doc: doc)
+                    ReaderHost(first: doc)
                 }
         }
         // A PDF handed over by another app ("open in", share sheet): it is copied in and opened at once,
@@ -114,6 +114,8 @@ private struct Shelf: View {
     @State private var newName = ""
     @State private var choosingPaper = false
     @State private var ranDemo = false
+    /// The document that others are being picked to be put together with.
+    @State private var mergingFrom: Doc?
     /// How many files are still being copied in.
     @State private var bringingIn = 0
 
@@ -207,7 +209,7 @@ private struct Shelf: View {
             if bringingIn > 0 {
                 HStack(spacing: 10) {
                     ProgressView()
-                    Text(bringingIn > 1 ? "PDF \(bringingIn)개를 가져오는 중" : "PDF를 가져오는 중")
+                    Text(bringingIn > 1 ? "PDF \(bringingIn)개를 준비하는 중" : "PDF를 준비하는 중")
                         .font(.subheadline.weight(.medium))
                 }
                 .padding(.horizontal, 18)
@@ -222,6 +224,11 @@ private struct Shelf: View {
         .sheet(isPresented: $choosingPaper) {
             PaperSheet { paper, size in
                 newNote(paper, size)
+            }
+        }
+        .sheet(item: $mergingFrom) { first in
+            MergeSheet(first: first, others: library.docs.filter { $0.id != first.id }) { parts in
+                merge(parts)
             }
         }
         .alert("이름 바꾸기", isPresented: Binding(get: { renamingDoc != nil || renamingFolder != nil }, set: { if !$0 { renamingDoc = nil; renamingFolder = nil } })) {
@@ -268,7 +275,12 @@ private struct Shelf: View {
             if folder == nil, !ranDemo, ProcessInfo.processInfo.arguments.contains("-demoPapers") {
                 choosingPaper = true
             }
+            if folder == nil, !ranDemo, ProcessInfo.processInfo.arguments.contains("-demoMerge"), library.docs.count > 1 {
+                // (For the build server: the two newest documents put together.)
+                merge(Array(library.docs.prefix(2)))
+            }
             ranDemo = true
+            Diagnostics.shared.step("shelf shown, \(library.docs.count) documents")
         }
     }
 
@@ -305,7 +317,7 @@ private struct Shelf: View {
                 if !folders.isEmpty {
                     VStack(alignment: .leading, spacing: 14) {
                         heading("폴더", count: folders.count)
-                        LazyVGrid(columns: columns, alignment: .leading, spacing: 22) {
+                        ShelfGrid(rowSpacing: 22) {
                             ForEach(folders) { item in
                                 NavigationLink(value: item) {
                                     FolderCard(folder: item, count: count(in: item))
@@ -331,7 +343,7 @@ private struct Shelf: View {
                 if !docs.isEmpty {
                     VStack(alignment: .leading, spacing: 14) {
                         heading(searching ? "찾은 문서" : "문서", count: docs.count)
-                        LazyVGrid(columns: columns, alignment: .leading, spacing: 24) {
+                        ShelfGrid(rowSpacing: 24) {
                             ForEach(docs) { doc in
                                 NavigationLink(value: doc) {
                                     DocCard(doc: doc, folderName: folderName(for: doc))
@@ -409,6 +421,13 @@ private struct Shelf: View {
         } label: {
             Label("이름 바꾸기", systemImage: "pencil")
         }
+        if library.docs.count > 1 {
+            Button {
+                mergingFrom = doc
+            } label: {
+                Label("다른 문서와 합치기", systemImage: "rectangle.stack.badge.plus")
+            }
+        }
         if !library.folders.isEmpty {
             Menu {
                 if doc.folder != nil {
@@ -480,11 +499,109 @@ private struct Shelf: View {
         .background(Color(uiColor: .systemGroupedBackground))
     }
 
+    /// Puts documents together into a new one and opens it.
+    private func merge(_ parts: [Doc]) {
+        guard parts.count > 1 else { return }
+        let place = folder?.id
+        bringingIn += 1
+        Diagnostics.shared.step("merging \(parts.count) documents")
+        Task { @MainActor in
+            do {
+                let made = try await library.merge(parts, into: place)
+                DebugLog.write("merge: \(parts.count) documents put together, \(made.pageCount) pages")
+                path.append(made)
+            } catch {
+                errorText = "문서를 합치지 못했어요."
+            }
+            bringingIn -= 1
+        }
+    }
+
     private func newNote(_ paper: PaperKind, _ size: CGSize) {
         do {
             path.append(try library.createNote(in: folder?.id, paper: paper, size: size))
         } catch {
             errorText = error.localizedDescription
+        }
+    }
+}
+
+/// Picking the documents to put together with one, in the order they are to follow it.
+private struct MergeSheet: View {
+    let first: Doc
+    let others: [Doc]
+    let onMerge: ([Doc]) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var picked: [UUID] = []
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    HStack {
+                        Text("1")
+                            .font(.footnote.weight(.bold).monospacedDigit())
+                            .foregroundStyle(.white)
+                            .frame(width: 24, height: 24)
+                            .background(Color.accentColor, in: Circle())
+                        Text(first.title)
+                        Spacer()
+                        Text("\(first.pageCount)쪽")
+                            .foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text("맨 앞")
+                }
+                Section {
+                    ForEach(others) { doc in
+                        Button {
+                            if let at = picked.firstIndex(of: doc.id) {
+                                picked.remove(at: at)
+                            } else {
+                                picked.append(doc.id)
+                            }
+                        } label: {
+                            HStack {
+                                if let at = picked.firstIndex(of: doc.id) {
+                                    Text("\(at + 2)")
+                                        .font(.footnote.weight(.bold).monospacedDigit())
+                                        .foregroundStyle(.white)
+                                        .frame(width: 24, height: 24)
+                                        .background(Color.accentColor, in: Circle())
+                                } else {
+                                    Circle()
+                                        .stroke(Color.secondary.opacity(0.5), lineWidth: 1.2)
+                                        .frame(width: 24, height: 24)
+                                }
+                                Text(doc.title)
+                                    .foregroundStyle(.primary)
+                                Spacer()
+                                Text("\(doc.pageCount)쪽")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                } header: {
+                    Text("뒤에 붙일 문서 (누른 순서대로)")
+                } footer: {
+                    Text("고른 문서들을 이어 붙인 새 문서가 만들어져요. 원래 문서는 그대로 남아요. 필기와 수식은 새 문서의 쪽에 그려 넣어져서, 새 문서에서는 지우거나 고칠 수 없어요.")
+                }
+            }
+            .navigationTitle("문서 합치기")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("취소") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("합치기") {
+                        let parts = [first] + picked.compactMap { id in others.first { $0.id == id } }
+                        dismiss()
+                        onMerge(parts)
+                    }
+                    .disabled(picked.isEmpty)
+                }
+            }
         }
     }
 }

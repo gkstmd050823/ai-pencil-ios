@@ -494,11 +494,12 @@ final class PageOverlay: UIView {
     /// [under] puts it where highlighter goes: under the canvas, as a tint.
     func drawLive(_ line: PenLine, ahead: [PenSample], color: CGColor, fineness: CGFloat, under: Bool = false) {
         let home = under ? highMarks.layer : penMarks.layer
-        if liveLayers.isEmpty || line.points.count - liveFrom > 48 {
+        if liveLayers.isEmpty || line.settled - liveFrom > 64 {
             // A long line is cut into pieces, so that only its last piece is worked out again as it grows.
+            // A piece is closed where the line is settled: what comes after that may still change.
             if let piece = liveLayers.last {
-                piece.path = line.shape(from: liveFrom)
-                liveFrom = max(0, line.points.count - 1)
+                piece.path = line.shape(from: liveFrom, to: line.settled, fineness: fineness)
+                liveFrom = max(0, line.settled - 1)
             } else {
                 liveFrom = 0
             }
@@ -510,7 +511,7 @@ final class PageOverlay: UIView {
             home.addSublayer(piece)
             liveLayers.append(piece)
         }
-        liveLayers.last?.path = line.shape(from: liveFrom)
+        liveLayers.last?.path = line.shape(from: liveFrom, fineness: fineness)
         // A steadied line trails the pen on purpose; only a line that keeps up with it is drawn ahead.
         if !under, line.steady < 0.05, let end = line.points.last, let width = line.widths.last, !ahead.isEmpty {
             let path = CGMutablePath()
@@ -1608,6 +1609,17 @@ struct PDFInkView: UIViewRepresentable {
                 }
                 commit(line, in: overlay)
                 DebugLog.write("pen: a line of \(line.points.count) points written, steadied \(steady)")
+            }
+            // Rings written fast: the pen was heard from only a dozen times on the way round, and the line
+            // has to come out round all the same, not as a dozen straight sides.
+            for (column, heard) in [8, 12, 20].enumerated() {
+                var line = PenLine(width: 1.6, sense: 1, steady: 0)
+                for step in 0...heard {
+                    let angle = 2 * Double.pi * Double(step) / Double(heard)
+                    let point = CGPoint(x: 120 + 110 * Double(column) + 36 * cos(angle), y: 470 + 30 * sin(angle))
+                    line.add(PenSample(point: point, force: CGFloat(0.6 + 0.8 * abs(sin(angle))), time: Double(step) / 240))
+                }
+                commit(line, in: overlay)
             }
             for (row, width) in [0.4, 1.0, 2.0, 4.0, 8.0].enumerated() {
                 var line = PenLine(width: CGFloat(width), sense: 0, steady: 0)

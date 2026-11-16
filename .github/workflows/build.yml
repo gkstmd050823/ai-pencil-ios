@@ -199,6 +199,15 @@ jobs:
           # A ruled notebook with a page added: the first page's lines are the file's, the second's the export's.
           shot 26-export-note 14 -demoNote -demoPaper lined -demoAddPage -demoExport
           exported export-note
+          # Pages picked out of a document: three of the sample's, and two of the file put together the newer way.
+          shot 26-export-pages 14 -sample -demoExport -demoExportPages 2,4-5
+          exported export-pages
+          shot 26-export-packed-pages 14 -demoImport packed.pdf -demoExport -demoExportPages 1,3
+          exported export-packed-pages
+          # The two newest documents put together into one.
+          shot 26-merged 18 -demoMerge
+          # Reading only: no tools, and the pen is the AI pen.
+          shot 45-read-only 9 -sample -readOnly YES
           shot 27-shelf-folders 8 -demoShelf
           shot 16-settings 8 -demoSettings
           xcrun simctl ui "$UDID" appearance dark
@@ -277,7 +286,7 @@ jobs:
           DATA=$(xcrun simctl get_app_container "$UDID" app.aipencil.ios data || true)
           if [ -n "$DATA" ]; then cp "$DATA/Documents/debug.log" touch-debug.log 2>/dev/null || true; fi
           echo "---- the app's own notes during the touch test ----"
-          grep -E "eraser:|tool:|undo:|scroll:|zoom:" touch-debug.log || true
+          grep -E "eraser:|tool:|undo:|zoom:|merge:|export:|copy:" touch-debug.log || true
           echo "---- the pictures the app made of the handwriting ----"
           grep -E "^ink picture:" touch-debug.log | tail -60 || true
           ls screenshots | grep touch || echo "no pictures came out of the touch test"

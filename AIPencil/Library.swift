@@ -40,6 +40,8 @@ enum ImportError: LocalizedError {
 final class Library: ObservableObject {
     @Published private(set) var docs: [Doc] = []
     @Published private(set) var folders: [Folder] = []
+    /// The documents open as tabs above the pages, in the order they were opened.
+    @Published private(set) var tabs: [UUID] = []
 
     private let root: URL
     /// The covers already read or drawn since the app started.
@@ -55,11 +57,62 @@ final class Library: ObservableObject {
         root = base.appendingPathComponent("docs", isDirectory: true)
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         if let data = try? Data(contentsOf: indexURL), let saved = try? JSONDecoder().decode([Doc].self, from: data) {
-            docs = saved
+            // (No two with the same identity: a list shown with one in it twice is not safe to show.)
+            var seen = Set<UUID>()
+            docs = saved.filter { seen.insert($0.id).inserted }
         }
         if let data = try? Data(contentsOf: foldersURL), let saved = try? JSONDecoder().decode([Folder].self, from: data) {
-            folders = saved
+            var seen = Set<UUID>()
+            folders = saved.filter { seen.insert($0.id).inserted }
         }
+        let open = (UserDefaults.standard.stringArray(forKey: "openTabs") ?? []).compactMap { UUID(uuidString: $0) }
+        var seen = Set<UUID>()
+        tabs = open.filter { id in docs.contains { $0.id == id } && seen.insert(id).inserted }
+    }
+
+    // MARK: tabs
+
+    private func saveTabs() {
+        UserDefaults.standard.set(tabs.map(\.uuidString), forKey: "openTabs")
+    }
+
+    func openTab(_ id: UUID) {
+        guard !tabs.contains(id), docs.contains(where: { $0.id == id }) else { return }
+        tabs.append(id)
+        saveTabs()
+    }
+
+    func closeTab(_ id: UUID) {
+        guard tabs.contains(id) else { return }
+        tabs.removeAll { $0 == id }
+        saveTabs()
+    }
+
+    /// Puts documents together into a new one, in the order given: each as it would be exported, with
+    /// what was written on it drawn into its pages.
+    @MainActor
+    func merge(_ parts: [Doc], into place: UUID?) async throws -> Doc {
+        guard parts.count > 1 else { throw ImportError.unreadable }
+        let id = UUID()
+        let target = pdfURL(for: id)
+        let sources = parts.map { (pdf: pdfURL(for: $0.id), folder: folder(for: $0.id)) }
+        let pages = await Task.detached(priority: .userInitiated) { () -> Int in
+            try? FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+            var files: [(url: URL, pages: [Int]?)] = []
+            defer { files.forEach { try? FileManager.default.removeItem(at: $0.url) } }
+            for (index, source) in sources.enumerated() {
+                guard let made = Exporter.export(pdfURL: source.pdf, folder: source.folder, title: "merge-\(index)", withMarks: false) else { return 0 }
+                files.append((made, nil))
+            }
+            guard PDFCopy.write(files, to: target) else { return 0 }
+            return PDFDocument(url: target)?.pageCount ?? 0
+        }.value
+        guard pages > 0 else {
+            try? FileManager.default.removeItem(at: folder(for: id))
+            throw ImportError.unwritable
+        }
+        let title = parts.count == 2 ? "\(parts[0].title) + \(parts[1].title)" : "\(parts[0].title) 외 \(parts.count - 1)개"
+        return shelve(id, source: target, title: Self.freshTitle(taken: docs.map(\.title), base: title), pages: pages, into: place)
     }
 
     /// The documents to show: those in [folder], or, when something is being looked for, the ones in
@@ -233,6 +286,7 @@ final class Library: ObservableObject {
     }
 
     func delete(_ doc: Doc) {
+        closeTab(doc.id)
         docs.removeAll { $0.id == doc.id }
         try? FileManager.default.removeItem(at: folder(for: doc.id))
         save()

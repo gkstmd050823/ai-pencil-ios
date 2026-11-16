@@ -40,6 +40,21 @@ enum Exporter {
         var alpha: Data
     }
 
+    /// A copy of the document with what was written on it drawn in. With [pages], a copy of those pages
+    /// only (counted from zero, in the order given).
+    static func export(pdfURL: URL, folder: URL, title: String, withMarks: Bool, pages: [Int]?) -> URL? {
+        guard let whole = export(pdfURL: pdfURL, folder: folder, title: title, withMarks: withMarks) else { return nil }
+        guard let pages, !pages.isEmpty else { return whole }
+        let fewer = whole.deletingLastPathComponent().appendingPathComponent(
+            whole.deletingPathExtension().lastPathComponent + " \(pages.count)쪽.pdf"
+        )
+        try? FileManager.default.removeItem(at: fewer)
+        let made = PDFCopy.write([(whole, pages)], to: fewer)
+        try? FileManager.default.removeItem(at: whole)
+        DebugLog.write("export: \(pages.count) pages picked out, \(made ? "done" : "failed")")
+        return made ? fewer : nil
+    }
+
     static func export(pdfURL: URL, folder: URL, title: String, withMarks: Bool) -> URL? {
         guard let document = DocFile.open(pdfURL), document.pageCount > 0 else { return nil }
         let drawings = DrawingStore(folder: folder)

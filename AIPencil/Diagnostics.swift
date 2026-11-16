@@ -22,6 +22,15 @@ final class Diagnostics: NSObject, MXMetricManagerSubscriber {
     private let lock = NSLock()
     private var steps: [String] = []
     private var beat = CACurrentMediaTime()
+    /// When this run began, and how long it had been going when it was last seen alive.
+    private let launched = Date()
+    private var alive = 0
+    /// The steps of this run, written out as they happen: after a crash they are all that is left of
+    /// it, and the next run reads them to say what the app was doing when it went down.
+    private var stepsFile: URL {
+        let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return folder.appendingPathComponent("steps.txt")
+    }
     private var stuckNoted = false
 
     private var notes: URL {
@@ -59,9 +68,19 @@ final class Diagnostics: NSObject, MXMetricManagerSubscriber {
     /// found stuck, to say what it was in the middle of. Cheap enough to call from anywhere.
     func step(_ what: String) {
         lock.lock()
-        steps.append(String(format: "%.1f ", CACurrentMediaTime()) + what)
-        if steps.count > 14 { steps.removeFirst(steps.count - 14) }
+        steps.append(String(format: "+%.0fs ", Date().timeIntervalSince(launched)) + what)
+        if steps.count > 16 { steps.removeFirst(steps.count - 16) }
         lock.unlock()
+        keepSteps()
+    }
+
+    /// Writes the steps of this run to their file, with how long the run has lasted.
+    private func keepSteps() {
+        lock.lock()
+        let text = "lasted \(alive) s; " + steps.joined(separator: " | ")
+        lock.unlock()
+        let file = stepsFile
+        writing.async { try? text.write(to: file, atomically: false, encoding: .utf8) }
     }
 
     /// A thread of its own asks the main thread to answer once a second. When it has not answered for
@@ -79,6 +98,14 @@ final class Diagnostics: NSObject, MXMetricManagerSubscriber {
                     me.beat = CACurrentMediaTime()
                     me.stuckNoted = false
                     me.lock.unlock()
+                }
+                // (How long the run has lasted is written down every five seconds.)
+                let lasted = Int(Date().timeIntervalSince(me.launched))
+                if lasted / 5 != me.alive / 5 {
+                    me.lock.lock()
+                    me.alive = lasted
+                    me.lock.unlock()
+                    me.keepSteps()
                 }
                 let now = CACurrentMediaTime()
                 // (This thread itself held up for longer than its nap: the whole app was, in the
@@ -118,9 +145,10 @@ final class Diagnostics: NSObject, MXMetricManagerSubscriber {
         // The mark was set while the app was on screen and is taken down whenever it leaves the screen.
         // Still set now, the last run ended on screen: it crashed, was stopped by the system, or was
         // swiped away while in use.
+        let before = (try? String(contentsOf: stepsFile, encoding: .utf8)) ?? "nothing kept of it"
         if defaults.bool(forKey: "diag.onScreen") {
             bump("diag.cutShort")
-            note("the run before this one ended while the app was on screen")
+            note("the run before this one ended while the app was on screen; it " + before)
         }
         bump("diag.launches")
         defaults.set(true, forKey: "diag.onScreen")

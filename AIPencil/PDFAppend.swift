@@ -756,6 +756,18 @@ final class PDFReader {
         }
     }
 
+    /// Object [number] and, where it is a stream, the place of its bytes; nil when the file has no such object.
+    func found(_ number: Int) throws -> Found? {
+        switch entries[number] {
+        case .at(let offset, _)?:
+            return try object(at: offset)
+        case .packed(let stream, let index)?:
+            return Found(number: number, generation: 0, value: try fromPack(stream, index, number), body: nil)
+        case .free?, nil:
+            return nil
+        }
+    }
+
     /// What a value is once references have been followed.
     func resolve(_ value: PDFValue?) throws -> PDFValue? {
         var value = value
