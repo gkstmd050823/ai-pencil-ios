@@ -49,8 +49,13 @@ final class TouchTests: XCTestCase {
         let tab = app.buttons[name]
         guard tab.waitForExistence(timeout: 3) else { return }
         let origin = app.windows.firstMatch.coordinate(withNormalizedOffset: .zero)
+        // (Whether it is in reach is told from where it is: asking the tab itself fails the test outright
+        // when the tab is off the edge.)
+        func inReach() -> Bool {
+            tab.frame.midX > 30 && tab.frame.midX < 680
+        }
         var tries = 0
-        while !tab.isHittable, tries < 8 {
+        while !inReach(), tries < 8 {
             // Toward the side the tab is on: a tab left of the screen comes in when the row is dragged right.
             let left = tab.frame.midX < 100
             let from = origin.withOffset(CGVector(dx: left ? 200 : 600, dy: 104))
@@ -59,7 +64,9 @@ final class TouchTests: XCTestCase {
             usleep(600_000)
             tries += 1
         }
-        if tab.isHittable { tab.tap() }
+        if inReach() {
+            origin.withOffset(CGVector(dx: tab.frame.midX, dy: tab.frame.midY)).tap()
+        }
     }
 
     private func shot(_ name: String) {
