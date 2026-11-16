@@ -88,7 +88,7 @@ final class TouchTests: XCTestCase {
 
         // The app's own pen, on the blank page added earlier: three lines one after another without a
         // pause, then a look once it has paused.
-        start(["-demoTool", "pen", "-demoPage", "2"])
+        start(["-demoTool", "pen", "-demoPage", "2", "-appPen", "YES"])
         drag(from: (60, 200), to: (300, 212))
         place(60, 240).press(forDuration: 0.15, thenDragTo: place(300, 250), withVelocity: .fast, thenHoldForDuration: 0.05)
         place(60, 285).press(forDuration: 0.15, thenDragTo: place(300, 278), withVelocity: .fast, thenHoldForDuration: 0.05)
@@ -103,11 +103,13 @@ final class TouchTests: XCTestCase {
         }
         shot("36-touch-own-pen-undone")
 
-        // The same with PencilKit's pen, which the setting falls back to.
-        start(["-demoTool", "pen", "-appPen", "NO", "-demoPage", "2"])
+        // PencilKit's pen, which is what writes unless the app's own is switched on: right after the line
+        // the canvas shows; once the hand has rested, the app's picture of the handwriting does.
+        start(["-demoTool", "pen", "-demoPage", "2"])
         drag(from: (330, 380), to: (540, 410))
-        sleep(1)
-        shot("37-touch-pencilkit-pen")
+        shot("37-touch-pencilkit-pen-just-written")
+        sleep(3)
+        shot("37-touch-pencilkit-pen-settled")
         app.terminate()
     }
 }

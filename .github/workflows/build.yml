@@ -81,10 +81,17 @@ jobs:
           shot 2-reader-zoomed-soft 14 -sample -demoInk -demoZoom 2.5 -sharpPages NO
           # The app's own pen: a shaky line as the hand made it and the same line steadied, both pressed
           # harder in the middle. First as the shapes shown while writing, then as the handwriting they become.
-          shot 3-pen-shapes 9 -sample -demoPage 5 -demoPen -demoHoldPreviews
+          shot 3-pen-shapes 9 -sample -demoPage 5 -demoPen -demoHoldPreviews -appPen YES
+          # The handwriting as the app's picture of it and as the canvas shows it: the two have to agree in
+          # place and in colour, or the page would jump each time one takes the other's place.
           shot 3-pen-written 10 -sample -demoPage 5
           shot 3-pen-written-zoomed 12 -sample -demoPage 5 -demoZoom 2.5
-          shot 3-pen-written-canvas 10 -sample -demoPage 5 -sharpPages NO
+          shot 3-pen-written-canvas 10 -sample -demoPage 5 -sharpInk NO
+          shot 3-pen-written-zoomed-canvas 12 -sample -demoPage 5 -demoZoom 2.5 -sharpInk NO
+          xcrun simctl ui "$UDID" appearance dark
+          shot 3-pen-written-dark 10 -sample -demoPage 5
+          shot 3-pen-written-dark-canvas 10 -sample -demoPage 5 -sharpInk NO
+          xcrun simctl ui "$UDID" appearance light
           shot 2-reader-zoom6 14 -sample -demoInk -demoZoom 6
           shot 2-reader-zoom6-soft 14 -sample -demoInk -demoZoom 6 -sharpPages NO
           shot 2-reader-zoom12 14 -sample -demoInk -demoZoom 12

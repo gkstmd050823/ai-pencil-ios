@@ -32,7 +32,8 @@ struct SettingsView: View {
     @AppStorage("pageLayout") private var layoutMode = PageLayoutMode.vertical
     @AppStorage("darkPaper") private var darkPaper = true
     @AppStorage("sharpPages") private var sharpPages = true
-    @AppStorage("appPen") private var appPen = true
+    @AppStorage("appPen") private var appPen = false
+    @AppStorage("sharpInk") private var sharpInk = true
     @State private var diagnosticsCopied = false
     @State private var diagnosticsCleared = 0
     @State private var typedKey = ""
@@ -178,7 +179,7 @@ struct SettingsView: View {
     private var writingSection: some View {
         Section {
             Toggle("손가락으로도 필기", isOn: $fingerDraws)
-            Toggle("앱 자체 펜으로 쓰기", isOn: $appPen)
+            Toggle("앱 자체 펜으로 쓰기 (필압 감도·획 안정화)", isOn: $appPen)
             Picker("펜슬 두 번 탭", selection: $pencilTap) {
                 ForEach(PencilChoice.all) { item in
                     Text(item.label).tag(item.id)
@@ -192,7 +193,7 @@ struct SettingsView: View {
         } header: {
             Text("필기")
         } footer: {
-            Text("손가락 필기를 끄면 애플 펜슬로만 쓰고 손가락으로는 화면을 움직여요. 두 번 탭은 애플 펜슬 2세대와 프로에서, 꽉 쥐기는 프로에서 돼요. 누르는 힘에 따라 굵기가 달라지게 하려면 펜 종류를 만년필로 고르세요(펜을 한 번 더 누르면 나오는 설정).\n\n\"앱 자체 펜\"을 켜면 펜(연필 제외)의 선을 앱이 직접 그려요. 펜 설정에 필압 감도와 획 안정화가 생기고, 쓴 선이 화면 해상도로 보여요. 끄면 애플의 필기 엔진이 그리는 예전 방식으로 돌아가요. 펜이 손을 따라오는 느낌이 예전만 못하면 꺼 보세요.")
+            Text("손가락 필기를 끄면 애플 펜슬로만 쓰고 손가락으로는 화면을 움직여요. 두 번 탭은 애플 펜슬 2세대와 프로에서, 꽉 쥐기는 프로에서 돼요. 누르는 힘에 따라 굵기가 달라지게 하려면 펜 종류를 만년필로 고르세요(펜을 한 번 더 누르면 나오는 설정).\n\n\"앱 자체 펜\"은 꺼 두는 것이 기본이에요. 켜면 펜(연필 제외)의 선을 애플의 필기 엔진 대신 앱이 직접 그려서, 펜 설정에 필압 감도와 획 안정화가 생겨요. 대신 선이 펜을 따라오는 속도가 애플 엔진보다 느릴 수 있어요. 써 보고 느리게 느껴지면 다시 끄세요. 끄면 바로 예전 그대로 돌아가요.")
         }
     }
 
@@ -251,10 +252,11 @@ struct SettingsView: View {
             Toggle("어두운 테마에서는 종이도 어둡게", isOn: $darkPaper)
             Toggle("AI 표시 보이기", isOn: $showAiMarks)
             Toggle("쪽을 화면 해상도로 한 번 더 그리기", isOn: $sharpPages)
+            Toggle("필기를 화면 해상도로 한 번 더 그리기", isOn: $sharpInk)
         } header: {
             Text("화면")
         } footer: {
-            Text("종이를 어둡게 하면 흰 종이는 어두운 회색으로, 글자와 필기는 밝게 보여요. 색의 종류는 그대로예요. 내보내는 PDF와 Claude에게 가는 그림은 늘 원래 색이에요.\n\n\"한 번 더 그리기\"를 켜면 쪽이 화면에 가까이 올 때 앱이 화면 해상도 그대로 미리 그려서 덮어요. 문서가 무르게 보이거나 늦게 선명해질 때를 위한 것이고, 끄면 메모리를 덜 써요. 켜고 끈 차이가 보이는지 비교해 보세요.")
+            Text("종이를 어둡게 하면 흰 종이는 어두운 회색으로, 글자와 필기는 밝게 보여요. 색의 종류는 그대로예요. 내보내는 PDF와 Claude에게 가는 그림은 늘 원래 색이에요.\n\n\"한 번 더 그리기\"를 켜면 쪽이 화면에 가까이 올 때 앱이 화면 해상도 그대로 미리 그려서 덮어요. 문서가 무르게 보이거나 늦게 선명해질 때를 위한 것이고, 끄면 메모리를 덜 써요. 필기도 같은 방식이에요. 쓰는 동안에는 평소대로 보이고, 손을 멈춘 지 1초쯤 뒤에 그 쪽의 필기가 선명한 그림으로 바뀌어요.")
         }
     }
 

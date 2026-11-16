@@ -12,6 +12,17 @@ final class PageCanvas: PKCanvasView {
     /// a picture made of the handwriting is good for as long as the number it was made at still stands.
     var ink = PKDrawing()
     var inkVersion = 0
+    /// Set while the app itself is giving the canvas a drawing it has already taken note of.
+    var byCode = false
+
+    /// Gives the canvas a drawing the app has taken note of already, so that the canvas telling of the
+    /// change is not taken for news. (Should the canvas tell of it only later, it is taken for news after
+    /// all, which costs a moment of the canvas showing in the picture's place and nothing else.)
+    func take(_ drawing: PKDrawing) {
+        byCode = true
+        self.drawing = drawing
+        byCode = false
+    }
 }
 
 /// The drag that draws a shape: it begins the moment the page is touched, and remembers where.
@@ -364,20 +375,40 @@ final class PageOverlay: UIView {
     /// The canvas shows the handwriting itself. Whenever the picture might not be the handwriting as it
     /// stands, this is what is shown: the canvas is always right.
     func showCanvasInk() {
-        if canvas.alpha != 1 { canvas.alpha = 1 }
-        if !inkPicture.isHidden { inkPicture.isHidden = true }
+        guard canvas.alpha != 1 || !inkPicture.isHidden else { return }
+        // At once, and whatever fading in was under way: a pen may be coming down this moment.
+        canvas.layer.removeAnimation(forKey: "opacity")
+        inkPicture.layer.removeAnimation(forKey: "opacity")
+        canvas.alpha = 1
+        inkPicture.isHidden = true
+        inkPicture.alpha = 1
     }
 
     /// The picture shows the handwriting. The canvas stays where it is and goes on taking touches (a view
     /// that is wholly see-through is passed over by touches, so it keeps a trace of itself).
     func showInkPicture() {
-        if inkPicture.isHidden { inkPicture.isHidden = false }
-        if canvas.alpha != 0.02 { canvas.alpha = 0.02 }
+        guard inkPicture.isHidden else { return }
+        inkPicture.alpha = 0
+        inkPicture.isHidden = false
+        // Faded in over a moment, so that the handwriting does not seem to jump as it sharpens.
+        UIView.animate(withDuration: 0.16, delay: 0, options: [.allowUserInteraction, .beginFromCurrentState]) {
+            self.inkPicture.alpha = 1
+            self.canvas.alpha = 0.02
+        }
+    }
+
+    /// Lets the picture of the handwriting go. The canvas shows from here on, until a new picture is made.
+    func dropInkPicture() {
+        showCanvasInk()
+        if inkPicture.shown != nil || inkPicture.asked != nil { inkPicture.clear() }
+        inkPictureVersion = -1
+        inkAskedVersion = -1
+        inkCoveredVersion = -1
     }
 
     /// Shows the line being written with the app's own pen, and where the pen is expected to go next.
     func drawLive(_ line: PenLine, ahead: [PenSample], color: CGColor, fineness: CGFloat) {
-        if liveLayers.isEmpty || line.points.count - liveFrom > 150 {
+        if liveLayers.isEmpty || line.points.count - liveFrom > 48 {
             // A long line is cut into pieces, so that only its last piece is worked out again as it grows.
             if let piece = liveLayers.last {
                 piece.path = line.shape(from: liveFrom)
@@ -755,10 +786,9 @@ struct PDFInkView: UIViewRepresentable {
         var source: PictureSource?
         private let inkQueue = DispatchQueue(label: "app.aipencil.ink.pictures", qos: .userInitiated)
         /// The pen takes its touches through the app instead of through PencilKit.
-        var appPen = true
+        var appPen = false
         /// The line being written with the app's own pen.
         private var penLine: PenLine?
-        private var drewPages = true
         private var ticks = 0
         weak var pdfView: PDFView?
         weak var controller: ReaderController?
@@ -1001,10 +1031,7 @@ struct PDFInkView: UIViewRepresentable {
 
         @objc private func settleScale() {
             guard let view = pdfView else { return }
-            // With the app's own pictures of the handwriting on, the canvas only has to take the writing
-            // and show it while it is written: it is left the size of the page, which costs a ninth of
-            // the memory of the largest it would otherwise be.
-            let wanted: CGFloat = Self.drawsPages ? 1 : min(3, max(1, (view.scaleFactor * 4).rounded(.up) / 4))
+            let wanted = min(Self.tight ? 1.5 : 3, max(1, (view.scaleFactor * 4).rounded(.up) / 4))
             guard wanted != inkScale else { return }
             inkScale = wanted
             for overlay in overlays.values {
@@ -1112,7 +1139,7 @@ struct PDFInkView: UIViewRepresentable {
             guard let overlay = overlayView as? PageOverlay else { return }
             // (Its handwriting is in hand already: every change was noted when it was made.)
             overlay.pagePicture.clear()
-            overlay.inkPicture.clear()
+            overlay.dropInkPicture()
             overlay.dropPreviews()
             overlays[page] = nil
         }
@@ -1141,9 +1168,9 @@ struct PDFInkView: UIViewRepresentable {
 
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
             guard !retired, let canvas = canvasView as? PageCanvas else { return }
+            // (What the app itself is putting on the canvas it has taken note of already.)
+            if canvas.byCode { return }
             let drawing = canvas.drawing
-            // (What the app itself has just put on the canvas it has taken note of already.)
-            if drawing == canvas.ink { return }
             let strokes = drawing.strokes
             if choice.tool == .ai, strokes.count == canvas.strokeCount + 1, let stroke = strokes.last {
                 // What the AI pen draws is a question, not handwriting. It is lifted off the canvas
@@ -1156,7 +1183,7 @@ struct PDFInkView: UIViewRepresentable {
                     var drawing = canvas.drawing
                     if drawing.strokes.count == before + 1 {
                         drawing.strokes.removeLast()
-                        canvas.drawing = drawing
+                        canvas.take(drawing)
                     }
                     self.marked(points, on: canvas)
                 }
@@ -1228,7 +1255,7 @@ struct PDFInkView: UIViewRepresentable {
             }
             // Noted first: the canvas tells of the change it is about to be given, and is told it is known.
             record(new, on: canvas, covered: covered)
-            canvas.drawing = new
+            canvas.take(new)
         }
 
         /// How many pixels a point of the page takes on screen now, for shapes drawn over the page.
@@ -1299,6 +1326,20 @@ struct PDFInkView: UIViewRepresentable {
                 commit(line, in: overlay, ink: ink)
                 DebugLog.write("pen: a line of \(line.points.count) points written, steadied \(steady)")
             }
+            // And a line of highlighter across them, to set the picture's highlighter beside the canvas's.
+            var points: [PKStrokePoint] = []
+            for step in 0...60 {
+                let place = CGPoint(x: 90 + 6.5 * Double(step), y: 520 + 3.4 * Double(step))
+                points.append(PKStrokePoint(
+                    location: place, timeOffset: Double(step) * 0.01, size: CGSize(width: 14, height: 14),
+                    opacity: 1, force: 1, azimuth: 0, altitude: CGFloat.pi / 2
+                ))
+            }
+            let marker = PKStroke(ink: PKInk(.marker, color: choice.highlighterUIColor), path: PKStrokePath(controlPoints: points, creationDate: Date()))
+            var drawing = overlay.canvas.ink
+            let before = drawing
+            drawing.strokes.append(marker)
+            setDrawing(drawing, on: overlay.canvas, undoingTo: before)
         }
 
         func clearPage() {
@@ -1383,7 +1424,7 @@ struct PDFInkView: UIViewRepresentable {
                 }
                 if drawing.strokes.count != count {
                     record(drawing, on: canvas)
-                    canvas.drawing = drawing
+                    canvas.take(drawing)
                 }
                 gesture.start = point
                 // A ring shows how much the eraser covers.
@@ -1409,7 +1450,15 @@ struct PDFInkView: UIViewRepresentable {
 
         /// No more pixels than this go into one picture of a page. A page shown whole at fitting zoom is
         /// well under it; zoomed in far, only what is in view and some way round it is drawn.
-        private static let pictureLimit: CGFloat = 9_000_000
+        private static var pictureLimit: CGFloat { tight ? 4_500_000 : 9_000_000 }
+        /// The system has warned that memory is short.
+        private static var tight = false
+        /// The setting that has the app draw the handwriting itself, for showing while nothing is being
+        /// written. On unless switched off.
+        private static var drawsInk: Bool {
+            let defaults = UserDefaults.standard
+            return defaults.object(forKey: "sharpInk") == nil || defaults.bool(forKey: "sharpInk")
+        }
         /// The setting that has the app draw the pages itself. On unless switched off ("-sharpPages NO"
         /// leaves the pages as PDFKit draws them, for the build server to compare against).
         private static var drawsPages: Bool {
@@ -1436,28 +1485,31 @@ struct PDFInkView: UIViewRepresentable {
         private func lookAtPictures() {
             guard let view = pdfView, view.window != nil else { return }
             let now = CACurrentMediaTime()
-            let draws = Self.drawsPages
-            if draws != drewPages {
-                drewPages = draws
-                settleScale()
-            }
+            let pages = Self.drawsPages
+            let ink = Self.drawsInk
             ticks += 1
+            if ticks % 16 == 14 {
+                // Kept for the diagnostics text in the settings, and noted once for the build server.
+                let made = describeView()
+                Diagnostics.shared.viewNote = made
+                if ticks == 30 { DebugLog.write("view:\n" + made) }
+            }
             if ticks % 40 == 5, let megabytes = Diagnostics.footprint().map({ $0 / 1_048_576 }) {
-                DebugLog.write("memory: \(megabytes) MB in use with \(overlays.count) pages laid out, pictures \(draws ? "on" : "off")")
+                DebugLog.write("memory: \(megabytes) MB in use with \(overlays.count) pages laid out, page pictures \(pages ? "on" : "off"), ink pictures \(ink ? "on" : "off")")
             }
-            guard draws else {
-                // Switched off: whatever is on show is taken down; PDFKit's pages and the canvases show again.
-                for overlay in overlays.values {
-                    if overlay.pagePicture.shown != nil || overlay.pagePicture.asked != nil { overlay.pagePicture.clear() }
-                    overlay.showCanvasInk()
-                    overlay.dropPreviews(olderThan: 0.5)
-                    if overlay.inkPicture.shown != nil || overlay.inkPicture.asked != nil {
-                        overlay.inkPicture.clear()
-                        overlay.inkPictureVersion = -1
-                    }
+            // What is switched off is taken down: PDFKit's pages, or the canvases, show again.
+            if !pages {
+                for overlay in overlays.values where overlay.pagePicture.shown != nil || overlay.pagePicture.asked != nil {
+                    overlay.pagePicture.clear()
                 }
-                return
             }
+            if !ink {
+                for overlay in overlays.values {
+                    overlay.dropInkPicture()
+                    overlay.dropPreviews(olderThan: 0.5)
+                }
+            }
+            guard pages || ink else { return }
             let scale = view.scaleFactor * view.traitCollection.displayScale
             guard scale > 0 else { return }
             // While the zoom is still changing nothing is drawn: it would be thrown away at once.
@@ -1467,9 +1519,11 @@ struct PDFInkView: UIViewRepresentable {
             }
             let around = view.bounds.insetBy(dx: -view.bounds.width * 0.5, dy: -view.bounds.height * 0.6)
             for overlay in overlays.values where overlay.window != nil {
-                refreshPicture(in: overlay, scale: scale, view: view)
-                let near = !overlay.convert(around, from: view).intersection(overlay.bounds).isEmpty
-                refreshInk(in: overlay, scale: scale, near: near, now: now)
+                if pages { refreshPicture(in: overlay, scale: scale, view: view) }
+                if ink {
+                    let near = !overlay.convert(around, from: view).intersection(overlay.bounds).isEmpty
+                    refreshInk(in: overlay, scale: scale, near: near, now: now)
+                }
             }
         }
 
@@ -1484,15 +1538,26 @@ struct PDFInkView: UIViewRepresentable {
                 canvas.alpha = 0.02
                 return
             }
+            // The picture is only ever on show while there is one; and once a second, while it is on
+            // show, the canvas is asked whether its handwriting is still what the picture was made of. A
+            // change nobody told of would otherwise stay hidden behind the picture.
+            if !picture.isHidden {
+                if picture.shown == nil {
+                    overlay.showCanvasInk()
+                } else if ticks % 8 == 0 {
+                    let real = canvas.drawing
+                    if real.strokes.count != canvas.ink.strokes.count || real.bounds != canvas.ink.bounds {
+                        DebugLog.write("ink picture: page \(canvas.pageIndex) had changed unnoticed; the canvas shows again")
+                        record(real, on: canvas)
+                        return
+                    }
+                }
+            }
             let drawing = canvas.ink
             let room = drawing.bounds.insetBy(dx: -2, dy: -2).intersection(overlay.bounds)
             guard near, !picture.gaveUp, !drawing.strokes.isEmpty, !room.isEmpty else {
-                overlay.showCanvasInk()
+                overlay.dropInkPicture()
                 overlay.dropPreviews(olderThan: 0.5)
-                if picture.shown != nil || picture.asked != nil {
-                    picture.clear()
-                    overlay.inkPictureVersion = -1
-                }
                 return
             }
             // All of the handwriting in one picture, as fine as the screen unless that is too many pixels.
@@ -1513,8 +1578,9 @@ struct PDFInkView: UIViewRepresentable {
             }
             if upToDate, let shown = picture.shown, abs(shown.scale - fine) < 0.002 * fine { return }
             if let asked = picture.asked, overlay.inkAskedVersion == version, abs(asked.scale - fine) < 0.002 * fine { return }
-            // Not while the hand is still writing: one picture when it pauses, not one for every line.
-            guard now - overlay.inkTouched > 0.4 else { return }
+            // Never while the hand is writing: the picture is drawn once it has rested a full second, so
+            // that drawing it does not get in the way of the pen. Nor right after a touch on the canvas.
+            guard now - overlay.inkTouched > 1, now - overlay.canvasUsed > 1, !overlay.inkInUse else { return }
             picture.asked = extent
             overlay.inkAskedVersion = version
             let ticket = picture.ticket
@@ -1597,6 +1663,54 @@ struct PDFInkView: UIViewRepresentable {
             }
         }
 
+        /// How the page in view is put together and how finely each of its layers is drawn. On an iPad in
+        /// the hand PDFKit and PencilKit draw coarser than in the build server's simulator, and this is
+        /// how to learn what they do there: the numbers go into the diagnostics text.
+        private func describeView() -> String {
+            guard let view = pdfView, let page = view.currentPage, let overlay = overlays[page] else { return "no page in view" }
+            let canvas = overlay.canvas
+            var lines: [String] = []
+            lines.append("zoom \(view.scaleFactor), fits at \(view.scaleFactorForSizeToFit), up to \(view.maxScaleFactor); display scale \(view.traitCollection.displayScale); view \(Int(view.bounds.width)) x \(Int(view.bounds.height))")
+            let shown = overlay.convert(overlay.bounds, to: nil)
+            lines.append("page \(canvas.pageIndex): \(Int(overlay.bounds.width)) x \(Int(overlay.bounds.height)) points, on screen \(Int(shown.width)) x \(Int(shown.height)); \(overlays.count) pages laid out; canvases \(inkScale) times the page")
+            lines.append("canvas: \(Int(canvas.bounds.width)) x \(Int(canvas.bounds.height)), zoom \(canvas.zoomScale), content scale \(canvas.contentScaleFactor), \(canvas.ink.strokes.count) lines, its picture \(overlay.inkPicture.isHidden ? "hidden" : "shown")")
+            lines.append("canvas layers:")
+            var left = 30
+            Self.describe(canvas.layer, depth: 1, into: &lines, left: &left, skipping: nil)
+            if let host = overlay.superview {
+                lines.append("page layers, in a \(type(of: host)):")
+                left = 30
+                Self.describe(host.layer, depth: 1, into: &lines, left: &left, skipping: overlay.layer)
+            }
+            return lines.joined(separator: "\n")
+        }
+
+        private static func describe(_ layer: CALayer, depth: Int, into lines: inout [String], left: inout Int, skipping: CALayer?) {
+            guard left > 0, depth < 8, layer !== skipping else { return }
+            left -= 1
+            var text = String(repeating: " ", count: depth * 2)
+            text += "\(type(of: layer)) \(Int(layer.bounds.width))x\(Int(layer.bounds.height)) scale \(layer.contentsScale)"
+            if let metal = layer as? CAMetalLayer {
+                text += " drawable \(Int(metal.drawableSize.width))x\(Int(metal.drawableSize.height))"
+            }
+            if let contents = layer.contents {
+                if CFGetTypeID(contents as AnyObject) == CGImage.typeID {
+                    let image = contents as! CGImage
+                    text += " image \(image.width)x\(image.height)"
+                } else {
+                    text += " contents \(type(of: contents))"
+                }
+            }
+            let turn = layer.affineTransform()
+            if !turn.isIdentity { text += String(format: " x%.3f", Double(hypot(turn.a, turn.b))) }
+            if layer.opacity < 1 { text += String(format: " opacity %.2f", Double(layer.opacity)) }
+            if layer.isHidden { text += " hidden" }
+            lines.append(text)
+            for sub in (layer.sublayers ?? []).prefix(10) {
+                describe(sub, depth: depth + 1, into: &lines, left: &left, skipping: skipping)
+            }
+        }
+
         /// Memory is short: the pictures of pages that are not in view are let go.
         private func dropUnseenPictures() {
             guard let view = pdfView else { return }
@@ -1604,11 +1718,13 @@ struct PDFInkView: UIViewRepresentable {
                 let picture = overlay.pagePicture
                 if picture.convert(view.bounds, from: view).intersection(picture.bounds).isEmpty {
                     picture.clear()
-                    overlay.showCanvasInk()
-                    overlay.inkPicture.clear()
-                    overlay.inkPictureVersion = -1
+                    overlay.dropInkPicture()
                 }
             }
+            // From here on, for as long as the document stays open, less is asked of memory: smaller
+            // pictures, and canvases no more than half as fine again as the page.
+            Self.tight = true
+            settleScale()
             if let source {
                 pictureQueue.async { source.forget() }
             }

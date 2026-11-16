@@ -11,6 +11,8 @@ final class Diagnostics: NSObject, MXMetricManagerSubscriber {
     static let shared = Diagnostics()
 
     private let defaults = UserDefaults.standard
+    /// How the page view was put together when it was last looked at; filled in by the page view.
+    var viewNote = ""
     private var started = false
     private var watching: [NSObjectProtocol] = []
 
@@ -150,8 +152,13 @@ final class Diagnostics: NSObject, MXMetricManagerSubscriber {
         lines.append("memory: \(used), \(ProcessInfo.processInfo.physicalMemory / 1_048_576) MB in the device")
         lines.append("runs \(count("diag.launches")), ended while on screen \(cutShort), memory warnings \(memoryWarnings)")
         lines.append("crashes reported \(crashes), hangs reported \(count("diag.hangs"))")
-        lines.append("settings: own pen \(flag("appPen")), own pictures \(flag("sharpPages")), dark paper \(flag("darkPaper")), finger writes \(defaults.bool(forKey: "fingerDraws"))")
+        lines.append("settings: own pen \(defaults.bool(forKey: "appPen")), page pictures \(flag("sharpPages")), ink pictures \(flag("sharpInk")), dark paper \(flag("darkPaper")), finger writes \(defaults.bool(forKey: "fingerDraws"))")
         lines.append("")
+        if !viewNote.isEmpty {
+            lines.append("page view as last seen:")
+            lines.append(viewNote)
+            lines.append("")
+        }
         if let text = try? String(contentsOf: notes, encoding: .utf8) {
             // The newest notes; a long history is of no more use than its end.
             lines.append(contentsOf: text.split(separator: "\n").suffix(60).map(String.init))
