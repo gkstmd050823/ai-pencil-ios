@@ -168,6 +168,8 @@ final class PagePicture: UIView {
     var gaveUp = false
     /// How often PencilKit has changed the handwriting on its own since the page was laid out.
     var breaks = 0
+    /// For how many looks in a row the picture's pixels have been found off the screen's.
+    var offGrid = 0
     let ticket = Ticket()
     private let image = CALayer()
     /// The picture on show.
@@ -903,6 +905,9 @@ struct PDFInkView: UIViewRepresentable {
         private var penTool = InkTool.pen
         /// The zoom range last given to the page view.
         private var zoomRange: (low: CGFloat, high: CGFloat) = (0, 0)
+        /// The scroll views whose lock to one direction has been taken off, and the watch kept on each.
+        private let freed = NSHashTable<UIScrollView>.weakObjects()
+        private var lockWatches: [NSKeyValueObservation] = []
         private var ticks = 0
         /// Watches the page view's own scroll view, and notes that the canvases are due to be placed.
         private var scrollWatch: NSKeyValueObservation?
@@ -1111,6 +1116,8 @@ struct PDFInkView: UIViewRepresentable {
             pictureTimer = nil
             scrollWatch?.invalidate()
             scrollWatch = nil
+            lockWatches.forEach { $0.invalidate() }
+            lockWatches = []
         }
 
         private func tellPage() {
@@ -1182,9 +1189,17 @@ struct PDFInkView: UIViewRepresentable {
             while !queue.isEmpty {
                 let next = queue.removeFirst()
                 if next is PKCanvasView || next is PageOverlay { continue }
-                if let scroll = next as? UIScrollView, scroll.isDirectionalLockEnabled {
-                    scroll.isDirectionalLockEnabled = false
-                    DebugLog.write("scroll: a \(type(of: scroll)) was locked to one direction at a time; it is free now")
+                if let scroll = next as? UIScrollView {
+                    if !freed.contains(scroll) {
+                        // PDFKit puts the lock back on from time to time; each time it does, it comes
+                        // off again at once.
+                        freed.add(scroll)
+                        DebugLog.write("scroll: a \(type(of: scroll)) \(scroll.isDirectionalLockEnabled ? "was locked to one direction at a time; it is free now" : "was free already")")
+                        lockWatches.append(scroll.observe(\.isDirectionalLockEnabled, options: [.new]) { scroll, _ in
+                            if scroll.isDirectionalLockEnabled { scroll.isDirectionalLockEnabled = false }
+                        })
+                    }
+                    if scroll.isDirectionalLockEnabled { scroll.isDirectionalLockEnabled = false }
                 }
                 queue.append(contentsOf: next.subviews)
             }
@@ -1852,10 +1867,8 @@ struct PDFInkView: UIViewRepresentable {
                 scrollWatch = scroll.observe(\.contentOffset) { [weak self] _, _ in self?.scrolled() }
             }
             ticks += 1
-            if ticks % 16 == 1 {
-                keepZoomRange(view)
-                freeScrolling(in: view)
-            }
+            if ticks % 16 == 1 { keepZoomRange(view) }
+            if ticks % 4 == 1 { freeScrolling(in: view) }
             placeCanvases()
             let pages = Self.drawsPages
             if ticks % 16 == 14 {
@@ -1893,6 +1906,43 @@ struct PDFInkView: UIViewRepresentable {
                     overlay.dropPreviews()
                 }
             }
+        }
+
+        /// Where the screen's pixels fall in a view's own measure: the place, less than a pixel from
+        /// the view's corner, where a pixel of the screen begins. PDFKit lays a page wherever the zoom
+        /// puts it, which is hardly ever on a whole pixel: the first page of a document fitted to an
+        /// iPad's width begins 0.6 pixels below one. A picture whose pixels begin at the page's corner
+        /// is then shown shifted by that much, each of its pixels spread over two of the screen's, and
+        /// its lines come out softer than the same lines drawn as shapes (which the system fits to the
+        /// screen's pixels whatever the shift). So pictures are drawn from where this says instead.
+        private static func pixelGrid(of view: UIView, scale: CGFloat) -> CGPoint {
+            guard let window = view.window, scale > 0 else { return .zero }
+            let dense = window.screen.scale
+            let corner = view.convert(CGPoint.zero, to: window)
+            let along = view.convert(CGPoint(x: 100, y: 0), to: window)
+            // (Only where the view stands upright on screen; a page shown turned keeps its own corner.)
+            guard abs(along.y - corner.y) < 0.01, along.x > corner.x else { return .zero }
+            func part(_ value: CGFloat) -> CGFloat {
+                let pixels = value * dense
+                return (pixels.rounded(.up) - pixels) / scale
+            }
+            return CGPoint(x: part(corner.x), y: part(corner.y))
+        }
+
+        /// Whether a picture that begins at [point] has its pixels on the screen's. It is taken to have
+        /// left them only once it has been found off them three looks in a row: in the middle of a
+        /// movement a page may be anywhere.
+        private static func onGrid(_ picture: PagePicture, _ point: CGPoint, _ grid: CGPoint, scale: CGFloat) -> Bool {
+            func off(_ a: CGFloat, _ b: CGFloat) -> CGFloat {
+                let pixels = (a - b) * scale
+                return abs(pixels - pixels.rounded())
+            }
+            if off(point.x, grid.x) < 0.06, off(point.y, grid.y) < 0.06 {
+                picture.offGrid = 0
+                return true
+            }
+            picture.offGrid += 1
+            return picture.offGrid < 3
         }
 
         /// Whether the picture of a page's handwriting reaches as far as the page is in view.
@@ -1963,14 +2013,15 @@ struct PDFInkView: UIViewRepresentable {
                 if want.width * want.height * scale * scale > Self.inkLimit { want = need }
             }
             let shown = picture.shown
+            let grid = Self.pixelGrid(of: picture, scale: scale)
             var fits = false
             if let shown, abs(shown.scale - scale) < 0.002 * scale {
-                fits = shown.rect.insetBy(dx: -0.75, dy: -0.75).contains(need)
+                fits = shown.rect.insetBy(dx: -0.75, dy: -0.75).contains(need) && Self.onGrid(picture, shown.rect.origin, grid, scale: scale)
             }
             let stale = overlay.inkDirtyAll || !overlay.inkDirty.isNull || overlay.inkPictureVersion != version
                 || !overlay.inkTrusted || overlay.inkEmpty
             if fits, !stale { return }
-            var extent = PagePicture.Extent(rect: InkPaint.whole(want, scale: scale), scale: scale)
+            var extent = PagePicture.Extent(rect: InkPaint.whole(want, scale: scale, origin: grid), scale: scale)
             var base: CGImage?
             var dirty: CGRect?
             if fits, overlay.inkTrusted, !overlay.inkEmpty, !overlay.inkDirtyAll, !overlay.inkDirty.isNull,
@@ -2065,14 +2116,13 @@ struct PDFInkView: UIViewRepresentable {
                 want = seen.insetBy(dx: -seen.width * 0.45, dy: -seen.height * 0.45).intersection(whole)
                 if want.width * want.height * scale * scale > Self.pictureLimit { want = need }
             }
+            let grid = Self.pixelGrid(of: picture, scale: scale)
             if let have = picture.asked ?? picture.shown, abs(have.scale - scale) < 0.002 * scale,
-               have.rect.insetBy(dx: -0.5, dy: -0.5).contains(need) {
+               have.rect.insetBy(dx: -0.75, dy: -0.75).contains(need), Self.onGrid(picture, have.rect.origin, grid, scale: scale) {
                 return
             }
-            // Whole pixels, so that the picture's pixels are the screen's.
-            let left = (want.minX * scale).rounded(.down) / scale, top = (want.minY * scale).rounded(.down) / scale
-            let right = (want.maxX * scale).rounded(.up) / scale, bottom = (want.maxY * scale).rounded(.up) / scale
-            let extent = PagePicture.Extent(rect: CGRect(x: left, y: top, width: right - left, height: bottom - top), scale: scale)
+            // Whole pixels, and the screen's own: see pixelGrid.
+            let extent = PagePicture.Extent(rect: InkPaint.whole(want, scale: scale, origin: grid), scale: scale)
             picture.asked = extent
             let ticket = picture.ticket
             let number = ticket.next()

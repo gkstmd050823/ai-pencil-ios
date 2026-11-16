@@ -790,7 +790,7 @@ private struct ToolBar: View {
     private func penSize(_ slot: Int) -> some View {
         let size = choice.penSizes.indices.contains(slot) ? choice.penSizes[slot] : 0.5
         let selected = choice.penSlot == slot
-        let dot = min(17, max(3, CGFloat(size) * InkChoice.pointsPerMillimetre * 2.4))
+        let dot = min(17, max(3.5, CGFloat(size) * InkChoice.pointsPerMillimetre * 4))
         return Button {
             if selected {
                 showingOptions = true

@@ -217,7 +217,7 @@ struct InkChoice: Equatable, Codable {
     static let highlighterSizes: ClosedRange<Double> = 2...12
     static let eraserWidths: ClosedRange<Double> = 6...60
     /// The eraser sizes kept on the tool bar.
-    static let eraserQuick: [Double] = [10, 22, 40]
+    static let eraserQuick: [Double] = [8, 16, 32]
     /// The colour of the AI pen and of the marks it leaves on the page.
     static let markColor = UIColor(red: 0x0F / 255.0, green: 0xA3 / 255.0, blue: 0x9B / 255.0, alpha: 1)
     /// How strong a highlighter line is where it is laid over the page. (It is laid as a tint that darkens
