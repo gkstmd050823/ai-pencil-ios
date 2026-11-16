@@ -90,6 +90,12 @@ jobs:
           shot 29-scan-soft 12 -demoImport scan.pdf -sharpPages NO
           shot 29-scan-zoomed 14 -demoImport scan.pdf -demoZoom 2.5
           shot 29-scan-zoomed-soft 14 -demoImport scan.pdf -demoZoom 2.5 -sharpPages NO
+          # Pages much larger than the screen, which PDFKit has to draw smaller than their own size.
+          cp tools/big.pdf tools/mid.pdf "$DATA/Documents/"
+          shot 29-big 12 -demoImport big.pdf
+          shot 29-big-soft 12 -demoImport big.pdf -sharpPages NO
+          shot 29-mid 12 -demoImport mid.pdf
+          shot 29-mid-soft 12 -demoImport mid.pdf -sharpPages NO
           xcrun simctl ui "$UDID" appearance dark
           shot 29-scan-dark 12 -demoImport scan.pdf
           shot 29-scan-dark-soft 12 -demoImport scan.pdf -sharpPages NO
