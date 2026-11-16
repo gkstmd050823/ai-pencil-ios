@@ -158,13 +158,13 @@ final class TouchTests: XCTestCase {
         // The same on a solid block of ink, where the width of what is rubbed out can be read off: one
         // swath at a width of 40 and one at 16, page fitted; then one at 40, zoomed in.
         start(["-demoTool", "eraser", "-demoPage", "5", "-demoBlock", "-demoEraserKind", "part", "-demoEraserWidth", "40", "-demoHighlighterOnly", "NO", "-demoEraserAuto", "NO"])
-        drag(from: (60, 600), to: (540, 600))
+        drag(from: (60, 140), to: (540, 140))
         start(["-demoTool", "eraser", "-demoPage", "5", "-demoEraserKind", "part", "-demoEraserWidth", "16", "-demoHighlighterOnly", "NO", "-demoEraserAuto", "NO"])
-        drag(from: (60, 690), to: (540, 690))
+        drag(from: (60, 232), to: (540, 232))
         shot("41-part-eraser-swaths-fitted")
         start(["-demoTool", "eraser", "-demoPage", "5", "-demoZoom", "2.1", "-demoEraserKind", "part", "-demoEraserWidth", "40", "-demoHighlighterOnly", "NO", "-demoEraserAuto", "NO"])
         shot("41-part-eraser-zoomed-before")
-        screenDrag(from: (100, 700), to: (720, 700))
+        screenDrag(from: (260, 760), to: (780, 760))
         shot("41-part-eraser-zoomed-after")
         app.terminate()
     }

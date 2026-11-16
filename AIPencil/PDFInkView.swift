@@ -1516,7 +1516,7 @@ struct PDFInkView: UIViewRepresentable {
                 var points: [PKStrokePoint] = []
                 for step in 0...42 {
                     points.append(PKStrokePoint(
-                        location: CGPoint(x: 80 + 10 * Double(step), y: 540 + 6 * Double(row)), timeOffset: Double(step) * 0.008,
+                        location: CGPoint(x: 80 + 10 * Double(step), y: 80 + 6 * Double(row)), timeOffset: Double(step) * 0.008,
                         size: CGSize(width: size, height: size), opacity: 1, force: 1, azimuth: 0, altitude: CGFloat.pi / 2
                     ))
                 }
@@ -1561,12 +1561,13 @@ struct PDFInkView: UIViewRepresentable {
         /// eraser is not in hand.
         private var eraserReach: CGFloat? {
             guard choice.tool == .eraser, let view = pdfView else { return nil }
-            // The app's own eraser (highlighter only) rubs out exactly this far round its middle.
-            if choice.eraserHighlighterOnly { return CGFloat(choice.eraserWidth) / 2 }
-            // PencilKit's erasers get a small ring that marks the place, the same on screen at any zoom:
-            // the one that takes whole lines takes what its tip touches, and how wide the other rubs is
-            // PencilKit's own affair (it is not the width it is given; the build measures it).
-            return 7 / max(view.scaleFactor, 0.2)
+            let zoom = max(view.scaleFactor, 0.2)
+            // PencilKit's eraser for part of a line rubs out a swath as wide as its width in points of the
+            // screen, whatever the zoom (measured on the build server: widths of 40 and 16 took 39.5 and
+            // 16 points of screen). The app's own eraser, for highlighter only, is made to do the same.
+            if choice.eraserHighlighterOnly || choice.eraserKind == .part { return CGFloat(choice.eraserWidth) / 2 / zoom }
+            // The eraser that takes whole lines takes what its tip touches: a small ring marks the place.
+            return 7 / zoom
         }
 
         /// Shows the ring of the eraser at a place on a page, while the eraser is in hand.
@@ -1639,7 +1640,7 @@ struct PDFInkView: UIViewRepresentable {
             guard let overlay = gesture.view?.superview as? PageOverlay else { return }
             let canvas = overlay.canvas
             let point = gesture.location(in: overlay)
-            let reach = CGFloat(choice.eraserWidth) / 2
+            let reach = eraserReach ?? CGFloat(choice.eraserWidth) / 2
             switch gesture.state {
             case .began, .changed:
                 if gesture.state == .began {
