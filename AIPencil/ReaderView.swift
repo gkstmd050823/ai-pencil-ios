@@ -520,6 +520,10 @@ struct ReaderView: View {
         // The eraser's settings, said outright so that one launch's does not carry into the next.
         if defaults.object(forKey: "demoEraserAuto") != nil { choice.eraserAuto = defaults.bool(forKey: "demoEraserAuto") }
         if defaults.object(forKey: "demoHighlighterOnly") != nil { choice.eraserHighlighterOnly = defaults.bool(forKey: "demoHighlighterOnly") }
+        let dense = defaults.integer(forKey: "demoDense")
+        if dense > 0 {
+            later(2.5) { controller.demoDense(dense) }
+        }
         if arguments.contains("-demoPen") {
             later(2.5) { controller.demoPen() }
         }

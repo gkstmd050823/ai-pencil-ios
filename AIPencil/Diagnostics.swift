@@ -201,6 +201,82 @@ final class Diagnostics: NSObject, MXMetricManagerSubscriber {
     }
 }
 
+/// Measures, for the build server, what writing costs the app: how evenly frames come while a line is
+/// being written, how old each touch is by the time the app has dealt with it, and how long the app takes
+/// over a line once the pen has lifted. These are the parts of a pen's delay that the app has a hand in;
+/// what PencilKit and the screen add on an iPad is not seen from here. A debug build notes the figures in
+/// its log; a release build has none of this.
+enum Feel {
+    #if DEBUG
+    private final class Watch: NSObject {
+        var link: CADisplayLink?
+        var lastFrame: CFTimeInterval = 0
+        var gaps: [Double] = []
+        var ages: [Double] = []
+        var writing = false
+
+        @objc func frame(_ link: CADisplayLink) {
+            guard writing else {
+                lastFrame = 0
+                return
+            }
+            if lastFrame > 0 { gaps.append((link.timestamp - lastFrame) * 1000) }
+            lastFrame = link.timestamp
+        }
+    }
+
+    private static let watch = Watch()
+
+    private static func middle(_ values: [Double]) -> Double {
+        values.isEmpty ? 0 : values.sorted()[values.count / 2]
+    }
+    #endif
+
+    /// A line is begun.
+    static func begin() {
+        #if DEBUG
+        if watch.link == nil {
+            let link = CADisplayLink(target: watch, selector: #selector(Watch.frame(_:)))
+            link.add(to: .main, forMode: .common)
+            watch.link = link
+        }
+        watch.gaps = []
+        watch.ages = []
+        watch.lastFrame = 0
+        watch.writing = true
+        #endif
+    }
+
+    /// A touch that happened at [time] has been dealt with just now.
+    static func dealt(with time: TimeInterval) {
+        #if DEBUG
+        if watch.writing { watch.ages.append((CACurrentMediaTime() - time) * 1000) }
+        #endif
+    }
+
+    /// The line is over. (What it was is only put into words in a debug build.)
+    static func end(_ what: @autoclosure () -> String) {
+        #if DEBUG
+        guard watch.writing else { return }
+        watch.writing = false
+        let gaps = watch.gaps, ages = watch.ages
+        guard gaps.count > 3 else { return }
+        let late = gaps.filter { $0 > 25 }.count
+        DebugLog.write(String(
+            format: "feel: %@: %d frames, a frame every %.1f ms (longest %.1f, %d over 25); %d touches dealt with %.1f ms after they happened (longest %.1f)",
+            what(), gaps.count, middle(gaps), gaps.max() ?? 0, late, ages.count, middle(ages), ages.max() ?? 0
+        ))
+        #endif
+    }
+
+    /// Notes how long a piece of work on the main thread took.
+    static func took(_ what: String, since start: CFTimeInterval, lines: Int) {
+        #if DEBUG
+        DebugLog.write(String(format: "feel: %@ took %.2f ms on a page of %d lines", what, (CACurrentMediaTime() - start) * 1000, lines))
+        #endif
+    }
+}
+
 /// Draws the small pictures of a document's pages on a queue of its own, from a copy of the document that
 /// nothing else touches. (PDFKit's objects are not made to be shared between threads; the pages on show
 /// belong to the main thread.)

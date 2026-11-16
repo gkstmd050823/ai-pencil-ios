@@ -110,6 +110,35 @@ final class TouchTests: XCTestCase {
         shot("37-touch-pencilkit-pen-just-written")
         sleep(3)
         shot("37-touch-pencilkit-pen-settled")
+
+        // What writing costs the app, three ways on the same full page: as 0.6.0 had it (nothing of the
+        // app's own pictures), as 0.7.0 comes, and with the app's own pen. The app notes the figures in
+        // its log ("feel: ..."). The first launch fills the page with four hundred lines.
+        start(["-demoTool", "pen", "-demoPage", "4", "-demoDense", "400", "-sharpInk", "NO", "-sharpPages", "NO"])
+        scribble()
+        shot("38-feel-as-before")
+        start(["-demoTool", "pen", "-demoPage", "4"])
+        scribble()
+        shot("38-feel-as-it-comes")
+        start(["-demoTool", "pen", "-demoPage", "4", "-appPen", "YES"])
+        scribble()
+        shot("38-feel-own-pen")
         app.terminate()
+    }
+
+    /// Four lines in quick succession, a rest long enough for the app to redraw the handwriting, then
+    /// three lines each begun just as that redrawing may be under way.
+    private func scribble() {
+        for row in 0..<4 {
+            let y = CGFloat(120 + row * 14)
+            place(330, y).press(forDuration: 0.05, thenDragTo: place(540, y + 10), withVelocity: .default, thenHoldForDuration: 0.02)
+        }
+        sleep(3)
+        for row in 0..<3 {
+            let y = CGFloat(200 + row * 14)
+            place(330, y).press(forDuration: 0.05, thenDragTo: place(540, y - 8), withVelocity: .default, thenHoldForDuration: 0.02)
+            usleep(1_150_000)
+        }
+        sleep(2)
     }
 }

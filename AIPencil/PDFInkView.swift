@@ -38,6 +38,8 @@ final class TouchWatcher: UIGestureRecognizer {
     /// Called when the touch lands, and when it is over.
     var onDown: (() -> Void)?
     var onUp: (() -> Void)?
+    /// Called with the time of each touch seen (for measuring, in a debug build).
+    var onSeen: ((TimeInterval) -> Void)?
     private weak var followed: UITouch?
     private var last = CGPoint.zero
 
@@ -47,12 +49,14 @@ final class TouchWatcher: UIGestureRecognizer {
         last = touch.location(in: view)
         onDown?()
         onMove?(last, last)
+        onSeen?(touch.timestamp)
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
         guard let touch = followed, touches.contains(touch) else { return }
         let point = touch.location(in: view)
         onMove?(last, point)
+        onSeen?(touch.timestamp)
         last = point
     }
 
@@ -664,6 +668,11 @@ final class ReaderController: ObservableObject {
         coordinator?.demoMark(center: center, radius: radius)
     }
 
+    /// For the build server: fills the page in view with handwriting.
+    func demoDense(_ count: Int) {
+        coordinator?.demoDense(count)
+    }
+
     /// For the build server: writes a shaky line with the app's own pen, plain and steadied.
     func demoPen() {
         coordinator?.demoPen()
@@ -784,7 +793,7 @@ struct PDFInkView: UIViewRepresentable {
         /// The file on show, and the same file opened once more for the queue that draws the pages.
         var url: URL?
         var source: PictureSource?
-        private let inkQueue = DispatchQueue(label: "app.aipencil.ink.pictures", qos: .userInitiated)
+        private let inkQueue = DispatchQueue(label: "app.aipencil.ink.pictures", qos: .utility)
         /// The pen takes its touches through the app instead of through PencilKit.
         var appPen = false
         /// The line being written with the app's own pen.
@@ -922,11 +931,15 @@ struct PDFInkView: UIViewRepresentable {
 
         /// A pen or a finger came down on a canvas, or left it. While it is there the canvas shows.
         private func canvasInUse(_ overlay: PageOverlay, _ inUse: Bool) {
+            let was = overlay.inkInUse
             overlay.inkInUse = inUse
             overlay.canvasUsed = CACurrentMediaTime()
             if inUse {
                 overlay.showCanvasInk()
                 overlay.dropPreviews()
+                if !was { Feel.begin() }
+            } else if was {
+                Feel.end("PencilKit's \(choice.tool.rawValue), page pictures \(Self.drawsPages ? "on" : "off"), ink pictures \(Self.drawsInk ? "on" : "off")")
             }
         }
 
@@ -1102,6 +1115,9 @@ struct PDFInkView: UIViewRepresentable {
                 guard let self, let overlay, overlay.canvas.isUserInteractionEnabled else { return }
                 self.canvasInUse(overlay, true)
             }
+            overlay.watcher.onSeen = { [weak overlay] time in
+                if overlay?.inkInUse == true { Feel.dealt(with: time) }
+            }
             overlay.watcher.onUp = { [weak self, weak overlay] in
                 guard let self, let overlay, overlay.inkInUse else { return }
                 self.canvasInUse(overlay, false)
@@ -1170,6 +1186,8 @@ struct PDFInkView: UIViewRepresentable {
             guard !retired, let canvas = canvasView as? PageCanvas else { return }
             // (What the app itself is putting on the canvas it has taken note of already.)
             if canvas.byCode { return }
+            let began = CACurrentMediaTime()
+            defer { Feel.took("noting a change to the canvas", since: began, lines: canvas.ink.strokes.count) }
             let drawing = canvas.drawing
             let strokes = drawing.strokes
             if choice.tool == .ai, strokes.count == canvas.strokeCount + 1, let stroke = strokes.last {
@@ -1274,22 +1292,27 @@ struct PDFInkView: UIViewRepresentable {
             guard !retired, choice.usesAppPen(appPen) else { return }
             if penLine == nil {
                 penLine = PenLine(width: InkWidth.seen(setting: CGFloat(choice.penWidth)), sense: choice.appPenSense, steady: CGFloat(choice.penSteady))
+                Feel.begin()
             }
             for sample in fresh { penLine?.add(sample) }
             if let line = penLine {
                 overlay.drawLive(line, ahead: ahead, color: penShown, fineness: fineness)
             }
+            if let newest = fresh.last { Feel.dealt(with: newest.time) }
         }
 
         /// The pen lifted. The line becomes a stroke of the page's handwriting like any other.
         private func penDone(kept: Bool, in overlay: PageOverlay) {
             guard let line = penLine else { return }
             penLine = nil
+            Feel.end("the app's own pen, steadied \(choice.penSteady)")
             guard kept, !retired else {
                 overlay.dropLive()
                 return
             }
+            let began = CACurrentMediaTime()
             commit(line, in: overlay)
+            Feel.took("handing a line over to the canvas", since: began, lines: overlay.canvas.ink.strokes.count)
         }
 
         private var penShown: CGColor {
@@ -1348,6 +1371,29 @@ struct PDFInkView: UIViewRepresentable {
                 }
                 commit(line, in: overlay)
             }
+        }
+
+        /// For the build server: a page full of handwriting, to see what a full page costs the pen.
+        func demoDense(_ count: Int) {
+            guard let view = pdfView, let page = view.currentPage, let overlay = overlays[page] else { return }
+            var drawing = overlay.canvas.ink
+            let before = drawing
+            guard before.strokes.count < count else { return }
+            let size = InkWidth.size(drawing: 1)
+            for index in 0..<count {
+                let left = 50 + Double(index % 20) * 25, top = 60 + Double(index / 20) * 30
+                var points: [PKStrokePoint] = []
+                for step in 0...14 {
+                    let place = CGPoint(x: left + Double(step) * 1.4, y: top + 7 * sin(Double(step) * 0.9 + Double(index)))
+                    points.append(PKStrokePoint(
+                        location: place, timeOffset: Double(step) * 0.008, size: CGSize(width: size, height: size),
+                        opacity: 1, force: 1, azimuth: 0, altitude: CGFloat.pi / 2
+                    ))
+                }
+                drawing.strokes.append(PKStroke(ink: PKInk(.monoline, color: choice.penUIColor), path: PKStrokePath(controlPoints: points, creationDate: Date())))
+            }
+            setDrawing(drawing, on: overlay.canvas, undoingTo: before)
+            DebugLog.write("feel: a page of \(drawing.strokes.count) lines laid down")
         }
 
         func clearPage() {

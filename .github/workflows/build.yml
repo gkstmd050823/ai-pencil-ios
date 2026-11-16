@@ -269,6 +269,8 @@ jobs:
           if [ -n "$DATA" ]; then cp "$DATA/Documents/debug.log" touch-debug.log 2>/dev/null || true; fi
           echo "---- the app's own notes during the touch test ----"
           grep -E "eraser:|tool:|undo:" touch-debug.log || true
+          echo "---- what writing cost the app ----"
+          grep -E "^feel:" touch-debug.log || true
           ls screenshots | grep touch || echo "no pictures came out of the touch test"
           xcrun simctl shutdown "$UDID" || true
 
