@@ -431,7 +431,7 @@ final class PageOverlay: UIView {
             path.move(to: end)
             for sample in ahead { path.addLine(to: sample.point) }
             liveTail.path = path
-            liveTail.lineWidth = width * PenLine.shownShare
+            liveTail.lineWidth = width
             liveTail.strokeColor = color
             liveTail.contentsScale = fineness
             if liveTail.superlayer == nil { penMarks.layer.addSublayer(liveTail) }
@@ -1198,7 +1198,8 @@ struct PDFInkView: UIViewRepresentable {
         @objc private func drawShape(_ gesture: ShapeGesture) {
             guard let overlay = gesture.view?.superview as? PageOverlay else { return }
             let point = gesture.location(in: overlay)
-            let width = choice.penLineWidth
+            // (The width the shape is seen at; its stroke is given the size that draws that wide.)
+            let width = InkWidth.seen(setting: CGFloat(choice.penWidth))
             switch gesture.state {
             case .began:
                 gesture.start = point
@@ -1209,7 +1210,7 @@ struct PDFInkView: UIViewRepresentable {
                 path.move(to: first)
                 for next in outline.dropFirst() { path.addLine(to: next) }
                 overlay.shapePreview.path = path.cgPath
-                overlay.shapePreview.lineWidth = width * PenLine.shownShare
+                overlay.shapePreview.lineWidth = width
                 overlay.shapePreview.contentsScale = fineness
                 overlay.shapePreview.strokeColor = (darkPaper ? choice.penUIColor.onDarkPaper : choice.penUIColor).cgColor
             case .ended:
@@ -1218,9 +1219,10 @@ struct PDFInkView: UIViewRepresentable {
                 let outline = ShapeOutline.points(choice.shapeKind, from: gesture.start, to: point, lineWidth: width)
                 guard outline.count > 1 else { return }
                 var points: [PKStrokePoint] = []
+                let size = InkWidth.size(drawing: width)
                 for (index, place) in outline.enumerated() {
                     points.append(PKStrokePoint(
-                        location: place, timeOffset: Double(index) * 0.004, size: CGSize(width: width, height: width),
+                        location: place, timeOffset: Double(index) * 0.004, size: CGSize(width: size, height: size),
                         opacity: 1, force: 1, azimuth: 0, altitude: CGFloat.pi / 2
                     ))
                 }
@@ -1238,7 +1240,7 @@ struct PDFInkView: UIViewRepresentable {
                 shape.fillColor = nil
                 shape.lineCap = .round
                 shape.lineJoin = .round
-                shape.lineWidth = width * PenLine.shownShare
+                shape.lineWidth = width
                 shape.strokeColor = (darkPaper ? choice.penUIColor.onDarkPaper : choice.penUIColor).cgColor
                 shape.contentsScale = fineness
                 overlay.keep(shape, for: overlay.canvas.inkVersion)
@@ -1271,7 +1273,7 @@ struct PDFInkView: UIViewRepresentable {
         private func penDrew(_ fresh: [PenSample], ahead: [PenSample], in overlay: PageOverlay) {
             guard !retired, choice.usesAppPen(appPen) else { return }
             if penLine == nil {
-                penLine = PenLine(width: choice.penLineWidth, sense: choice.appPenSense, steady: CGFloat(choice.penSteady))
+                penLine = PenLine(width: InkWidth.seen(setting: CGFloat(choice.penWidth)), sense: choice.appPenSense, steady: CGFloat(choice.penSteady))
             }
             for sample in fresh { penLine?.add(sample) }
             if let line = penLine {
@@ -1329,7 +1331,7 @@ struct PDFInkView: UIViewRepresentable {
             drawing.strokes.append(marker)
             setDrawing(drawing, on: overlay.canvas, undoingTo: before)
             for (row, steady) in [(0.0, CGFloat(0)), (1.0, CGFloat(0.9))] {
-                var line = PenLine(width: 2.6, sense: 1, steady: steady)
+                var line = PenLine(width: 1.4, sense: 1, steady: steady)
                 for step in 0...240 {
                     let along = Double(step) / 240
                     let shake = 2.2 * sin(Double(step) * 1.9) + 1.4 * cos(Double(step) * 3.1)
@@ -1339,7 +1341,7 @@ struct PDFInkView: UIViewRepresentable {
                 commit(line, in: overlay)
                 DebugLog.write("pen: a line of \(line.points.count) points written, steadied \(steady)")
             }
-            for (row, width) in [1.0, 2.0, 4.0, 8.0, 12.0].enumerated() {
+            for (row, width) in [0.4, 1.0, 2.0, 4.0, 8.0].enumerated() {
                 var line = PenLine(width: CGFloat(width), sense: 0, steady: 0)
                 for step in 0...40 {
                     line.add(PenSample(point: CGPoint(x: 70 + 5 * Double(step), y: 640 + 22 * Double(row)), force: 1, time: Double(step) / 240))
@@ -1886,7 +1888,8 @@ struct PDFInkView: UIViewRepresentable {
 
         func demoShapes() {
             guard let view = pdfView, let page = view.currentPage, let overlay = overlays[page] else { return }
-            let width = choice.penLineWidth
+            let width = InkWidth.seen(setting: CGFloat(choice.penWidth))
+            let size = InkWidth.size(drawing: width)
             let drags: [(ShapeKind, CGPoint, CGPoint)] = [
                 (.line, CGPoint(x: 70, y: 470), CGPoint(x: 250, y: 474)),
                 (.arrow, CGPoint(x: 300, y: 520), CGPoint(x: 500, y: 450)),
@@ -1898,7 +1901,7 @@ struct PDFInkView: UIViewRepresentable {
                 var points: [PKStrokePoint] = []
                 for (index, place) in outline.enumerated() {
                     points.append(PKStrokePoint(
-                        location: place, timeOffset: Double(index) * 0.004, size: CGSize(width: width, height: width),
+                        location: place, timeOffset: Double(index) * 0.004, size: CGSize(width: size, height: size),
                         opacity: 1, force: 1, azimuth: 0, altitude: CGFloat.pi / 2
                     ))
                 }

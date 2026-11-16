@@ -8,6 +8,30 @@ import UIKit.UIGestureRecognizerSubclass
 // while it is being written. When the pen lifts the line is handed to PencilKit as a stroke like any
 // other, so the eraser, the lasso, undo and the export all work on it as before.
 
+/// How wide lines come out. PencilKit does not draw a stroke as wide as its points say: its "monoline"
+/// ink, which the app's own pen and the shape tool hand their lines over in, draws next to nothing for a
+/// point size of 2 or less, and 1.78 points of line for every unit above that. (Measured on the build
+/// server: straight lines of sizes 2, 2.6, 4, 8 and 12 came out 0.2, 1.1, 3.6, 10.7 and 17.8 points wide,
+/// on the canvas and in a picture made of the drawing alike.) Lines are worked out in the width they are
+/// to be seen at, and turned into PencilKit's sizes only when they are handed over.
+enum InkWidth {
+    private static let rise: CGFloat = 1.78
+    private static let floor: CGFloat = 1.99
+
+    /// The size to give a stroke's points for the line to come out [width] points wide.
+    static func size(drawing width: CGFloat) -> CGFloat {
+        floor + max(width, 0.05) / rise
+    }
+
+    /// How wide a line is seen for a setting of the width slider. From 2.3 up it is what PencilKit's
+    /// monoline pen draws at that setting; below, where PencilKit would draw nearly nothing, it runs
+    /// evenly down to a fine line that can still be seen.
+    static func seen(setting: CGFloat) -> CGFloat {
+        if setting >= 2.3 { return rise * (setting - floor) }
+        return 0.3 + (max(setting, 0.6) - 0.6) * (rise * (2.3 - floor) - 0.3) / (2.3 - 0.6)
+    }
+}
+
 /// One place the pen was at: where on the page, how hard it pressed, and when.
 struct PenSample {
     var point: CGPoint
@@ -18,7 +42,7 @@ struct PenSample {
 
 /// A line being written: the places the pen went through, steadied, and a width for each.
 struct PenLine {
-    /// The width of the line where the pen presses as hard as an ordinary touch.
+    /// The width of the line, in points as it is seen, where the pen presses as hard as an ordinary touch.
     let width: CGFloat
     /// How much pressure changes the width: 0 not at all, 1 all the way.
     let sense: CGFloat
@@ -68,7 +92,7 @@ struct PenLine {
             place = sample.point
         }
         held = place
-        let wanted = max(0.3, width * (1 + sense * (Self.swell(sample.force) - 1)))
+        let wanted = max(0.25, width * (1 + sense * (Self.swell(sample.force) - 1)))
         heldWidth = points.isEmpty ? wanted : heldWidth + (wanted - heldWidth) * 0.35
         put(place, heldWidth, force: sample.force, time: sample.time)
     }
@@ -109,19 +133,14 @@ struct PenLine {
         var control: [PKStrokePoint] = []
         control.reserveCapacity(points.count)
         for index in points.indices {
+            let size = InkWidth.size(drawing: widths[index])
             control.append(PKStrokePoint(
-                location: points[index], timeOffset: times[index], size: CGSize(width: widths[index], height: widths[index]),
+                location: points[index], timeOffset: times[index], size: CGSize(width: size, height: size),
                 opacity: 1, force: 1, azimuth: 0, altitude: CGFloat.pi / 2
             ))
         }
         return PKStroke(ink: PKInk(ink, color: color), path: PKStrokePath(controlPoints: control, creationDate: Date()))
     }
-
-    /// How wide PencilKit draws a line whose points say they are one unit wide. The widths kept here are in
-    /// PencilKit's units, so that the app's pen writes as thick as PencilKit's at the same setting; what is
-    /// shown while writing has to be this much of them to match the stroke the line becomes. (Measured on
-    /// the build server: lines of several widths, as shapes and as strokes, side by side.)
-    static let shownShare: CGFloat = 0.47
 
     /// The line from point [from] onward as a shape to fill: a disc at every point and a band between each
     /// two. Every piece turns the same way round, so that where pieces overlap the filling does not cancel.
@@ -131,12 +150,12 @@ struct PenLine {
         let first = max(0, min(from, points.count - 1))
         for index in first..<points.count {
             let here = points[index]
-            let radius = widths[index] * Self.shownShare / 2
+            let radius = widths[index] / 2
             path.addArc(center: here, radius: radius, startAngle: 0, endAngle: 2 * .pi, clockwise: false)
             path.closeSubpath()
             guard index > first else { continue }
             let before = points[index - 1]
-            let radiusBefore = widths[index - 1] * Self.shownShare / 2
+            let radiusBefore = widths[index - 1] / 2
             let dx = here.x - before.x, dy = here.y - before.y
             let length = hypot(dx, dy)
             guard length > 0.01 else { continue }
