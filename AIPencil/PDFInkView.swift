@@ -730,6 +730,11 @@ final class ReaderController: ObservableObject {
         coordinator?.demoMark(center: center, radius: radius)
     }
 
+    /// For the build server: lays a solid block of ink on the page in view.
+    func demoBlock() {
+        coordinator?.demoBlock()
+    }
+
     /// For the build server: fills the page in view with handwriting.
     func demoDense(_ count: Int) {
         coordinator?.demoDense(count)
@@ -1501,6 +1506,25 @@ struct PDFInkView: UIViewRepresentable {
             }
         }
 
+        /// For the build server: a solid block of ink, for measuring how wide a swath an eraser takes.
+        func demoBlock() {
+            guard let view = pdfView, let page = view.currentPage, let overlay = overlays[page] else { return }
+            var drawing = overlay.canvas.ink
+            let before = drawing
+            let size = InkWidth.size(drawing: 8)
+            for row in 0..<34 {
+                var points: [PKStrokePoint] = []
+                for step in 0...42 {
+                    points.append(PKStrokePoint(
+                        location: CGPoint(x: 80 + 10 * Double(step), y: 540 + 6 * Double(row)), timeOffset: Double(step) * 0.008,
+                        size: CGSize(width: size, height: size), opacity: 1, force: 1, azimuth: 0, altitude: CGFloat.pi / 2
+                    ))
+                }
+                drawing.strokes.append(PKStroke(ink: PKInk(.monoline, color: .black), path: PKStrokePath(controlPoints: points, creationDate: Date())))
+            }
+            setDrawing(drawing, on: overlay.canvas, undoingTo: before)
+        }
+
         /// For the build server: a page full of handwriting, to see what a full page costs the pen.
         func demoDense(_ count: Int) {
             guard let view = pdfView, let page = view.currentPage, let overlay = overlays[page] else { return }
@@ -1537,9 +1561,11 @@ struct PDFInkView: UIViewRepresentable {
         /// eraser is not in hand.
         private var eraserReach: CGFloat? {
             guard choice.tool == .eraser, let view = pdfView else { return nil }
-            if choice.eraserHighlighterOnly || choice.eraserKind == .part { return CGFloat(choice.eraserWidth) / 2 }
-            // The eraser that takes whole lines takes what its tip touches: a small ring, the same on
-            // screen at any zoom.
+            // The app's own eraser (highlighter only) rubs out exactly this far round its middle.
+            if choice.eraserHighlighterOnly { return CGFloat(choice.eraserWidth) / 2 }
+            // PencilKit's erasers get a small ring that marks the place, the same on screen at any zoom:
+            // the one that takes whole lines takes what its tip touches, and how wide the other rubs is
+            // PencilKit's own affair (it is not the width it is given; the build measures it).
             return 7 / max(view.scaleFactor, 0.2)
         }
 

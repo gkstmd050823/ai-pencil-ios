@@ -526,6 +526,9 @@ struct ReaderView: View {
         if dense > 0 {
             later(2.5) { controller.demoDense(dense) }
         }
+        if arguments.contains("-demoBlock") {
+            later(2.5) { controller.demoBlock() }
+        }
         if arguments.contains("-demoPen") {
             later(2.5) { controller.demoPen() }
         }
