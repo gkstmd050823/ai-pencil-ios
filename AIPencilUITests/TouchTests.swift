@@ -43,6 +43,25 @@ final class TouchTests: XCTestCase {
         sleep(1)
     }
 
+    /// Touches a tab (or its cross). With many documents open the tab may be off the edge of the row of
+    /// tabs, which then has to be dragged along until the tab is in reach.
+    private func touchTab(_ name: String) {
+        let tab = app.buttons[name]
+        guard tab.waitForExistence(timeout: 3) else { return }
+        let origin = app.windows.firstMatch.coordinate(withNormalizedOffset: .zero)
+        var tries = 0
+        while !tab.isHittable, tries < 8 {
+            // Toward the side the tab is on: a tab left of the screen comes in when the row is dragged right.
+            let left = tab.frame.midX < 100
+            let from = origin.withOffset(CGVector(dx: left ? 200 : 600, dy: 104))
+            let to = origin.withOffset(CGVector(dx: left ? 600 : 200, dy: 104))
+            from.press(forDuration: 0.05, thenDragTo: to, withVelocity: .slow, thenHoldForDuration: 0.1)
+            usleep(600_000)
+            tries += 1
+        }
+        if tab.isHittable { tab.tap() }
+    }
+
     private func shot(_ name: String) {
         guard let folder = ProcessInfo.processInfo.environment["SHOTS"] else { return }
         let file = URL(fileURLWithPath: folder).appendingPathComponent(name + ".png")
@@ -197,23 +216,14 @@ final class TouchTests: XCTestCase {
         // The tabs: another document's tab shows that document, the first one's brings it back, and a
         // tab's cross closes it.
         start(["-demoTool", "pen"])
-        let other = app.buttons["tricky 탭"]
-        if other.waitForExistence(timeout: 3) {
-            other.tap()
-            sleep(4)
-        }
+        touchTab("tricky 탭")
+        sleep(4)
         shot("46-tab-other-document")
-        let back = app.buttons["샘플 탭"]
-        if back.waitForExistence(timeout: 3) {
-            back.tap()
-            sleep(4)
-        }
+        touchTab("샘플 탭")
+        sleep(4)
         shot("46-tab-back")
-        let close = app.buttons["tricky 탭 닫기"]
-        if close.waitForExistence(timeout: 3) {
-            close.tap()
-            sleep(2)
-        }
+        touchTab("tricky 탭 닫기")
+        sleep(2)
         shot("46-tab-closed")
 
         // Reading only: a finger does not write, whatever tool is in hand and whatever the setting for
