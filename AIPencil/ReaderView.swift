@@ -703,7 +703,7 @@ struct ReaderView: View {
         if arguments.contains("-demoPickText") {
             // Picks a line and a half of the page, as a finger held and dragged would; with
             // "-demoTranslate", has them translated as the menu's button does.
-            later(2.5) { controller.demoPick(from: CGPoint(x: 80, y: 408), to: CGPoint(x: 300, y: 426)) }
+            later(2.5) { controller.demoPick(from: CGPoint(x: 68, y: 225), to: CGPoint(x: 300, y: 249)) }
             if arguments.contains("-demoTranslate") {
                 later(3.2) { translator.translate(controller.pickedText) }
             }

@@ -280,7 +280,7 @@ final class TouchTests: XCTestCase {
         // Words picked with a finger: held on a word, then dragged along the lines. The menu comes up
         // when the finger lets go; its second button has the words translated.
         start(["-demoTool", "pen", "-apiBase", "http://127.0.0.1:8787"], fingersWrite: false)
-        place(80, 408).press(forDuration: 0.8, thenDragTo: place(300, 426), withVelocity: .slow, thenHoldForDuration: 0.3)
+        place(68, 225).press(forDuration: 0.8, thenDragTo: place(300, 249), withVelocity: .slow, thenHoldForDuration: 0.3)
         sleep(2)
         shot("50-words-picked")
         for name in ["번역"] {
@@ -295,6 +295,10 @@ final class TouchTests: XCTestCase {
         place(300, 620).tap()
         sleep(1)
         shot("50-words-let-go")
+        // A finger held on bare paper picks nothing.
+        place(300, 560).press(forDuration: 0.9)
+        sleep(1)
+        shot("50-bare-paper-held")
 
         // Reading only: a finger does not write, whatever tool is in hand and whatever the setting for
         // writing with fingers; it scrolls the page.

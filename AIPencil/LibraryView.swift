@@ -891,7 +891,8 @@ private struct FolderCard: View {
                         .frame(height: tall * 0.78)
                 }
                 .frame(width: wide, height: tall)
-                .position(x: space.size.width / 2, y: space.size.height / 2)
+                // Standing on the bottom of its place, as the documents' covers do, just above its name.
+                .position(x: space.size.width / 2, y: space.size.height - tall / 2 - 4)
             }
             .aspectRatio(0.84, contentMode: .fit)
 

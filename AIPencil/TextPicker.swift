@@ -30,6 +30,8 @@ final class TextPicker: NSObject, UIEditMenuInteractionDelegate, UIGestureRecogn
     private var fixed = NSRange(location: 0, length: 0)
     private var range = NSRange(location: 0, length: 0)
     private var boxes: [CGRect] = []
+    /// Where each letter of the page stands (see readLetters).
+    private var letters: [CGRect] = []
     private let shade = UIView()
     private let head = UIView()
     private let tail = UIView()
@@ -87,37 +89,61 @@ final class TextPicker: NSObject, UIEditMenuInteractionDelegate, UIGestureRecogn
 
     // MARK: picking
 
-    private func pagePoint(_ point: CGPoint) -> CGPoint {
-        CGPoint(x: crop.minX + point.x, y: crop.maxY - point.y)
-    }
-
     private func word(at point: CGPoint, on page: PDFPage) -> NSRange? {
         let crop = page.bounds(for: .cropBox)
         let at = CGPoint(x: crop.minX + point.x, y: crop.maxY - point.y)
-        if let found = page.selectionForWord(at: at), found.numberOfTextRanges(on: page) > 0 {
+        // (PDFKit hands back the nearest word however far off it is. A finger held on bare paper picks
+        // nothing: the word has to be under the finger, or within a few points of it.)
+        if let found = page.selectionForWord(at: at), found.numberOfTextRanges(on: page) > 0,
+           found.bounds(for: page).insetBy(dx: -8, dy: -8).contains(at) {
             let letters = found.range(at: 0, on: page)
             if letters.length > 0 { return letters }
         }
         let index = page.characterIndex(at: at)
-        if index >= 0, index != NSNotFound, index < page.numberOfCharacters {
+        if index >= 0, index != NSNotFound, index < page.numberOfCharacters,
+           page.characterBounds(at: index).insetBy(dx: -8, dy: -8).contains(at) {
             return NSRange(location: index, length: 1)
         }
         return nil
     }
 
-    /// The letter at a place, or the nearest one a little way off: a finger between two lines, or just
-    /// past a line's end, still means the letters beside it.
-    private func letter(near point: CGPoint) -> Int? {
-        guard let page else { return nil }
-        let count = page.numberOfCharacters
-        let steps: [CGFloat] = [0, 3, -3, 6, -6, 10, -10]
-        for dy in steps {
-            for dx in steps {
-                let index = page.characterIndex(at: pagePoint(CGPoint(x: point.x + dx, y: point.y + dy)))
-                if index >= 0, index != NSNotFound, index < count { return index }
+    /// Notes where every letter of the page stands, in the overlay's frame. A letter with no place of its
+    /// own (a line's end) is given a null box.
+    private func readLetters() {
+        guard let page else {
+            letters = []
+            return
+        }
+        let count = min(page.numberOfCharacters, 30000)
+        var all: [CGRect] = []
+        all.reserveCapacity(count)
+        for index in 0..<count {
+            let box = page.characterBounds(at: index)
+            if box.width > 0, box.height > 0 {
+                all.append(CGRect(x: box.minX - crop.minX, y: crop.maxY - box.maxY, width: box.width, height: box.height))
+            } else {
+                all.append(.null)
             }
         }
-        return nil
+        letters = all
+    }
+
+    /// The letter a dragging finger means: on the line nearest the finger, up or down, the letter nearest
+    /// along it. A finger out past the end of a line means the end of that line, and one between two
+    /// lines the nearer of them.
+    private func letter(near point: CGPoint) -> Int? {
+        var best: Int?
+        var bestScore = CGFloat.greatestFiniteMagnitude
+        for (index, box) in letters.enumerated() where !box.isNull {
+            let dx = max(box.minX - point.x, point.x - box.maxX, 0)
+            let dy = max(box.minY - point.y, point.y - box.maxY, 0)
+            let score = dy * 10000 + dx
+            if score < bestScore {
+                bestScore = score
+                best = index
+            }
+        }
+        return best
     }
 
     @objc private func held(_ gesture: UILongPressGestureRecognizer) {
@@ -132,6 +158,7 @@ final class TextPicker: NSObject, UIEditMenuInteractionDelegate, UIGestureRecogn
             crop = under.bounds(for: .cropBox)
             fixed = taken
             range = taken
+            readLetters()
             install(in: view)
             show()
             UISelectionFeedbackGenerator().selectionChanged()
@@ -194,6 +221,7 @@ final class TextPicker: NSObject, UIEditMenuInteractionDelegate, UIGestureRecogn
         crop = under.bounds(for: .cropBox)
         fixed = taken
         range = taken
+        readLetters()
         install(in: view)
         stretch(to: b)
         show()
@@ -214,6 +242,7 @@ final class TextPicker: NSObject, UIEditMenuInteractionDelegate, UIGestureRecogn
         overlay = nil
         range = NSRange(location: 0, length: 0)
         boxes = []
+        letters = []
     }
 
     /// The overlay is going away: words picked on it go with it.

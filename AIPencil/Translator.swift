@@ -145,13 +145,12 @@ struct TranslationCard: View {
                     .font(.subheadline.weight(.semibold))
                 }
             } else {
-                ViewThatFits(in: .vertical) {
+                // As tall as the words, up to a limit; past it, they scroll.
+                ScrollView {
                     words
-                    ScrollView {
-                        words
-                    }
                 }
                 .frame(maxHeight: 230)
+                .fixedSize(horizontal: false, vertical: true)
             }
             if translator.cut {
                 Text("길어서 앞의 \(Translator.limit)자만 번역했어요.")
