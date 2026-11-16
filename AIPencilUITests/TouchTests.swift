@@ -220,6 +220,50 @@ final class TouchTests: XCTestCase {
         }
         shot("44-line-eraser-undone")
 
+        // The tool's settings: touching the pen while it is in hand opens them as a card under the tool
+        // bar (they were a popover, and opening it is where the app went down on an iPad). A touch on the
+        // page puts the card away. Opened and put away a few times over.
+        start(["-demoTool", "pen", "-demoPage", "2"])
+        let pen = app.buttons["펜"]
+        if pen.waitForExistence(timeout: 3) {
+            pen.tap()
+            sleep(2)
+        }
+        shot("48-options-card")
+        let origin = app.windows.firstMatch.coordinate(withNormalizedOffset: .zero)
+        for _ in 0..<3 {
+            origin.withOffset(CGVector(dx: 720, dy: 1000)).tap()
+            usleep(500_000)
+            if pen.exists { pen.tap() }
+            usleep(700_000)
+        }
+        origin.withOffset(CGVector(dx: 720, dy: 1000)).tap()
+        sleep(1)
+        shot("48-options-card-put-away")
+
+        // The shelf: several documents picked at once, all of them, and done.
+        app.terminate()
+        app.launchArguments = []
+        app.launch()
+        sleep(5)
+        let pick = app.buttons["여러 개 선택"]
+        if pick.waitForExistence(timeout: 4) {
+            pick.tap()
+            sleep(1)
+        }
+        let all = app.buttons["전체 선택"]
+        if all.waitForExistence(timeout: 3) {
+            all.tap()
+            sleep(1)
+        }
+        shot("49-shelf-all-picked")
+        let done = app.buttons["완료"]
+        if done.waitForExistence(timeout: 3) {
+            done.tap()
+            sleep(1)
+        }
+        shot("49-shelf-picking-done")
+
         // The tabs: another document's tab shows that document, the first one's brings it back, and a
         // tab's cross closes it.
         start(["-demoTool", "pen"])

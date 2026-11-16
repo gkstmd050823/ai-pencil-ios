@@ -102,7 +102,13 @@ enum AskCapture {
 
     /// Pixels per page point of the close-up: as large as allowed, without blowing a tiny region up absurdly.
     static func cropScale(_ region: CGRect) -> CGFloat {
-        min(cropLongEdge / max(region.width, region.height, 1), maxCropScale)
+        let long = max(region.width, region.height, 1)
+        // A small part (a formula, a word) is blown up as far as it was, so that its small print stays
+        // easy to read; a larger part is drawn at no more than four pixels a point (288 to the inch, at
+        // which 10-point type is forty pixels tall). What a picture costs goes with the number of its
+        // pixels, and beyond this more pixels made a question dearer without making it clearer.
+        let most = max(4, min(maxCropScale, 480 / long))
+        return min(cropLongEdge / long, most)
     }
 
     static func capture(_ input: CaptureInput) -> Capture? {
