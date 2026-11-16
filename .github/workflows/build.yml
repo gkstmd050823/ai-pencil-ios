@@ -114,6 +114,8 @@ jobs:
           # prints what the app sent and keeps the pictures that came with each question.
           python3 tools/mock_claude.py --host 127.0.0.1 --port 8787 --dump mock-dump --delay 0.004 --think 0.3 --search 1.5 > mock.log 2>&1 &
           MOCK=$!
+          # (Given a moment to start listening: the first question once went out before it did.)
+          sleep 3
           API="-apiBase http://127.0.0.1:8787"
           shot 8-ask 16 -sample -demoAsk $API
           shot 9-follow-up 20 -sample -demoAsk -demoAskX 300 -demoAskY 330 -demoFollowUp $API
@@ -243,6 +245,7 @@ jobs:
           xcrun simctl bootstatus "$UDID" -b
           python3 tools/mock_claude.py --host 127.0.0.1 --port 8787 --delay 0.004 --think 0.3 --search 1.5 > mock-touch.log 2>&1 &
           MOCK=$!
+          sleep 3
           export TEST_RUNNER_SHOTS="$PWD/screenshots"
           xcodebuild test \
             -project AIPencilTests.xcodeproj -scheme Touch \
