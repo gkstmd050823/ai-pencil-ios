@@ -1266,10 +1266,10 @@ struct PDFInkView: UIViewRepresentable {
             (darkPaper ? choice.penUIColor.onDarkPaper : choice.penUIColor).cgColor
         }
 
-        private func commit(_ written: PenLine, in overlay: PageOverlay) {
+        private func commit(_ written: PenLine, in overlay: PageOverlay, ink: PKInkingTool.InkType = .monoline) {
             var line = written
             line.finish()
-            guard let stroke = line.stroke(color: choice.penUIColor) else {
+            guard let stroke = line.stroke(color: choice.penUIColor, ink: ink) else {
                 overlay.dropLive()
                 return
             }
@@ -1286,15 +1286,17 @@ struct PDFInkView: UIViewRepresentable {
         /// made it and once steadied.
         func demoPen() {
             guard let view = pdfView, let page = view.currentPage, let overlay = overlays[page] else { return }
-            for (row, steady) in [(0.0, CGFloat(0)), (1.0, CGFloat(0.9))] {
+            // (The last two are handed over in PencilKit's "pen" ink instead, to see what that does to them.)
+            let rows: [(Double, CGFloat, PKInkingTool.InkType)] = [(0, 0, .monoline), (1, 0.9, .monoline), (2, 0, .pen), (3, 0.9, .pen)]
+            for (row, steady, ink) in rows {
                 var line = PenLine(width: 2.6, sense: 1, steady: steady)
                 for step in 0...240 {
                     let along = Double(step) / 240
                     let shake = 2.2 * sin(Double(step) * 1.9) + 1.4 * cos(Double(step) * 3.1)
-                    let point = CGPoint(x: 70 + 440 * along, y: 690 + row * 52 + 14 * sin(along * 2 * Double.pi) + shake)
+                    let point = CGPoint(x: 70 + 440 * along, y: 540 + row * 52 + 14 * sin(along * 2 * Double.pi) + shake)
                     line.add(PenSample(point: point, force: CGFloat(0.25 + 2.2 * sin(along * Double.pi)), time: Double(step) / 240))
                 }
-                commit(line, in: overlay)
+                commit(line, in: overlay, ink: ink)
                 DebugLog.write("pen: a line of \(line.points.count) points written, steadied \(steady)")
             }
         }

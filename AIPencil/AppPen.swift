@@ -101,18 +101,20 @@ struct PenLine {
         }
     }
 
-    /// The line as a PencilKit stroke. PencilKit's "pen" ink draws each point as wide as it is told to.
-    func stroke(color: UIColor) -> PKStroke? {
+    /// The line as a PencilKit stroke. The ink is PencilKit's "monoline", which draws every point as wide
+    /// as the point says and adds nothing of its own. (Its "pen" ink thins and fades a line toward its
+    /// ends whatever widths it is given, so a line handed over in it changed its look as the pen lifted.)
+    func stroke(color: UIColor, ink: PKInkingTool.InkType = .monoline) -> PKStroke? {
         guard points.count > 1 else { return nil }
         var control: [PKStrokePoint] = []
         control.reserveCapacity(points.count)
         for index in points.indices {
             control.append(PKStrokePoint(
                 location: points[index], timeOffset: times[index], size: CGSize(width: widths[index], height: widths[index]),
-                opacity: 1, force: max(forces[index], 0.5), azimuth: 0, altitude: CGFloat.pi / 2
+                opacity: 1, force: 1, azimuth: 0, altitude: CGFloat.pi / 2
             ))
         }
-        return PKStroke(ink: PKInk(.pen, color: color), path: PKStrokePath(controlPoints: control, creationDate: Date()))
+        return PKStroke(ink: PKInk(ink, color: color), path: PKStrokePath(controlPoints: control, creationDate: Date()))
     }
 
     /// The line from point [from] onward as a shape to fill: a disc at every point and a band between each
