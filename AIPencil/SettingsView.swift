@@ -33,7 +33,6 @@ struct SettingsView: View {
     @AppStorage("darkPaper") private var darkPaper = true
     @AppStorage("sharpPages") private var sharpPages = true
     @AppStorage("appPen") private var appPen = false
-    @AppStorage("sharpInk") private var sharpInk = true
     @State private var diagnosticsCopied = false
     @State private var diagnosticsCleared = 0
     @State private var typedKey = ""
@@ -252,11 +251,10 @@ struct SettingsView: View {
             Toggle("어두운 테마에서는 종이도 어둡게", isOn: $darkPaper)
             Toggle("AI 표시 보이기", isOn: $showAiMarks)
             Toggle("쪽을 화면 해상도로 한 번 더 그리기", isOn: $sharpPages)
-            Toggle("필기를 화면 해상도로 한 번 더 그리기", isOn: $sharpInk)
         } header: {
             Text("화면")
         } footer: {
-            Text("종이를 어둡게 하면 흰 종이는 어두운 회색으로, 글자와 필기는 밝게 보여요. 색의 종류는 그대로예요. 내보내는 PDF와 Claude에게 가는 그림은 늘 원래 색이에요.\n\n\"한 번 더 그리기\"를 켜면 쪽이 화면에 가까이 올 때 앱이 화면 해상도 그대로 미리 그려서 덮어요. 문서가 무르게 보이거나 늦게 선명해질 때를 위한 것이고, 끄면 메모리를 덜 써요. 필기도 같은 방식이에요. 쓰는 동안에는 평소대로 보이고, 손을 멈춘 지 1초쯤 뒤에 그 쪽의 필기가 선명한 그림으로 바뀌어요.")
+            Text("종이를 어둡게 하면 흰 종이는 어두운 회색으로, 글자와 필기는 밝게 보여요. 색의 종류는 그대로예요. 내보내는 PDF와 Claude에게 가는 그림은 늘 원래 색이에요.\n\n\"한 번 더 그리기\"를 켜면 쪽이 화면에 가까이 올 때 앱이 화면 해상도 그대로 미리 그려서 덮어요. 문서가 무르게 보이거나 늦게 선명해질 때를 위한 것이고, 끄면 메모리를 덜 써요.")
         }
     }
 

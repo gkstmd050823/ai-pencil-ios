@@ -17,11 +17,20 @@ final class TouchTests: XCTestCase {
         continueAfterFailure = true
     }
 
-    private func start(_ arguments: [String]) {
+    private func start(_ arguments: [String], fingersWrite: Bool = true) {
         app.terminate()
-        app.launchArguments = ["-sample", "-fingerDraws", "YES"] + arguments
+        app.launchArguments = ["-sample", "-fingerDraws", fingersWrite ? "YES" : "NO"] + arguments
         app.launch()
         sleep(5)
+    }
+
+    /// A drag between two places of the screen, in points (for a page that is zoomed in, where places
+    /// of the page are not where they are when it fits the screen).
+    private func screenDrag(from a: (CGFloat, CGFloat), to b: (CGFloat, CGFloat)) {
+        let origin = app.windows.firstMatch.coordinate(withNormalizedOffset: .zero)
+        origin.withOffset(CGVector(dx: a.0, dy: a.1))
+            .press(forDuration: 0.15, thenDragTo: origin.withOffset(CGVector(dx: b.0, dy: b.1)), withVelocity: .slow, thenHoldForDuration: 0.15)
+        sleep(1)
     }
 
     private func place(_ x: CGFloat, _ y: CGFloat) -> XCUICoordinate {
@@ -111,34 +120,41 @@ final class TouchTests: XCTestCase {
         sleep(3)
         shot("37-touch-pencilkit-pen-settled")
 
-        // What writing costs the app, three ways on the same full page: as 0.6.0 had it (nothing of the
-        // app's own pictures), as 0.7.0 comes, and with the app's own pen. The app notes the figures in
-        // its log ("feel: ..."). The first launch fills the page with four hundred lines.
-        start(["-demoTool", "pen", "-demoPage", "4", "-demoDense", "400", "-sharpInk", "NO", "-sharpPages", "NO"])
-        scribble()
-        shot("38-feel-as-before")
-        start(["-demoTool", "pen", "-demoPage", "4"])
-        scribble()
-        shot("38-feel-as-it-comes")
-        start(["-demoTool", "pen", "-demoPage", "4", "-appPen", "YES"])
-        scribble()
-        shot("38-feel-own-pen")
+        // Zoomed in as far as the page view goes, the canvas lies over the part of the page in view only,
+        // and is as fine as the screen. A line written there has to land under the finger.
+        start(["-demoTool", "pen", "-demoPage", "2", "-demoZoom", "3.7"])
+        screenDrag(from: (150, 500), to: (650, 560))
+        shot("39-zoom-pen-just-written")
+        sleep(2)
+        shot("39-zoom-pen-settled")
+
+        // With fingers left to scroll, a finger dragged up the page scrolls it, canvas and all.
+        start(["-demoTool", "pen", "-demoPage", "2", "-demoZoom", "3.7"], fingersWrite: false)
+        shot("39-zoom-before-scroll")
+        screenDrag(from: (400, 800), to: (400, 650))
+        shot("39-zoom-after-scroll")
+
+        // The eraser rubs the line out where it is seen.
+        start(["-demoTool", "eraser", "-demoPage", "2", "-demoZoom", "3.7", "-demoEraserKind", "stroke", "-demoHighlighterOnly", "NO", "-demoEraserAuto", "NO"])
+        screenDrag(from: (400, 440), to: (400, 620))
+        shot("39-zoom-erased")
+
+        // The app's own pen, zoomed in.
+        start(["-demoTool", "pen", "-demoPage", "2", "-demoZoom", "3.7", "-appPen", "YES"])
+        screenDrag(from: (150, 700), to: (650, 740))
+        shot("39-zoom-own-pen-just-written")
+        sleep(2)
+        shot("39-zoom-own-pen-settled")
+
+        // How much the eraser that rubs out part of a line takes at a width of 40, on a page full of
+        // lines: fitted to the screen, and zoomed in. (The ring that shows where it rubs is drawn to these.)
+        start(["-demoTool", "eraser", "-demoPage", "4", "-demoDense", "400", "-demoEraserKind", "part", "-demoEraserWidth", "40", "-demoHighlighterOnly", "NO", "-demoEraserAuto", "NO"])
+        drag(from: (80, 300), to: (500, 300))
+        shot("40-part-eraser-fitted")
+        start(["-demoTool", "eraser", "-demoPage", "4", "-demoZoom", "2.1", "-demoEraserKind", "part", "-demoEraserWidth", "40", "-demoHighlighterOnly", "NO", "-demoEraserAuto", "NO"])
+        screenDrag(from: (150, 600), to: (650, 600))
+        shot("40-part-eraser-zoomed")
         app.terminate()
     }
 
-    /// Four lines in quick succession, a rest long enough for the app to redraw the handwriting, then
-    /// three lines each begun just as that redrawing may be under way.
-    private func scribble() {
-        for row in 0..<4 {
-            let y = CGFloat(120 + row * 14)
-            place(330, y).press(forDuration: 0.05, thenDragTo: place(540, y + 10), withVelocity: .default, thenHoldForDuration: 0.02)
-        }
-        sleep(3)
-        for row in 0..<3 {
-            let y = CGFloat(200 + row * 14)
-            place(330, y).press(forDuration: 0.05, thenDragTo: place(540, y - 8), withVelocity: .default, thenHoldForDuration: 0.02)
-            usleep(1_150_000)
-        }
-        sleep(2)
-    }
 }

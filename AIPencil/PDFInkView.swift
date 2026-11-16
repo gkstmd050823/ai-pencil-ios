@@ -42,6 +42,8 @@ final class TouchWatcher: UIGestureRecognizer {
     var onUp: (() -> Void)?
     /// Called with the time of each touch seen (for measuring, in a debug build).
     var onSeen: ((TimeInterval) -> Void)?
+    /// Called whenever the touch is over.
+    var onLift: (() -> Void)?
     private weak var followed: UITouch?
     private var last = CGPoint.zero
 
@@ -74,6 +76,7 @@ final class TouchWatcher: UIGestureRecognizer {
         guard let touch = followed, touches.contains(touch) else { return }
         followed = nil
         onUp?()
+        onLift?()
         // It never recognises anything; saying so is what readies it for the next touch.
         state = .failed
     }
@@ -83,6 +86,7 @@ final class TouchWatcher: UIGestureRecognizer {
         if followed != nil {
             followed = nil
             onUp?()
+            onLift?()
         }
     }
 
@@ -319,7 +323,23 @@ final class PageOverlay: UIView {
     var inkScale: CGFloat = 1 {
         didSet { if inkScale != oldValue { setNeedsLayout() } }
     }
-    private var canvasFits: (size: CGSize, scale: CGFloat) = (.zero, 0)
+    /// The part of the page the canvas lies over, in this view's frame. A canvas as fine as the screen and
+    /// as large as the whole page is the size of the page times the zoom, squared; zoomed in far that is
+    /// more than is worth having, and it used to be capped at three times the page, which left handwriting
+    /// coarse beyond that zoom. So from where the whole-page canvas would be larger than that, the canvas
+    /// covers only the part in view and some way round it (it is a scroll view: its drawing is the whole
+    /// page still, scrolled to that part), and can be as fine as the screen at any zoom. Null until the
+    /// page view has said where it goes.
+    var canvasWindow = CGRect.null {
+        didSet { if canvasWindow != oldValue { setNeedsLayout() } }
+    }
+    /// The most room a canvas takes: three times an A4 page each way, in its own points.
+    static let canvasRoom: CGFloat = 595 * 842 * 9
+    /// Called when the canvas cannot be laid out because it has not been said yet where it goes.
+    var onNeedsWindow: (() -> Void)?
+    private var canvasFits: (size: CGSize, scale: CGFloat, window: CGRect) = (.zero, 0, .null)
+    /// Shows where the eraser is.
+    private let eraserRing = CAShapeLayer()
     /// How far the page is shown turned, in quarter turns clockwise.
     var quarterTurns = 0
 
@@ -347,6 +367,16 @@ final class PageOverlay: UIView {
         liveTail.lineCap = .round
         liveTail.lineJoin = .round
         liveTail.actions = ["path": NSNull()]
+        eraserRing.fillColor = UIColor.systemGray.withAlphaComponent(0.12).cgColor
+        eraserRing.strokeColor = UIColor.systemGray.cgColor
+        eraserRing.actions = ["path": NSNull(), "hidden": NSNull()]
+        eraserRing.isHidden = true
+        penMarks.layer.addSublayer(eraserRing)
+        canvas.bounces = false
+        canvas.showsVerticalScrollIndicator = false
+        canvas.showsHorizontalScrollIndicator = false
+        canvas.contentInsetAdjustmentBehavior = .never
+        canvas.scrollsToTop = false
         shapeSurface.backgroundColor = .clear
         shapeSurface.isHidden = true
         shapePreview.fillColor = nil
@@ -401,6 +431,19 @@ final class PageOverlay: UIView {
             self.inkPicture.alpha = 1
             self.canvas.alpha = 0.02
         }
+    }
+
+    /// Shows a ring where the eraser is, as large as what it rubs out; nil takes the ring away.
+    func showEraser(at place: CGPoint?, radius: CGFloat, fineness: CGFloat) {
+        guard let place else {
+            if !eraserRing.isHidden { eraserRing.isHidden = true }
+            return
+        }
+        eraserRing.path = CGPath(ellipseIn: CGRect(x: place.x - radius, y: place.y - radius, width: radius * 2, height: radius * 2), transform: nil)
+        // (A hairline on screen whatever the zoom.)
+        eraserRing.lineWidth = 2.4 / max(fineness, 1)
+        eraserRing.contentsScale = fineness
+        if eraserRing.isHidden { eraserRing.isHidden = false }
     }
 
     /// Lets the picture of the handwriting go. The canvas shows from here on, until a new picture is made.
@@ -538,18 +581,35 @@ final class PageOverlay: UIView {
             pagePicture.center = middle
             pagePicture.transform = CGAffineTransform(rotationAngle: -CGFloat(quarterTurns) * .pi / 2)
         }
-        if bounds.width > 0, bounds.height > 0, canvasFits.size != bounds.size || canvasFits.scale != inkScale {
-            canvasFits = (bounds.size, inkScale)
-            let larger = CGSize(width: bounds.width * inkScale, height: bounds.height * inkScale)
-            canvas.transform = .identity
-            canvas.frame = CGRect(origin: .zero, size: larger)
-            canvas.minimumZoomScale = inkScale
-            canvas.maximumZoomScale = inkScale
-            canvas.zoomScale = inkScale
-            canvas.contentSize = larger
-            canvas.contentOffset = .zero
-            canvas.transform = CGAffineTransform(scaleX: 1 / inkScale, y: 1 / inkScale)
-            canvas.center = CGPoint(x: bounds.midX, y: bounds.midY)
+        if bounds.width > 0, bounds.height > 0 {
+            let wholeFits = bounds.width * bounds.height * inkScale * inkScale <= Self.canvasRoom
+            var window = bounds
+            if !wholeFits {
+                window = canvasWindow.intersection(bounds)
+                if window.isEmpty {
+                    // Not said yet where the canvas goes; it is laid out as soon as that is known.
+                    onNeedsWindow?()
+                    window = .null
+                }
+            }
+            if !window.isNull, canvasFits.size != bounds.size || canvasFits.scale != inkScale || canvasFits.window != window {
+                let rescaled = canvasFits.scale != inkScale
+                canvasFits = (bounds.size, inkScale, window)
+                canvas.transform = .identity
+                canvas.frame = CGRect(x: 0, y: 0, width: window.width * inkScale, height: window.height * inkScale)
+                if rescaled || canvas.zoomScale != inkScale {
+                    canvas.minimumZoomScale = inkScale
+                    canvas.maximumZoomScale = inkScale
+                    canvas.zoomScale = inkScale
+                }
+                canvas.contentSize = CGSize(width: bounds.width * inkScale, height: bounds.height * inkScale)
+                canvas.contentOffset = CGPoint(x: window.minX * inkScale, y: window.minY * inkScale)
+                // A canvas of part of the page could be scrolled about by a finger, which is the page
+                // view's to do; a canvas of the whole page has nowhere to scroll to and is left as it was.
+                canvas.isScrollEnabled = window == bounds
+                canvas.transform = CGAffineTransform(scaleX: 1 / inkScale, y: 1 / inkScale)
+                canvas.center = CGPoint(x: window.midX, y: window.midY)
+            }
         }
         // Each button sits at the top-right corner of its mark, kept inside the page.
         let edge = MarkBadge.side / 2 + 2
@@ -801,6 +861,9 @@ struct PDFInkView: UIViewRepresentable {
         /// The line being written with the app's own pen.
         private var penLine: PenLine?
         private var ticks = 0
+        /// Watches the page view's own scroll view, and notes that the canvases are due to be placed.
+        private var scrollWatch: NSKeyValueObservation?
+        private var placing = false
         weak var pdfView: PDFView?
         weak var controller: ReaderController?
         var choice = InkChoice()
@@ -848,6 +911,9 @@ struct PDFInkView: UIViewRepresentable {
             view.displayDirection = paged ? .horizontal : .vertical
             view.displaysAsBook = false
             view.usePageViewController(paged, withViewOptions: nil)
+            // (The scroll view the pages are in is another one now; it is looked for again.)
+            scrollWatch?.invalidate()
+            scrollWatch = nil
             view.autoScales = true
             if let page { DispatchQueue.main.async { view.go(to: page) } }
         }
@@ -1018,6 +1084,8 @@ struct PDFInkView: UIViewRepresentable {
             watching = []
             pictureTimer?.invalidate()
             pictureTimer = nil
+            scrollWatch?.invalidate()
+            scrollWatch = nil
             if undoHeld {
                 undoManager?.enableUndoRegistration()
                 undoHeld = false
@@ -1049,13 +1117,56 @@ struct PDFInkView: UIViewRepresentable {
 
         @objc private func settleScale() {
             guard let view = pdfView else { return }
-            let wanted = min(Self.tight ? 1.5 : 3, max(1, (view.scaleFactor * 4).rounded(.up) / 4))
-            guard wanted != inkScale else { return }
-            inkScale = wanted
-            for overlay in overlays.values {
-                overlay.inkScale = wanted
+            // As fine as the zoom, in quarter steps, up to as far as the page view zooms. (After a memory
+            // warning, no finer than half as fine again as the page.)
+            let finest: CGFloat = Self.tight ? 1.5 : max(3, view.maxScaleFactor)
+            let wanted = min(finest, max(1, (view.scaleFactor * 4).rounded(.up) / 4))
+            if wanted != inkScale {
+                inkScale = wanted
+                for overlay in overlays.values where !overlay.inkInUse {
+                    overlay.inkScale = wanted
+                }
+                DebugLog.write("ink: page zoom \(view.scaleFactor), canvases drawn \(wanted) times finer than the page")
             }
-            DebugLog.write("ink: page zoom \(view.scaleFactor), canvases drawn \(wanted) times finer than the page")
+            placeCanvases()
+        }
+
+        /// Says where each page's canvas goes: over the whole page while that is not too large a canvas,
+        /// and otherwise over the part of the page in view and some way round it. Never while a pen is on
+        /// the canvas.
+        private func placeCanvases() {
+            guard let view = pdfView else { return }
+            for overlay in overlays.values where !overlay.inkInUse {
+                if overlay.inkScale != inkScale { overlay.inkScale = inkScale }
+                let whole = overlay.bounds
+                guard whole.width > 0, whole.height > 0 else { continue }
+                let scale = overlay.inkScale
+                if whole.width * whole.height * scale * scale <= PageOverlay.canvasRoom {
+                    overlay.canvasWindow = whole
+                    continue
+                }
+                let seen = overlay.convert(view.bounds, from: view).intersection(whole)
+                // (A page out of sight keeps what it had.)
+                guard !seen.isEmpty else { continue }
+                // Left where it is for as long as it still holds what is in view with a little to spare.
+                let now = overlay.canvasWindow
+                let needed = seen.insetBy(dx: -seen.width * 0.06, dy: -seen.height * 0.06).intersection(whole)
+                if !now.isNull, now != whole, now.contains(needed) { continue }
+                let spare = min(0.6, max(0.12, ((PageOverlay.canvasRoom / (seen.width * seen.height * scale * scale)).squareRoot() - 1) / 2))
+                overlay.canvasWindow = seen.insetBy(dx: -seen.width * spare, dy: -seen.height * spare).intersection(whole)
+            }
+        }
+
+        /// The pages were scrolled. The canvases follow, once for however many steps the scrolling took
+        /// since the last time.
+        private func scrolled() {
+            guard !placing else { return }
+            placing = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.placing = false
+                self.placeCanvases()
+            }
         }
 
         var currentPageIndex: Int? {
@@ -1088,6 +1199,9 @@ struct PDFInkView: UIViewRepresentable {
             if let existing = overlays[page] { return existing }
             let overlay = PageOverlay(frame: .zero)
             overlay.inkScale = inkScale
+            overlay.onNeedsWindow = { [weak self] in self?.scrolled() }
+            let hover = UIHoverGestureRecognizer(target: self, action: #selector(hovered(_:)))
+            overlay.addGestureRecognizer(hover)
             overlay.quarterTurns = (((page.rotation % 360) + 360) % 360) / 90
             // On dark paper PencilKit shows ink in its dark-screen colours: black ink white.
             overlay.overrideUserInterfaceStyle = darkPaper ? .dark : .light
@@ -1115,6 +1229,7 @@ struct PDFInkView: UIViewRepresentable {
             overlay.watcher.onMove = { [weak self, weak overlay] from, to in
                 guard let self, let overlay else { return }
                 self.eraserMoved(from: from, to: to, in: overlay)
+                self.showEraser(at: to, in: overlay)
             }
             overlay.watcher.onDown = { [weak self, weak overlay] in
                 guard let self, let overlay, overlay.canvas.isUserInteractionEnabled else { return }
@@ -1122,6 +1237,9 @@ struct PDFInkView: UIViewRepresentable {
             }
             overlay.watcher.onSeen = { [weak overlay] time in
                 if overlay?.inkInUse == true { Feel.dealt(with: time) }
+            }
+            overlay.watcher.onLift = { [weak overlay] in
+                overlay?.showEraser(at: nil, radius: 0, fineness: 1)
             }
             overlay.watcher.onUp = { [weak self, weak overlay] in
                 guard let self, let overlay, overlay.inkInUse else { return }
@@ -1297,7 +1415,11 @@ struct PDFInkView: UIViewRepresentable {
         private func penDrew(_ fresh: [PenSample], ahead: [PenSample], in overlay: PageOverlay) {
             guard !retired, choice.usesAppPen(appPen) else { return }
             if penLine == nil {
-                penLine = PenLine(width: InkWidth.seen(setting: CGFloat(choice.penWidth)), sense: choice.appPenSense, steady: CGFloat(choice.penSteady))
+                let zoom = max(pdfView?.scaleFactor ?? 1, 0.5)
+                penLine = PenLine(
+                    width: InkWidth.seen(setting: CGFloat(choice.penWidth)), sense: choice.appPenSense,
+                    steady: CGFloat(choice.penSteady), spacing: 0.5 / zoom
+                )
                 Feel.begin()
             }
             for sample in fresh { penLine?.add(sample) }
@@ -1411,6 +1533,37 @@ struct PDFInkView: UIViewRepresentable {
 
         // MARK: the eraser
 
+        /// How much of the page the eraser in hand rubs out round its middle, in page points; nil when the
+        /// eraser is not in hand.
+        private var eraserReach: CGFloat? {
+            guard choice.tool == .eraser, let view = pdfView else { return nil }
+            if choice.eraserHighlighterOnly || choice.eraserKind == .part { return CGFloat(choice.eraserWidth) / 2 }
+            // The eraser that takes whole lines takes what its tip touches: a small ring, the same on
+            // screen at any zoom.
+            return 7 / max(view.scaleFactor, 0.2)
+        }
+
+        /// Shows the ring of the eraser at a place on a page, while the eraser is in hand.
+        private func showEraser(at place: CGPoint, in overlay: PageOverlay) {
+            guard let reach = eraserReach else { return }
+            overlay.showEraser(at: place, radius: reach, fineness: fineness)
+        }
+
+        /// An Apple Pencil held just above the page: the eraser's ring shows where it would rub.
+        @objc private func hovered(_ gesture: UIHoverGestureRecognizer) {
+            guard let overlay = gesture.view as? PageOverlay else { return }
+            switch gesture.state {
+            case .began, .changed:
+                if eraserReach != nil {
+                    showEraser(at: gesture.location(in: overlay), in: overlay)
+                } else {
+                    overlay.showEraser(at: nil, radius: 0, fineness: 1)
+                }
+            default:
+                overlay.showEraser(at: nil, radius: 0, fineness: 1)
+            }
+        }
+
         /// The eraser moved over a page, from one place to the next. A mark of the AI pen that it crosses
         /// is taken off the page; its explanation stays in the list of questions.
         private func eraserMoved(from: CGPoint, to: CGPoint, in overlay: PageOverlay) {
@@ -1488,11 +1641,9 @@ struct PDFInkView: UIViewRepresentable {
                 }
                 gesture.start = point
                 // A ring shows how much the eraser covers.
-                overlay.shapePreview.path = UIBezierPath(ovalIn: CGRect(x: point.x - reach, y: point.y - reach, width: reach * 2, height: reach * 2)).cgPath
-                overlay.shapePreview.lineWidth = 1
-                overlay.shapePreview.strokeColor = UIColor.systemGray.cgColor
+                overlay.showEraser(at: point, radius: reach, fineness: fineness)
             default:
-                overlay.shapePreview.path = nil
+                overlay.showEraser(at: nil, radius: 0, fineness: 1)
                 if let before = rubbedFrom, before.strokes.count != canvas.drawing.strokes.count {
                     let after = canvas.drawing
                     undoManager?.registerUndo(withTarget: self) { [weak canvas] me in
@@ -1513,12 +1664,11 @@ struct PDFInkView: UIViewRepresentable {
         private static var pictureLimit: CGFloat { tight ? 4_500_000 : 9_000_000 }
         /// The system has warned that memory is short.
         private static var tight = false
-        /// The setting that has the app draw the handwriting itself, for showing while nothing is being
-        /// written. On unless switched off.
-        private static var drawsInk: Bool {
-            let defaults = UserDefaults.standard
-            return defaults.object(forKey: "sharpInk") == nil || defaults.bool(forKey: "sharpInk")
-        }
+        /// Whether the app draws a picture of the handwriting to show while nothing is being written.
+        /// 0.7.0 did, to make up for canvases that were no finer than three times the page; the canvases
+        /// are as fine as the screen now, at any zoom and while being written on, so it is off. ("-demoInkPictures"
+        /// brings it back for the build server.)
+        private static let drawsInk = ProcessInfo.processInfo.arguments.contains("-demoInkPictures")
         /// The setting that has the app draw the pages itself. On unless switched off ("-sharpPages NO"
         /// leaves the pages as PDFKit draws them, for the build server to compare against).
         private static var drawsPages: Bool {
@@ -1549,6 +1699,10 @@ struct PDFInkView: UIViewRepresentable {
             // (A touch that was never seen to end counts for twenty seconds and no longer.)
             let now = CACurrentMediaTime()
             if penLine != nil || overlays.values.contains(where: { $0.inkInUse && now - $0.canvasUsed < 20 }) { return }
+            if scrollWatch == nil, let scroll = Self.scrollView(in: view) {
+                scrollWatch = scroll.observe(\.contentOffset) { [weak self] _, _ in self?.scrolled() }
+            }
+            placeCanvases()
             let pages = Self.drawsPages
             let ink = Self.drawsInk
             ticks += 1

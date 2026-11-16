@@ -152,7 +152,7 @@ final class Diagnostics: NSObject, MXMetricManagerSubscriber {
         lines.append("memory: \(used), \(ProcessInfo.processInfo.physicalMemory / 1_048_576) MB in the device")
         lines.append("runs \(count("diag.launches")), ended while on screen \(cutShort), memory warnings \(memoryWarnings)")
         lines.append("crashes reported \(crashes), hangs reported \(count("diag.hangs"))")
-        lines.append("settings: own pen \(defaults.bool(forKey: "appPen")), page pictures \(flag("sharpPages")), ink pictures \(flag("sharpInk")), dark paper \(flag("darkPaper")), finger writes \(defaults.bool(forKey: "fingerDraws"))")
+        lines.append("settings: own pen \(defaults.bool(forKey: "appPen")), page pictures \(flag("sharpPages")), dark paper \(flag("darkPaper")), finger writes \(defaults.bool(forKey: "fingerDraws"))")
         lines.append("")
         if !viewNote.isEmpty {
             lines.append("page view as last seen:")

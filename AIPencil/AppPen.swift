@@ -48,6 +48,10 @@ struct PenLine {
     let sense: CGFloat
     /// How far the line is steadied: 0 goes exactly where the pen goes, 1 trails it most smoothly.
     let steady: CGFloat
+    /// Points nearer than this to the one before are left out. It is given in page points for half a
+    /// point of the screen: zoomed in, a letter is small on the page and large on the screen, and a line
+    /// with too few points to it would show its corners.
+    let spacing: CGFloat
 
     private(set) var points: [CGPoint] = []
     private(set) var widths: [CGFloat] = []
@@ -61,13 +65,12 @@ struct PenLine {
 
     /// The longest the line trails the pen at full steadying, in seconds.
     private static let trail = 0.085
-    /// Points nearer than this to the one before are left out; the line gains nothing from them.
-    private static let spacing: CGFloat = 0.6
 
-    init(width: CGFloat, sense: CGFloat, steady: CGFloat) {
+    init(width: CGFloat, sense: CGFloat, steady: CGFloat, spacing: CGFloat = 0.6) {
         self.width = width
         self.sense = min(max(sense, 0), 1)
         self.steady = min(max(steady, 0), 1)
+        self.spacing = min(max(spacing, 0.05), 1)
     }
 
     /// How many times the ordinary width a line is at this force: thinner for a light hand, up to nearly
@@ -98,7 +101,7 @@ struct PenLine {
     }
 
     private mutating func put(_ place: CGPoint, _ size: CGFloat, force: CGFloat, time: TimeInterval, always: Bool = false) {
-        if let end = points.last, !always, hypot(place.x - end.x, place.y - end.y) < Self.spacing { return }
+        if let end = points.last, !always, hypot(place.x - end.x, place.y - end.y) < spacing { return }
         points.append(place)
         widths.append(size)
         forces.append(force)
