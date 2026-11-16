@@ -1885,7 +1885,7 @@ struct PDFInkView: UIViewRepresentable {
                 if !overlay.convert(around, from: view).intersection(overlay.bounds).isEmpty {
                     // (Once the hand has rested a moment: lines written one after another are on show
                     // as their own shapes, and go into the picture together.)
-                    if now - overlay.inkTouched > 0.25 { askInk(for: overlay) }
+                    if now - overlay.inkTouched > 0.4 { askInk(for: overlay) }
                     settleInk(overlay)
                 } else if overlay.inkPicture.shown != nil || overlay.highPicture.shown != nil {
                     // Far from view: its pictures are let go, and made again when it comes near.
@@ -1999,6 +1999,17 @@ struct PDFInkView: UIViewRepresentable {
                     guard ticket.current == number else {
                         // Let go while it was being made (the page left the screen, say).
                         overlay.inkDirtyAll = true
+                        return
+                    }
+                    if self.penLine != nil {
+                        // A line is being written this moment. Putting a picture of this size on screen
+                        // takes the main thread a few milliseconds, which are the pen's: the picture is
+                        // let go, what it was for stays owed, and it is made again when the hand rests.
+                        if let dirty {
+                            overlay.inkDirty = overlay.inkDirty.union(dirty)
+                        } else {
+                            overlay.inkDirtyAll = true
+                        }
                         return
                     }
                     if let made {

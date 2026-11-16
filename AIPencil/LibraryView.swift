@@ -134,9 +134,6 @@ private struct Shelf: View {
         }
         .navigationTitle(folder?.name ?? "문서")
         .searchable(text: $search, prompt: "문서 찾기")
-        .onChange(of: choosingPaper) {
-            Diagnostics.shared.step(choosingPaper ? "paper sheet opened" : "paper sheet closed")
-        }
         .toolbar {
             if folder == nil {
                 ToolbarItem(placement: .navigationBarLeading) {
@@ -588,6 +585,7 @@ private struct PaperSheet: View {
             }
             .navigationTitle("새 노트")
             .navigationBarTitleDisplayMode(.inline)
+            .onAppear { Diagnostics.shared.step("paper sheet opened") }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("취소") { dismiss() }
