@@ -65,11 +65,14 @@ enum Claude {
     }
 
     /// The first message of a conversation: the page, the close-up and the request.
-    static func firstMessage(page: Data, crop: Data, pageNumber: Int, neighbours: [(number: Int, jpeg: Data)]) -> [String: Any] {
-        var blocks = [
-            text("\(pageNumber)쪽 전체 (빨간 선이 표시한 부분):"), image(page),
-            text("표시한 부분 확대:"), image(crop),
-        ]
+    static func firstMessage(page: Data?, crop: Data, pageNumber: Int, neighbours: [(number: Int, jpeg: Data)]) -> [String: Any] {
+        var blocks: [[String: Any]] = []
+        if let page {
+            blocks += [text("\(pageNumber)쪽 전체 (빨간 선이 표시한 부분):"), image(page), text("표시한 부분 확대:"), image(crop)]
+        } else {
+            // (The part marked is most of the page: the one picture shows both.)
+            blocks += [text("\(pageNumber)쪽 (빨간 선이 표시한 부분):"), image(crop)]
+        }
         for neighbour in neighbours {
             blocks.append(text("참고용 \(neighbour.number)쪽:"))
             blocks.append(image(neighbour.jpeg))

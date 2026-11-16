@@ -22,7 +22,8 @@ struct CaptureInput: @unchecked Sendable {
 
 /// The pictures sent with a question.
 struct Capture: @unchecked Sendable {
-    var pageJPEG: Data
+    /// The whole page with the mark on it; nil when the close-up is of most of the page and says as much.
+    var pageJPEG: Data?
     var cropJPEG: Data
     var crop: UIImage
     var neighbours: [(number: Int, jpeg: Data)] = []
@@ -32,6 +33,12 @@ struct Capture: @unchecked Sendable {
 /// and a close-up of the marked part.
 enum AskCapture {
     static let pageLongEdge: CGFloat = 1024
+    /// The same where the page's text goes along as text: the picture of the whole page is then only
+    /// for seeing where on the page the mark is and how the page is laid out, and what a picture costs
+    /// goes with the number of its pixels. (The close-up, which is what is read, stays as large as it was.)
+    static let pageLongEdgeWithText: CGFloat = 768
+    /// A close-up of this much of the page or more makes the picture of the whole page superfluous.
+    static let wholePageShare: CGFloat = 0.55
     static let cropLongEdge: CGFloat = 1568
     private static let maxCropScale: CGFloat = 6
     private static let markColor = UIColor(red: 0xE5 / 255.0, green: 0x23 / 255.0, blue: 0x1B / 255.0, alpha: 1)
@@ -110,7 +117,11 @@ enum AskCapture {
             }
         }
 
-        let pageScale = pageLongEdge / max(pageSize.width, pageSize.height, 1)
+        // (A scanned document has no text to send; its pages are read from their pictures.)
+        let hasText = !input.withNeighbours
+        let pageScale = (hasText ? pageLongEdgeWithText : pageLongEdge) / max(pageSize.width, pageSize.height, 1)
+        let regionShare = input.region.width * input.region.height / max(pageSize.width * pageSize.height, 1)
+        let sendsPage = !(hasText && regionShare >= wholePageShare)
         let pagePicture = render(
             page, shape: shown, region: whole, scale: pageScale,
             drawing: input.drawing, formulas: formulas, mark: input.mark, markWidth: max(3, pageScale * 1.6)
@@ -125,7 +136,7 @@ enum AskCapture {
         else { return nil }
         DebugLog.write("capture: page \(input.page) turned \(page.rotation) size \(pageSize) region \(input.region) page picture \(pagePicture.size) close-up \(cropPicture.size)")
 
-        var capture = Capture(pageJPEG: pageJPEG, cropJPEG: cropJPEG, crop: cropPicture)
+        var capture = Capture(pageJPEG: sendsPage ? pageJPEG : nil, cropJPEG: cropJPEG, crop: cropPicture)
         if input.withNeighbours {
             for index in [input.page - 1, input.page + 1] where index >= 0 && index < document.pageCount {
                 guard let other = document.page(at: index) else { continue }

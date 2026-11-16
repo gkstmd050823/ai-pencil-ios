@@ -11,8 +11,8 @@ final class Diagnostics: NSObject, MXMetricManagerSubscriber {
     static let shared = Diagnostics()
 
     private let defaults = UserDefaults.standard
-    /// How the page view was put together when it was last looked at; filled in by the page view.
-    var viewNote = ""
+    /// Asked for how the page view on screen is put together, when the diagnostics text is made.
+    var viewAsked: (() -> String)?
     private var started = false
     private var watching: [NSObjectProtocol] = []
     /// The notes file is written from one queue only: notes come from the main thread, from the system's
@@ -316,9 +316,9 @@ final class Diagnostics: NSObject, MXMetricManagerSubscriber {
         lock.unlock()
         lines.append("last steps: " + last.suffix(8).joined(separator: " | "))
         lines.append("")
-        if !viewNote.isEmpty {
+        if let seen = viewAsked?(), !seen.isEmpty {
             lines.append("page view as last seen:")
-            lines.append(viewNote)
+            lines.append(seen)
             lines.append("")
         }
         // (Whatever is still on its way to the file is written first.)

@@ -333,6 +333,23 @@ struct ReaderView: View {
             )
             .id(reloadToken)
             .ignoresSafeArea(.container, edges: .bottom)
+            // The settings of the tool in hand, as a card under the tool bar. (Until 0.9.0 this was a
+            // popover, a window of its own that sizes itself to what is in it; the app's crashes on an
+            // iPad came when the pen was touched to open it.) A touch anywhere else puts it away.
+            .overlay(alignment: .top) {
+                if showingOptions, !readOnly {
+                    ZStack(alignment: .top) {
+                        Color.black.opacity(0.001)
+                            .contentShape(Rectangle())
+                            .onTapGesture { showingOptions = false }
+                        ToolOptions(choice: $choice, darkPaper: showsDark) {
+                            showingOptions = false
+                            controller.clearPage()
+                        }
+                        .padding(.top, 4)
+                    }
+                }
+            }
             .overlay(alignment: .bottom) {
                 if controller.pageCount > 1 {
                     Button {
@@ -747,12 +764,6 @@ private struct ToolBar: View {
         .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
         .shadow(color: .black.opacity(0.10), radius: 12, y: 4)
-        .popover(isPresented: $showingOptions) {
-            ToolOptions(choice: $choice, darkPaper: darkPaper) {
-                showingOptions = false
-                onClearPage()
-            }
-        }
     }
 
     private var rule: some View {
@@ -1167,7 +1178,10 @@ private struct ToolOptions: View {
         }
         .padding(18)
         .frame(width: 380)
-        .presentationCompactAdaptation(.popover)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.22), radius: 24, y: 8)
     }
 }
 
@@ -1200,7 +1214,11 @@ private struct ColorGrid: View {
     @Binding var selection: UInt32
     var darkPaper: Bool
 
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 6), count: 9)
+    /// The palette in rows of nine. (Plain rows: a grid that makes its cells as they are needed has no
+    /// business in a card that is as tall as what is in it.)
+    private var rows: [[UInt32]] {
+        stride(from: 0, to: palette.count, by: 9).map { Array(palette[$0..<min($0 + 9, palette.count)]) }
+    }
 
     private func shown(_ rgb: UInt32) -> Color {
         let color = InkChoice.color(rgb)
@@ -1211,15 +1229,19 @@ private struct ColorGrid: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("색")
                 .font(.subheadline.weight(.semibold))
-            LazyVGrid(columns: columns, spacing: 6) {
-                ForEach(palette, id: \.self) { rgb in
-                    Button {
-                        selection = rgb
-                    } label: {
-                        Swatch(color: shown(rgb), selected: rgb == selection)
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(rows, id: \.self) { row in
+                    HStack(spacing: 6) {
+                        ForEach(row, id: \.self) { rgb in
+                            Button {
+                                selection = rgb
+                            } label: {
+                                Swatch(color: shown(rgb), selected: rgb == selection)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("색 \((palette.firstIndex(of: rgb) ?? 0) + 1)")
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("색 \((palette.firstIndex(of: rgb) ?? 0) + 1)")
                 }
             }
             ColorPicker(

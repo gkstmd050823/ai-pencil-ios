@@ -323,10 +323,10 @@ final class PageOverlay: UIView {
     /// of their own, under the canvas, laid over the page the way the highlighter's picture is.
     private let penMarks = UIView()
     private let highMarks = UIView()
-    private var liveLayers: [CAShapeLayer] = []
-    private var liveFrom = 0
+    /// The line being written and the lines not in the picture yet, drawn the way the picture is drawn.
+    private let wetPens = WetInk()
+    private let wetHigh = WetInk()
     private let liveTail = CAShapeLayer()
-    private var kept: [(version: Int, at: CFTimeInterval, layers: [CALayer])] = []
     private let markLines = UIView()
     /// Takes the drags of the tools that do not write through PencilKit: the shape tool, and the eraser
     /// that only takes highlighter. Hidden, and so out of the way, while any other tool is in hand.
@@ -376,6 +376,7 @@ final class PageOverlay: UIView {
         highPicture.isHidden = true
         addSubview(highPicture)
         highMarks.isUserInteractionEnabled = false
+        highMarks.addSubview(wetHigh)
         addSubview(highMarks)
         canvas.backgroundColor = .clear
         canvas.isOpaque = false
@@ -385,6 +386,7 @@ final class PageOverlay: UIView {
         addSubview(inkPicture)
         setPaper(dark: false)
         penMarks.isUserInteractionEnabled = false
+        penMarks.addSubview(wetPens)
         addSubview(penMarks)
         liveTail.fillColor = nil
         liveTail.lineCap = .round
@@ -463,7 +465,7 @@ final class PageOverlay: UIView {
     }
 
     /// How many lines are on show as shapes of their own, waiting for the picture to have them.
-    var keptCount: Int { kept.count }
+    var keptCount: Int { wetPens.count + wetHigh.count }
 
     /// Shows a ring where the eraser is, as large as what it rubs out; nil takes the ring away.
     func showEraser(at place: CGPoint?, radius: CGFloat, fineness: CGFloat) {
@@ -491,27 +493,12 @@ final class PageOverlay: UIView {
     }
 
     /// Shows the line being written with the app's own pen, and where the pen is expected to go next.
-    /// [under] puts it where highlighter goes: under the canvas, as a tint.
-    func drawLive(_ line: PenLine, ahead: [PenSample], color: CGColor, fineness: CGFloat, under: Bool = false) {
-        let home = under ? highMarks.layer : penMarks.layer
-        if liveLayers.isEmpty || line.settled - liveFrom > 64 {
-            // A long line is cut into pieces, so that only its last piece is worked out again as it grows.
-            // A piece is closed where the line is settled: what comes after that may still change.
-            if let piece = liveLayers.last {
-                piece.path = line.shape(from: liveFrom, to: line.settled, fineness: fineness)
-                liveFrom = max(0, line.settled - 1)
-            } else {
-                liveFrom = 0
-            }
-            let piece = CAShapeLayer()
-            piece.fillColor = color
-            piece.strokeColor = nil
-            piece.contentsScale = fineness
-            piece.actions = ["path": NSNull()]
-            home.addSublayer(piece)
-            liveLayers.append(piece)
-        }
-        liveLayers.last?.path = line.shape(from: liveFrom, fineness: fineness)
+    /// [under] puts it where highlighter goes: under the canvas, as a tint. [fineness] is how many pixels
+    /// of the screen a page point takes and [grid] where a pixel begins.
+    func drawLive(_ line: PenLine, ahead: [PenSample], color: CGColor, fineness: CGFloat, grid: CGPoint, under: Bool = false) {
+        let wet = under ? wetHigh : wetPens
+        wet.fit(scale: fineness, grid: grid)
+        wet.write(line, color: color)
         // A steadied line trails the pen on purpose; only a line that keeps up with it is drawn ahead.
         if !under, line.steady < 0.05, let end = line.points.last, let width = line.widths.last, !ahead.isEmpty {
             let path = CGMutablePath()
@@ -529,37 +516,36 @@ final class PageOverlay: UIView {
 
     /// The line being written came to nothing.
     func dropLive() {
-        liveLayers.forEach { $0.removeFromSuperlayer() }
-        liveLayers = []
-        liveFrom = 0
+        wetPens.drop()
+        wetHigh.drop()
         liveTail.path = nil
     }
 
-    /// The line just written is part of the handwriting from this number on; its shape stays on show
-    /// until a picture made at that number or later is.
-    func keepLive(for version: Int) {
+    /// The line just written is part of the handwriting from this number on, as the stroke made at
+    /// [date]; it stays on show until a picture made at that number or later is.
+    func keepLive(for version: Int, date: Date?) {
         liveTail.path = nil
-        kept.append((version, CACurrentMediaTime(), liveLayers))
-        liveLayers = []
-        liveFrom = 0
+        wetPens.keep(version: version, date: date)
+        wetHigh.keep(version: version, date: date)
     }
 
-    /// The same for any other shape that stands for something just added to the handwriting.
-    func keep(_ layer: CALayer, for version: Int) {
-        penMarks.layer.addSublayer(layer)
-        kept.append((version, CACurrentMediaTime(), [layer]))
+    /// The same for a shape just added to the handwriting: the places its outline goes through.
+    func keep(points: [CGPoint], width: CGFloat, color: CGColor, fineness: CGFloat, grid: CGPoint, for version: Int, date: Date?) {
+        wetPens.fit(scale: fineness, grid: grid)
+        wetPens.add(points: points, width: width, color: color, version: version, date: date)
     }
 
-    /// Takes down the shapes of lines the picture now has (those up to [version]), or all that have
-    /// stood for at least [age] seconds.
-    func dropPreviews(upTo version: Int = .max, olderThan age: CFTimeInterval = 0) {
-        guard !kept.isEmpty else { return }
-        let now = CACurrentMediaTime()
-        kept.removeAll { entry in
-            guard entry.version <= version, now - entry.at >= age else { return false }
-            entry.layers.forEach { $0.removeFromSuperlayer() }
-            return true
-        }
+    /// Takes down the lines the picture now has (those up to [version]; all of them when none is given).
+    func dropPreviews(upTo version: Int = .max) {
+        wetPens.settle(upTo: version)
+        wetHigh.settle(upTo: version)
+    }
+
+    /// The handwriting changed by something other than a line being added (a line rubbed out, a step
+    /// undone): lines on show whose strokes are no longer in it come down at once.
+    func keepPreviews(ofStrokesMadeAt dates: Set<Date>) {
+        wetPens.keepOnly(strokesMadeAt: dates)
+        wetHigh.keepOnly(strokesMadeAt: dates)
     }
 
     /// Marks these parts of the page, given in this view's frame, as found by a search.
@@ -611,6 +597,8 @@ final class PageOverlay: UIView {
         highPicture.frame = bounds
         penMarks.frame = bounds
         highMarks.frame = bounds
+        wetPens.frame = penMarks.bounds
+        wetHigh.frame = highMarks.bounds
         // The picture of the page is as large as the page is shown, and stands upright on screen.
         let sideways = quarterTurns % 2 != 0
         let shown = sideways ? CGSize(width: bounds.height, height: bounds.width) : bounds.size
@@ -854,6 +842,7 @@ struct PDFInkView: UIViewRepresentable {
         view.document = DocFile.open(url, delegate: coordinator)
         view.addInteraction(UIPencilInteraction(delegate: coordinator))
         coordinator.watch(view)
+        Diagnostics.shared.viewAsked = { [weak coordinator] in coordinator?.viewAsText() ?? "" }
         Diagnostics.shared.step("document opened, \(view.document?.pageCount ?? 0) pages")
         if startPage > 0, let page = view.document?.page(at: startPage) {
             // Once the view has been laid out; going to a page before that does nothing.
@@ -901,9 +890,11 @@ struct PDFInkView: UIViewRepresentable {
         var url: URL?
         var source: PictureSource?
         private let inkQueue = DispatchQueue(label: "app.aipencil.ink.pictures", qos: .userInitiated)
-        /// The line being written with the app's own pen, and the tool it is written with.
+        /// The line being written with the app's own pen, the tool it is written with, and where the
+        /// screen's pixels fall on its page.
         private var penLine: PenLine?
         private var penTool = InkTool.pen
+        private var penGrid = CGPoint.zero
         /// The zoom range last given to the page view.
         private var zoomRange: (low: CGFloat, high: CGFloat) = (0, 0)
         /// The scroll views whose lock to one direction has been taken off, and the watch kept on each.
@@ -1149,7 +1140,7 @@ struct PDFInkView: UIViewRepresentable {
             // than the page and then shrunk by a seventieth, which is what blurred a line the moment
             // PencilKit's drawing of it took the place of the app's.) No finer than eight times the page;
             // and after a memory warning, no finer than half as fine again as the page.
-            let finest: CGFloat = Self.tight ? 1.5 : 8
+            let finest: CGFloat = Self.tight ? 1.5 : max(8, view.maxScaleFactor)
             let wanted = min(finest, max(1, view.scaleFactor))
             if abs(wanted - inkScale) > 0.0005 {
                 inkScale = wanted
@@ -1241,6 +1232,14 @@ struct PDFInkView: UIViewRepresentable {
                 guard let self else { return }
                 self.placing = false
                 self.placeCanvases()
+                // Zoomed in far, the picture of the handwriting is of the part in view only: once that
+                // part has been scrolled out of, a new picture is asked for now, not at the next look.
+                if self.penLine == nil, self.rubbed == nil {
+                    for overlay in self.overlays.values where overlay.window != nil && overlay.inkTrusted && !self.inkReaches(overlay) {
+                        self.askInk(for: overlay)
+                        self.settleInk(overlay)
+                    }
+                }
             }
         }
 
@@ -1451,18 +1450,11 @@ struct PDFInkView: UIViewRepresentable {
                 drawing.strokes.append(stroke)
                 setDrawing(drawing, on: overlay.canvas, undoingTo: before, dirty: stroke.renderBounds.insetBy(dx: -2, dy: -2), live: true)
                 // The shape as it was dragged out stays on show until the picture of the handwriting has it.
-                let path = UIBezierPath()
-                path.move(to: outline[0])
-                for next in outline.dropFirst() { path.addLine(to: next) }
-                let shape = CAShapeLayer()
-                shape.path = path.cgPath
-                shape.fillColor = nil
-                shape.lineCap = .round
-                shape.lineJoin = .round
-                shape.lineWidth = width
-                shape.strokeColor = (darkPaper ? choice.penUIColor.onDarkPaper : choice.penUIColor).cgColor
-                shape.contentsScale = fineness
-                overlay.keep(shape, for: overlay.canvas.inkVersion)
+                overlay.keep(
+                    points: outline, width: width, color: (darkPaper ? choice.penUIColor.onDarkPaper : choice.penUIColor).cgColor,
+                    fineness: fineness, grid: Self.pixelGrid(of: overlay.inkPicture, scale: fineness),
+                    for: overlay.canvas.inkVersion, date: stroke.path.creationDate
+                )
                 toolUsed()
             default:
                 overlay.shapePreview.path = nil
@@ -1480,7 +1472,13 @@ struct PDFInkView: UIViewRepresentable {
             // Noted first: the canvas tells of the change it is about to be given, and is told it is known.
             record(new, on: canvas, own: true, dirty: dirty)
             canvas.take(new)
-            if !live, let overlay = canvas.superview as? PageOverlay { askInk(for: overlay) }
+            if !live, let overlay = canvas.superview as? PageOverlay {
+                // (Lines still on show as written, whose strokes this change took away, come down now.)
+                if overlay.keptCount > 0 {
+                    overlay.keepPreviews(ofStrokesMadeAt: Set(new.strokes.map { $0.path.creationDate }))
+                }
+                askInk(for: overlay)
+            }
         }
 
         /// How many pixels a point of the page takes on screen now, for shapes drawn over the page.
@@ -1497,6 +1495,7 @@ struct PDFInkView: UIViewRepresentable {
             if penLine == nil {
                 let zoom = max(pdfView?.scaleFactor ?? 1, 0.5)
                 penTool = choice.tool
+                penGrid = Self.pixelGrid(of: overlay.inkPicture, scale: fineness)
                 switch penTool {
                 case .highlighter:
                     penLine = PenLine(width: choice.highlighterSeenWidth, sense: 0, steady: CGFloat(choice.penSteady), spacing: 0.5 / zoom)
@@ -1508,7 +1507,7 @@ struct PDFInkView: UIViewRepresentable {
             }
             for sample in fresh { penLine?.add(sample) }
             if let line = penLine {
-                overlay.drawLive(line, ahead: ahead, color: liveColor(penTool), fineness: fineness, under: penTool == .highlighter)
+                overlay.drawLive(line, ahead: ahead, color: liveColor(penTool), fineness: fineness, grid: penGrid, under: penTool == .highlighter)
             }
         }
 
@@ -1561,13 +1560,13 @@ struct PDFInkView: UIViewRepresentable {
                 overlay.dropLive()
                 return
             }
-            overlay.drawLive(line, ahead: [], color: liveColor(tool), fineness: fineness, under: high)
+            overlay.drawLive(line, ahead: [], color: liveColor(tool), fineness: fineness, grid: Self.pixelGrid(of: overlay.inkPicture, scale: fineness), under: high)
             let canvas = overlay.canvas
             var drawing = canvas.ink
             let before = drawing
             drawing.strokes.append(stroke)
             setDrawing(drawing, on: canvas, undoingTo: before, dirty: stroke.renderBounds.insetBy(dx: -2, dy: -2), live: true)
-            overlay.keepLive(for: canvas.inkVersion)
+            overlay.keepLive(for: canvas.inkVersion, date: stroke.path.creationDate)
             // (Written without a pause for a long while: the picture catches up now and then all the same.)
             if overlay.keptCount > 24 { askInk(for: overlay) }
         }
@@ -1814,6 +1813,11 @@ struct PDFInkView: UIViewRepresentable {
                     let drawing = PKDrawing(strokes: work.strokes)
                     record(drawing, on: canvas, own: true, count: work.strokes.count, dirty: dirty)
                     canvas.take(drawing)
+                    // A line written a moment ago is still on show as written: rubbed out, it comes
+                    // down at once, without waiting for the picture.
+                    if overlay.keptCount > 0 {
+                        overlay.keepPreviews(ofStrokesMadeAt: Set(work.strokes.map { $0.path.creationDate }))
+                    }
                     // Seen at once: the picture is brought up to date now, not when the hand rests.
                     askInk(for: overlay)
                 }
@@ -1880,14 +1884,12 @@ struct PDFInkView: UIViewRepresentable {
             }
             ticks += 1
             if ticks % 16 == 1 { keepZoomRange(view) }
-            if ticks % 4 == 1 { freeScrolling(in: view) }
+            if ticks % 16 == 9 { freeScrolling(in: view) }
             placeCanvases()
             let pages = Self.drawsPages
-            if ticks % 16 == 14 {
-                // Kept for the diagnostics text in the settings, and noted once for the build server.
-                let made = describeView()
-                Diagnostics.shared.viewNote = made
-                if ticks == 30 { DebugLog.write("view:\n" + made) }
+            if ticks == 30 {
+                // (Noted once for the build server. The diagnostics text asks for it when it is wanted.)
+                DebugLog.write("view:\n" + describeView())
             }
             if ticks % 40 == 5, let megabytes = Diagnostics.footprint().map({ $0 / 1_048_576 }) {
                 DebugLog.write("memory: \(megabytes) MB in use with \(overlays.count) pages laid out")
@@ -2162,6 +2164,11 @@ struct PDFInkView: UIViewRepresentable {
         /// How the page in view is put together and how finely each of its layers is drawn. On an iPad in
         /// the hand PDFKit and PencilKit draw coarser than in the build server's simulator, and this is
         /// how to learn what they do there: the numbers go into the diagnostics text.
+        /// How the page view is put together, for the diagnostics text.
+        func viewAsText() -> String {
+            describeView()
+        }
+
         private func describeView() -> String {
             guard let view = pdfView, let page = view.currentPage, let overlay = overlays[page] else { return "no page in view" }
             let canvas = overlay.canvas

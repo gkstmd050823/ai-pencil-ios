@@ -116,6 +116,10 @@ private struct Shelf: View {
     @State private var ranDemo = false
     /// The document that others are being picked to be put together with.
     @State private var mergingFrom: Doc?
+    /// Picking several documents at once, and the ones picked.
+    @State private var selecting = false
+    @State private var picked: Set<UUID> = []
+    @State private var deletingPicked = false
     /// How many files are still being copied in.
     @State private var bringingIn = 0
 
@@ -146,7 +150,28 @@ private struct Shelf: View {
                     }
                 }
             }
+            if selecting {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    Button(picked.count == docs.count ? "선택 해제" : "전체 선택") {
+                        picked = picked.count == docs.count ? [] : Set(docs.map(\.id))
+                    }
+                    Button("완료") {
+                        selecting = false
+                        picked = []
+                    }
+                    .fontWeight(.semibold)
+                }
+            }
             ToolbarItemGroup(placement: .primaryAction) {
+                if !selecting, !docs.isEmpty {
+                    Button {
+                        selecting = true
+                        picked = []
+                        Diagnostics.shared.step("picking documents")
+                    } label: {
+                        Label("여러 개 선택", systemImage: "checkmark.circle")
+                    }
+                }
                 Menu {
                     Picker("정렬", selection: $sort) {
                         ForEach(LibrarySort.allCases) { item in
@@ -296,24 +321,6 @@ private struct Shelf: View {
                 if !searching {
                     quickActions
                 }
-                if recent.count > 1 {
-                    VStack(alignment: .leading, spacing: 12) {
-                        heading("이어서 보기", count: nil)
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 14) {
-                                ForEach(recent) { doc in
-                                    NavigationLink(value: doc) {
-                                        RecentCard(doc: doc)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .contextMenu { docMenu(doc) }
-                                }
-                            }
-                            .padding(.vertical, 4)
-                            .padding(.horizontal, 2)
-                        }
-                    }
-                }
                 if !folders.isEmpty {
                     VStack(alignment: .leading, spacing: 14) {
                         heading("폴더", count: folders.count)
@@ -323,6 +330,10 @@ private struct Shelf: View {
                                     FolderCard(folder: item, count: count(in: item))
                                 }
                                 .buttonStyle(.plain)
+                                // A document dragged onto a folder goes into it.
+                                .dropDestination(for: String.self) { dragged, _ in
+                                    drop(dragged, into: item.id)
+                                }
                                 .contextMenu {
                                     Button {
                                         newName = item.name
@@ -345,11 +356,7 @@ private struct Shelf: View {
                         heading(searching ? "찾은 문서" : "문서", count: docs.count)
                         ShelfGrid(rowSpacing: 24) {
                             ForEach(docs) { doc in
-                                NavigationLink(value: doc) {
-                                    DocCard(doc: doc, folderName: folderName(for: doc))
-                                }
-                                .buttonStyle(.plain)
-                                .contextMenu { docMenu(doc) }
+                                docCell(doc)
                             }
                         }
                     }
@@ -361,6 +368,108 @@ private struct Shelf: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Color(uiColor: .systemGroupedBackground))
+        .safeAreaInset(edge: .bottom) {
+            if selecting { pickedBar }
+        }
+        .confirmationDialog(
+            "고른 문서 \(picked.count)개를 지울까요? 필기와 설명도 함께 지워져요.",
+            isPresented: $deletingPicked, titleVisibility: .visible
+        ) {
+            Button("삭제", role: .destructive) {
+                for doc in library.docs where picked.contains(doc.id) { library.delete(doc) }
+                selecting = false
+                picked = []
+            }
+        }
+    }
+
+    /// A document on the shelf: a way into it, or, while several are being picked, something to pick.
+    @ViewBuilder
+    private func docCell(_ doc: Doc) -> some View {
+        if selecting {
+            Button {
+                if picked.contains(doc.id) {
+                    picked.remove(doc.id)
+                } else {
+                    picked.insert(doc.id)
+                }
+            } label: {
+                DocCard(doc: doc, folderName: folderName(for: doc), mark: picked.contains(doc.id))
+            }
+            .buttonStyle(.plain)
+        } else {
+            NavigationLink(value: doc) {
+                DocCard(doc: doc, folderName: folderName(for: doc))
+            }
+            .buttonStyle(.plain)
+            .contextMenu { docMenu(doc) }
+            // Dragged onto a folder, it goes into the folder.
+            .draggable(doc.id.uuidString)
+        }
+    }
+
+    /// Moves the documents dragged here (by their identities) into a folder, or out of every folder.
+    private func drop(_ dragged: [String], into place: UUID?) -> Bool {
+        var moved = false
+        for text in dragged {
+            guard let id = UUID(uuidString: text), let doc = library.docs.first(where: { $0.id == id }), doc.folder != place else { continue }
+            library.move(doc, to: place)
+            moved = true
+        }
+        if moved { Diagnostics.shared.step("document dragged to a folder") }
+        return moved
+    }
+
+    /// What can be done with the documents picked.
+    private var pickedBar: some View {
+        let chosen = docs.filter { picked.contains($0.id) }
+        return HStack(spacing: 18) {
+            Text(chosen.isEmpty ? "문서를 눌러 고르세요" : "\(chosen.count)개 선택")
+                .font(.subheadline.weight(.semibold))
+            Spacer()
+            Menu {
+                if chosen.contains(where: { $0.folder != nil }) {
+                    Button {
+                        for doc in chosen { library.move(doc, to: nil) }
+                        selecting = false
+                        picked = []
+                    } label: {
+                        Label("폴더 밖으로", systemImage: "tray.and.arrow.up")
+                    }
+                }
+                ForEach(library.folders) { item in
+                    Button {
+                        for doc in chosen { library.move(doc, to: item.id) }
+                        selecting = false
+                        picked = []
+                    } label: {
+                        Label(item.name, systemImage: "folder")
+                    }
+                }
+            } label: {
+                Label("폴더로 이동", systemImage: "folder")
+            }
+            .disabled(chosen.isEmpty || (library.folders.isEmpty && !chosen.contains(where: { $0.folder != nil })))
+            Button {
+                selecting = false
+                picked = []
+                merge(chosen)
+            } label: {
+                Label("합치기", systemImage: "rectangle.stack.badge.plus")
+            }
+            .disabled(chosen.count < 2)
+            Button(role: .destructive) {
+                deletingPicked = true
+            } label: {
+                Label("삭제", systemImage: "trash")
+            }
+            .disabled(chosen.isEmpty)
+        }
+        .labelStyle(.titleAndIcon)
+        .font(.subheadline)
+        .padding(.horizontal, 22)
+        .padding(.vertical, 12)
+        .background(.regularMaterial)
     }
 
     private func heading(_ title: String, count: Int?) -> some View {
@@ -389,6 +498,12 @@ private struct Shelf: View {
                     newName = ""
                     makingFolder = true
                 }
+            } else {
+                // In a folder: a place to drag a document to, to take it out of the folder.
+                QuickAction(symbol: "tray.and.arrow.up", title: "폴더 밖으로", detail: "문서를 여기로 끌어다 놓아요") {}
+                    .dropDestination(for: String.self) { dragged, _ in
+                        drop(dragged, into: nil)
+                    }
             }
         }
     }
@@ -420,6 +535,12 @@ private struct Shelf: View {
             renamingDoc = doc
         } label: {
             Label("이름 바꾸기", systemImage: "pencil")
+        }
+        Button {
+            selecting = true
+            picked = [doc.id]
+        } label: {
+            Label("여러 개 선택", systemImage: "checkmark.circle")
         }
         if library.docs.count > 1 {
             Button {
@@ -821,6 +942,8 @@ private struct DocCard: View {
     let doc: Doc
     /// Shown when the document was found by searching, to say where it lives.
     var folderName: String?
+    /// While several documents are being picked: whether this one is.
+    var mark: Bool?
     @EnvironmentObject private var library: Library
     @State private var cover: UIImage?
 
@@ -847,6 +970,15 @@ private struct DocCard: View {
                 }
             }
             .aspectRatio(0.84, contentMode: .fit)
+            .overlay(alignment: .topLeading) {
+                if let mark {
+                    Image(systemName: mark ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 24))
+                        .foregroundStyle(mark ? Color.accentColor : Color.secondary)
+                        .background(Circle().fill(Color(uiColor: .systemBackground)).padding(2))
+                        .padding(4)
+                }
+            }
 
             Text(doc.title)
                 .font(.subheadline.weight(.semibold))
