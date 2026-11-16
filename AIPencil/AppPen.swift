@@ -9,14 +9,14 @@ import UIKit.UIGestureRecognizerSubclass
 // other, so the eraser, the lasso, undo and the export all work on it as before.
 
 /// How wide lines come out. PencilKit does not draw a stroke as wide as its points say: its "monoline"
-/// ink, which the app's own pen and the shape tool hand their lines over in, draws next to nothing for a
-/// point size of 2 or less, and 1.78 points of line for every unit above that. (Measured on the build
-/// server: straight lines of sizes 2, 2.6, 4, 8 and 12 came out 0.2, 1.1, 3.6, 10.7 and 17.8 points wide,
-/// on the canvas and in a picture made of the drawing alike.) Lines are worked out in the width they are
-/// to be seen at, and turned into PencilKit's sizes only when they are handed over.
+/// ink, which the app's own pen and the shape tool hand their lines over in, draws nothing for a point
+/// size of 2 or less, and two points of line for every unit above that. (Measured on the build server:
+/// straight lines of sizes 4, 8 and 12 came out 4, 12 and 20 points wide, on the canvas and in a picture
+/// made of the drawing alike.) Lines are worked out in the width they are to be seen at, and turned into
+/// PencilKit's sizes only when they are handed over.
 enum InkWidth {
-    private static let rise: CGFloat = 1.78
-    private static let floor: CGFloat = 1.99
+    private static let rise: CGFloat = 2
+    private static let floor: CGFloat = 2
 
     /// The size to give a stroke's points for the line to come out [width] points wide.
     static func size(drawing width: CGFloat) -> CGFloat {
