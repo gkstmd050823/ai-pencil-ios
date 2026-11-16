@@ -12,6 +12,8 @@ final class PageCanvas: PKCanvasView {
     /// a picture made of the handwriting is good for as long as the number it was made at still stands.
     var ink = PKDrawing()
     var inkVersion = 0
+    /// The room the handwriting takes on the page, worked out once when it is taken note of.
+    var inkBounds = CGRect.null
     /// Set while the app itself is giving the canvas a drawing it has already taken note of.
     var byCode = false
 
@@ -907,12 +909,15 @@ struct PDFInkView: UIViewRepresentable {
         /// [covered] says the change is a line that stays on show as a shape of its own until the picture
         /// of the handwriting has it. Any other change may be anything (a line rubbed out, undone, moved),
         /// so the canvas, which is always right, is shown at once.
-        private func record(_ drawing: PKDrawing, on canvas: PageCanvas, covered: Bool = false) {
+        private func record(_ drawing: PKDrawing, on canvas: PageCanvas, covered: Bool = false, count: Int? = nil) {
             guard !retired else { return }
             let before = canvas.inkVersion
             canvas.ink = drawing
             canvas.inkVersion = before + 1
-            canvas.strokeCount = drawing.strokes.count
+            // (Counting the lines means listing them, which takes longer the more there are: a count
+            // already in hand is used.)
+            canvas.strokeCount = count ?? drawing.strokes.count
+            canvas.inkBounds = drawing.bounds
             latest[canvas.pageIndex] = drawing
             unsaved.insert(canvas.pageIndex)
             NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(saveSoon), object: nil)
@@ -1134,6 +1139,7 @@ struct PDFInkView: UIViewRepresentable {
             }
             if !start.strokes.isEmpty { canvas.drawing = start }
             canvas.ink = start
+            canvas.inkBounds = start.bounds
             canvas.inkVersion = 1
             canvas.strokeCount = start.strokes.count
             canvas.delegate = self
@@ -1187,7 +1193,7 @@ struct PDFInkView: UIViewRepresentable {
             // (What the app itself is putting on the canvas it has taken note of already.)
             if canvas.byCode { return }
             let began = CACurrentMediaTime()
-            defer { Feel.took("noting a change to the canvas", since: began, lines: canvas.ink.strokes.count) }
+            defer { Feel.took("noting a change to the canvas", since: began, lines: canvas.strokeCount) }
             let drawing = canvas.drawing
             let strokes = drawing.strokes
             if choice.tool == .ai, strokes.count == canvas.strokeCount + 1, let stroke = strokes.last {
@@ -1207,7 +1213,7 @@ struct PDFInkView: UIViewRepresentable {
                 }
                 return
             }
-            record(drawing, on: canvas)
+            record(drawing, on: canvas, count: strokes.count)
         }
 
         // MARK: shapes
@@ -1312,7 +1318,7 @@ struct PDFInkView: UIViewRepresentable {
             }
             let began = CACurrentMediaTime()
             commit(line, in: overlay)
-            Feel.took("handing a line over to the canvas", since: began, lines: overlay.canvas.ink.strokes.count)
+            Feel.took("handing a line over to the canvas", since: began, lines: overlay.canvas.strokeCount)
         }
 
         private var penShown: CGColor {
@@ -1538,7 +1544,11 @@ struct PDFInkView: UIViewRepresentable {
         /// part that is in view? Where not, one is asked for.
         private func lookAtPictures() {
             guard let view = pdfView, view.window != nil else { return }
+            // Nothing at all while a pen or a writing finger is on a page: whatever this would find to
+            // do can wait until the line is written, and the main thread is the pen's alone meanwhile.
+            // (A touch that was never seen to end counts for twenty seconds and no longer.)
             let now = CACurrentMediaTime()
+            if penLine != nil || overlays.values.contains(where: { $0.inkInUse && now - $0.canvasUsed < 20 }) { return }
             let pages = Self.drawsPages
             let ink = Self.drawsInk
             ticks += 1
@@ -1600,7 +1610,7 @@ struct PDFInkView: UIViewRepresentable {
                     overlay.showCanvasInk()
                 } else if ticks % 8 == 0 {
                     let real = canvas.drawing
-                    if real.strokes.count != canvas.ink.strokes.count || real.bounds != canvas.ink.bounds {
+                    if real.strokes.count != canvas.strokeCount || real.bounds != canvas.inkBounds {
                         DebugLog.write("ink picture: page \(canvas.pageIndex) had changed unnoticed; the canvas shows again")
                         record(real, on: canvas)
                         return
@@ -1608,8 +1618,8 @@ struct PDFInkView: UIViewRepresentable {
                 }
             }
             let drawing = canvas.ink
-            let room = drawing.bounds.insetBy(dx: -2, dy: -2).intersection(overlay.bounds)
-            guard near, !picture.gaveUp, !drawing.strokes.isEmpty, !room.isEmpty else {
+            let room = canvas.inkBounds.insetBy(dx: -2, dy: -2).intersection(overlay.bounds)
+            guard near, !picture.gaveUp, canvas.strokeCount > 0, !room.isEmpty else {
                 overlay.dropInkPicture()
                 overlay.dropPreviews(olderThan: 0.5)
                 return
@@ -1727,7 +1737,7 @@ struct PDFInkView: UIViewRepresentable {
             lines.append("zoom \(view.scaleFactor), fits at \(view.scaleFactorForSizeToFit), up to \(view.maxScaleFactor); display scale \(view.traitCollection.displayScale); view \(Int(view.bounds.width)) x \(Int(view.bounds.height))")
             let shown = overlay.convert(overlay.bounds, to: nil)
             lines.append("page \(canvas.pageIndex): \(Int(overlay.bounds.width)) x \(Int(overlay.bounds.height)) points, on screen \(Int(shown.width)) x \(Int(shown.height)); \(overlays.count) pages laid out; canvases \(inkScale) times the page")
-            lines.append("canvas: \(Int(canvas.bounds.width)) x \(Int(canvas.bounds.height)), zoom \(canvas.zoomScale), content scale \(canvas.contentScaleFactor), \(canvas.ink.strokes.count) lines, its picture \(overlay.inkPicture.isHidden ? "hidden" : "shown")")
+            lines.append("canvas: \(Int(canvas.bounds.width)) x \(Int(canvas.bounds.height)), zoom \(canvas.zoomScale), content scale \(canvas.contentScaleFactor), \(canvas.strokeCount) lines, its picture \(overlay.inkPicture.isHidden ? "hidden" : "shown")")
             lines.append("canvas layers:")
             var left = 30
             Self.describe(canvas.layer, depth: 1, into: &lines, left: &left, skipping: nil)
