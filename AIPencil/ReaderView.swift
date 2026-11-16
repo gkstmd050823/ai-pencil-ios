@@ -46,6 +46,9 @@ struct ReaderView: View {
     @State private var previousTool = InkTool.eraser
     @StateObject private var controller = ReaderController()
     @StateObject private var session = AskSession()
+    @StateObject private var translator = Translator()
+    /// A word or two shown for a moment over the pages ("copied").
+    @State private var notice: String?
     /// Changed to have the page view built afresh: after the document's pages were renumbered, or when the
     /// paper changes between light and dark.
     @State private var reloadToken = UUID()
@@ -263,7 +266,7 @@ struct ReaderView: View {
             }
             Divider()
             Toggle(isOn: $showAiMarks) {
-                Label("AI 표시 보이기", systemImage: "sparkles")
+                Label("AI 표시 보이기", systemImage: "pencil.tip.crop.circle")
             }
             Button {
                 showingQuestions = true
@@ -348,6 +351,25 @@ struct ReaderView: View {
                         }
                         .padding(.top, 4)
                     }
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if translator.source != nil {
+                    TranslationCard(translator: translator) {
+                        showingSettings = true
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 54)
+                }
+            }
+            .overlay(alignment: .top) {
+                if let notice {
+                    Text(notice)
+                        .font(.subheadline.weight(.medium))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 9)
+                        .background(.regularMaterial, in: Capsule())
+                        .padding(.top, 12)
                 }
             }
             .overlay(alignment: .bottom) {
@@ -506,6 +528,18 @@ struct ReaderView: View {
         }
         controller.onPencil = { action in
             pencil(action)
+        }
+        let translator = self.translator
+        controller.onTranslate = { text in
+            translator.translate(text)
+        }
+        controller.onPickedText = { text in
+            // With "translate as soon as words are picked" on, there is no menu to go through.
+            if UserDefaults.standard.bool(forKey: "translateOnPick") { translator.translate(text) }
+        }
+        controller.onCopiedText = { _ in
+            notice = "복사했어요"
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { notice = nil }
         }
         bookmarks = BookmarkStore(folder: folder).load()
         // Noted as opened once the screen has settled: it reorders the shelf this screen came from,
@@ -666,6 +700,14 @@ struct ReaderView: View {
             // Goes to the first place the words stand at, as picking it from the search results does.
             later(2) { if let hit = controller.search(words).first { controller.show(hit) } }
         }
+        if arguments.contains("-demoPickText") {
+            // Picks a line and a half of the page, as a finger held and dragged would; with
+            // "-demoTranslate", has them translated as the menu's button does.
+            later(2.5) { controller.demoPick(from: CGPoint(x: 80, y: 408), to: CGPoint(x: 300, y: 426)) }
+            if arguments.contains("-demoTranslate") {
+                later(3.2) { translator.translate(controller.pickedText) }
+            }
+        }
         if arguments.contains("-demoBookmark") {
             later(1.5) { if !marked { toggleBookmark() } }
         }
@@ -748,8 +790,10 @@ private struct ToolBar: View {
                             .frame(width: 18, height: 3)
                     }
                     .frame(width: 44, height: 42)
-                    .foregroundStyle(choice.tool == tool ? tint(tool) : Color.primary.opacity(0.62))
-                    .background(choice.tool == tool ? tint(tool).opacity(0.13) : Color.clear, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    // The tool in hand is the one filled shape on the bar: ink on paper, turned round.
+                    // (The AI pen's is in its own colour, the only colour the bar has of its own.)
+                    .foregroundStyle(choice.tool == tool ? Color(uiColor: .systemBackground) : Color.primary.opacity(0.7))
+                    .background(choice.tool == tool ? (tool == .ai ? tint(tool) : Color.primary) : Color.clear, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                 }
                 .accessibilityLabel(tool.label)
             }
@@ -761,9 +805,9 @@ private struct ToolBar: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
-        .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.10), radius: 12, y: 4)
+        .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color.primary.opacity(0.10), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.07), radius: 6, y: 2)
     }
 
     private var rule: some View {
@@ -806,8 +850,8 @@ private struct ToolBar: View {
                         Image(systemName: kind.symbol)
                             .font(.system(size: 16, weight: .medium))
                             .frame(width: 36, height: 34)
-                            .foregroundStyle(choice.shapeKind == kind ? Color.accentColor : Color.primary.opacity(0.62))
-                            .background(choice.shapeKind == kind ? Color.accentColor.opacity(0.13) : Color.clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            .foregroundStyle(choice.shapeKind == kind ? Color.primary : Color.primary.opacity(0.5))
+                            .background(choice.shapeKind == kind ? Color.primary.opacity(0.10) : Color.clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                     }
                     .accessibilityLabel(kind.label)
                 }
@@ -827,8 +871,8 @@ private struct ToolBar: View {
                             Text(kind.label)
                                 .font(.footnote.weight(.semibold))
                                 .frame(width: 46, height: 30)
-                                .foregroundStyle(choice.eraserKind == kind ? Color.accentColor : Color.primary.opacity(0.62))
-                                .background(choice.eraserKind == kind ? Color.accentColor.opacity(0.13) : Color.clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                .foregroundStyle(choice.eraserKind == kind ? Color.primary : Color.primary.opacity(0.5))
+                                .background(choice.eraserKind == kind ? Color.primary.opacity(0.10) : Color.clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                         }
                         .accessibilityLabel(kind.label + " 지우개")
                     }
@@ -895,10 +939,10 @@ private struct ToolBar: View {
                     .frame(height: 19)
                 Text(InkChoice.sizeLabel(size))
                     .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                    .foregroundStyle(selected ? Color.primary : Color.secondary)
             }
             .frame(width: 36, height: 38)
-            .background(selected ? Color.accentColor.opacity(0.13) : Color.clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .background(selected ? Color.primary.opacity(0.10) : Color.clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
         }
         .accessibilityLabel("굵기 \(InkChoice.sizeLabel(size))밀리미터")
     }
@@ -911,10 +955,10 @@ private struct ToolBar: View {
             choice.eraserWidth = size
         } label: {
             Circle()
-                .stroke(selected ? Color.accentColor : Color.primary.opacity(0.5), lineWidth: selected ? 2 : 1.4)
+                .stroke(selected ? Color.primary : Color.primary.opacity(0.45), lineWidth: selected ? 2 : 1.4)
                 .frame(width: ring, height: ring)
                 .frame(width: 34, height: 34)
-                .background(selected ? Color.accentColor.opacity(0.13) : Color.clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .background(selected ? Color.primary.opacity(0.10) : Color.clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
         }
         .accessibilityLabel("지우개 크기 \(Int(size))")
     }
@@ -967,7 +1011,7 @@ private struct Swatch: View {
             .frame(width: 23, height: 23)
             .overlay(Circle().stroke(Color.primary.opacity(0.18), lineWidth: 0.75))
             .padding(4)
-            .overlay(Circle().stroke(Color.accentColor, lineWidth: selected ? 2 : 0))
+            .overlay(Circle().stroke(Color.primary, lineWidth: selected ? 2 : 0))
     }
 }
 
@@ -1068,8 +1112,8 @@ private struct ToolOptions: View {
                                 Text(InkChoice.sizeLabel(choice.penSizes.indices.contains(slot) ? choice.penSizes[slot] : 0.5))
                                     .font(.footnote.weight(.semibold).monospacedDigit())
                                     .frame(width: 46, height: 28)
-                                    .foregroundStyle(choice.penSlot == slot ? Color.white : Color.primary)
-                                    .background(choice.penSlot == slot ? Color.accentColor : Color.primary.opacity(0.07), in: Capsule())
+                                    .foregroundStyle(choice.penSlot == slot ? Color(uiColor: .systemBackground) : Color.primary)
+                                    .background(choice.penSlot == slot ? Color.primary : Color.primary.opacity(0.07), in: Capsule())
                             }
                             .buttonStyle(.plain)
                         }

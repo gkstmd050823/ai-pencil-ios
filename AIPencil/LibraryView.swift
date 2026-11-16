@@ -475,7 +475,7 @@ private struct Shelf: View {
     private func heading(_ title: String, count: Int?) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(title)
-                .font(.title3.weight(.bold))
+                .font(.headline)
             if let count {
                 Text("\(count)")
                     .font(.subheadline.weight(.semibold).monospacedDigit())
@@ -486,25 +486,26 @@ private struct Shelf: View {
 
     /// The ways to get a document, as large buttons at the top of the shelf.
     private var quickActions: some View {
-        HStack(spacing: 14) {
-            QuickAction(symbol: "square.and.pencil", title: "새 노트", detail: "종이와 크기를 골라요") {
+        HStack(spacing: 10) {
+            QuickAction(symbol: "square.and.pencil", title: "새 노트") {
                 choosingPaper = true
             }
-            QuickAction(symbol: "arrow.down.doc", title: "PDF 가져오기", detail: "파일 앱에서 골라요") {
+            QuickAction(symbol: "arrow.down.doc", title: "PDF 가져오기") {
                 importing = true
             }
             if folder == nil {
-                QuickAction(symbol: "folder.badge.plus", title: "새 폴더", detail: "문서를 묶어 둬요") {
+                QuickAction(symbol: "folder.badge.plus", title: "새 폴더") {
                     newName = ""
                     makingFolder = true
                 }
             } else {
                 // In a folder: a place to drag a document to, to take it out of the folder.
-                QuickAction(symbol: "tray.and.arrow.up", title: "폴더 밖으로", detail: "문서를 여기로 끌어다 놓아요") {}
+                QuickAction(symbol: "tray.and.arrow.up", title: "폴더 밖으로", detail: "문서를 여기로 끌어다 놓아요", dashed: true) {}
                     .dropDestination(for: String.self) { dragged, _ in
                         drop(dragged, into: nil)
                     }
             }
+            Spacer(minLength: 0)
         }
     }
 
@@ -731,31 +732,33 @@ private struct MergeSheet: View {
 private struct QuickAction: View {
     let symbol: String
     let title: String
-    let detail: String
+    var detail: String?
+    /// Drawn with a broken outline: a place to drop something, not a button to press.
+    var dashed = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 12) {
+            HStack(spacing: 8) {
                 Image(systemName: symbol)
-                    .font(.system(size: 19, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
-                    .frame(width: 42, height: 42)
-                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.primary)
+                    .font(.system(size: 15, weight: .medium))
+                Text(title)
+                    .font(.subheadline.weight(.medium))
+                if let detail {
                     Text(detail)
-                        .font(.caption)
+                        .font(.footnote)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
-                Spacer(minLength: 0)
             }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 14)
+            .frame(height: 40)
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.primary.opacity(dashed ? 0.32 : 0.18), style: StrokeStyle(lineWidth: 1, dash: dashed ? [5, 4] : []))
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -862,24 +865,33 @@ private struct FolderCard: View {
     let folder: Folder
     let count: Int
 
-    private static let tints: [Color] = [
-        Color(red: 0.20, green: 0.50, blue: 0.96), Color(red: 0.06, green: 0.64, blue: 0.61),
-        Color(red: 0.96, green: 0.58, blue: 0.14), Color(red: 0.90, green: 0.36, blue: 0.48),
-        Color(red: 0.36, green: 0.42, blue: 0.84), Color(red: 0.24, green: 0.66, blue: 0.36),
-    ]
-
-    private var tint: Color {
-        Self.tints[Int(folder.id.uuid.0) % Self.tints.count]
+    private static func shade(_ light: UInt32, _ dark: UInt32) -> Color {
+        Color(uiColor: UIColor { traits in
+            let hex = traits.userInterfaceStyle == .dark ? dark : light
+            return UIColor(
+                red: CGFloat((hex >> 16) & 0xFF) / 255, green: CGFloat((hex >> 8) & 0xFF) / 255,
+                blue: CGFloat(hex & 0xFF) / 255, alpha: 1
+            )
+        })
     }
+
+    private static let back = shade(0xD9C79E, 0x7C6F52)
+    private static let front = shade(0xECDDB8, 0x94855F)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Color(uiColor: .secondarySystemGroupedBackground))
-                Image(systemName: "folder.fill")
-                    .font(.system(size: 62))
-                    .foregroundStyle(tint.gradient)
+            GeometryReader { space in
+                let wide = space.size.width * 0.82
+                let tall = wide * 0.76
+                ZStack(alignment: .bottom) {
+                    FolderBack()
+                        .fill(Self.back)
+                    RoundedRectangle(cornerRadius: wide * 0.055, style: .continuous)
+                        .fill(Self.front)
+                        .frame(height: tall * 0.78)
+                }
+                .frame(width: wide, height: tall)
+                .position(x: space.size.width / 2, y: space.size.height / 2)
             }
             .aspectRatio(0.84, contentMode: .fit)
 
@@ -890,6 +902,28 @@ private struct FolderCard: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+/// The back of a card folder: a sheet with a tab standing up at its top left.
+private struct FolderBack: Shape {
+    func path(in rect: CGRect) -> Path {
+        let round = rect.width * 0.055
+        let tabWide = rect.width * 0.38
+        let tabTall = rect.height * 0.13
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.minY + round))
+        path.addQuadCurve(to: CGPoint(x: rect.minX + round, y: rect.minY), control: CGPoint(x: rect.minX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.minX + tabWide, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.minX + tabWide + tabTall * 0.8, y: rect.minY + tabTall))
+        path.addLine(to: CGPoint(x: rect.maxX - round, y: rect.minY + tabTall))
+        path.addQuadCurve(to: CGPoint(x: rect.maxX, y: rect.minY + tabTall + round), control: CGPoint(x: rect.maxX, y: rect.minY + tabTall))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - round))
+        path.addQuadCurve(to: CGPoint(x: rect.maxX - round, y: rect.maxY), control: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX + round, y: rect.maxY))
+        path.addQuadCurve(to: CGPoint(x: rect.minX, y: rect.maxY - round), control: CGPoint(x: rect.minX, y: rect.maxY))
+        path.closeSubpath()
+        return path
     }
 }
 
@@ -965,8 +999,8 @@ private struct DocCard: View {
                         .resizable()
                         .scaledToFit()
                         .clipShape(RoundedRectangle(cornerRadius: 6))
-                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
-                        .shadow(color: .black.opacity(0.16), radius: 7, y: 3)
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.12), lineWidth: 0.5))
+                        .shadow(color: .black.opacity(0.09), radius: 3, y: 1)
                 }
             }
             .aspectRatio(0.84, contentMode: .fit)

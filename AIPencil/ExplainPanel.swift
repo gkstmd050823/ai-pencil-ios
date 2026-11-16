@@ -360,7 +360,7 @@ struct QuestionListView: View {
             Group {
                 if answered.isEmpty {
                     VStack(spacing: 10) {
-                        Image(systemName: "sparkles")
+                        Image(systemName: "pencil.tip.crop.circle")
                             .font(.system(size: 34))
                             .foregroundStyle(.secondary)
                         Text("아직 질문이 없어요")
@@ -397,7 +397,7 @@ struct QuestionListView: View {
                                         systemImage: question.markHidden ? "eye" : "eye.slash"
                                     )
                                 }
-                                .tint(.indigo)
+                                .tint(.gray)
                             }
                             .contextMenu {
                                 Button {

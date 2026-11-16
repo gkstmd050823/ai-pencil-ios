@@ -139,7 +139,12 @@ private struct TabStrip: View {
             .accessibilityLabel("\(doc.title) 탭")
         }
         .padding(.leading, 4)
-        .background(selected ? Color.accentColor.opacity(0.13) : Color.clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(selected ? Color.primary : Color.clear)
+                .frame(height: 2)
+                .padding(.horizontal, 6)
+        }
     }
 }
 

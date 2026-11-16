@@ -156,6 +156,13 @@ jobs:
           shot 20-tool-eraser 8 -sample -demoTool eraser
           shot 20-tool-lasso 8 -sample -demoTool lasso
           shot 20-tool-ai 8 -sample -demoTool ai
+          # Words picked out of the page (as a finger held and dragged picks them), and their translation.
+          shot 51-words-picked 9 -sample -demoPickText -fingerDraws NO
+          shot 51-words-translated 12 -sample -demoPickText -demoTranslate -fingerDraws NO $API
+          xcrun simctl ui "$UDID" appearance dark
+          shot 51-words-translated-dark 12 -sample -demoPickText -demoTranslate -fingerDraws NO $API
+          shot 6-shelf-dark 8
+          xcrun simctl ui "$UDID" appearance light
           shot 20-eraser-options 10 -sample -demoTool eraser -demoOptions
           shot 20-highlighter-options 10 -sample -demoTool highlighter -demoOptions
           shot 20-shapes 12 -sample -demoShapes

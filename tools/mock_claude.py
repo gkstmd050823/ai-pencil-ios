@@ -145,6 +145,14 @@ class Handler(BaseHTTPRequestHandler):
                 f.write("\n\n-----\n\n".join(b.get("text", "") for b in system) if isinstance(system, list) else str(system))
 
         answer = FOLLOW_UP_ANSWER if len(messages) > 1 else FIRST_ANSWER
+        system_text = system if isinstance(system, str) else " ".join(b.get("text", "") for b in system)
+        if "번역합니다" in system_text[:200]:
+            # A translation: answered with the words that were sent, so what the app picked can be read off it.
+            asked = messages[-1].get("content") if messages else ""
+            if isinstance(asked, list):
+                asked = " ".join(b.get("text", "") for b in asked if b.get("type") == "text")
+            answer = "(가짜 번역) " + str(asked)
+            print(f"      translation of {len(str(asked))} characters, thinking={req.get('thinking')}", flush=True)
         self.send_response(200)
         self.send_header("content-type", "text/event-stream")
         self.send_header("cache-control", "no-cache")

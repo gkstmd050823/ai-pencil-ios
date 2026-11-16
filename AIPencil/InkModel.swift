@@ -24,7 +24,7 @@ enum InkTool: String, CaseIterable, Identifiable, Codable {
         case .pen: return "pencil.tip"
         case .highlighter: return "highlighter"
         case .eraser: return "eraser"
-        case .ai: return "sparkles"
+        case .ai: return "pencil.tip.crop.circle"
         case .shape: return "square.on.circle"
         case .lasso: return "lasso"
         case .formula: return "arrow.up.and.down.and.arrow.left.and.right"

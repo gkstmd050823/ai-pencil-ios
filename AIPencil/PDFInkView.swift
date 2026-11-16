@@ -263,7 +263,7 @@ final class MarkBadge: UIButton {
         layer.borderColor = UIColor.white.cgColor
         layer.borderWidth = active ? 2 : 1
         let glyph = UIImage.SymbolConfiguration(pointSize: 10, weight: .bold)
-        setImage(UIImage(systemName: "sparkles", withConfiguration: glyph), for: .normal)
+        setImage(UIImage(systemName: "text.alignleft", withConfiguration: glyph), for: .normal)
         tintColor = .white
         accessibilityLabel = "\(question.page + 1)쪽 설명 열기"
     }
@@ -681,6 +681,20 @@ final class ReaderController: ObservableObject {
     var onDeleteMark: ((UUID) -> Void)?
     /// Called when a tool that is to be put down after use has been used.
     var onToolUsed: ((InkTool) -> Void)?
+    /// Words were picked out of a page with a finger, and the finger has let go.
+    var onPickedText: ((String) -> Void)?
+    /// The words picked were copied.
+    var onCopiedText: ((String) -> Void)?
+    /// The user asked for the words picked to be translated.
+    var onTranslate: ((String) -> Void)?
+
+    /// The words picked out of a page now, if any.
+    var pickedText: String { coordinator?.picker.text ?? "" }
+
+    /// For the build server: picks the words between two places of the page in view.
+    func demoPick(from a: CGPoint, to b: CGPoint) {
+        coordinator?.demoPick(from: a, to: b)
+    }
     /// Called on a double tap or a squeeze of the Apple Pencil.
     var onPencil: ((PencilAction) -> Void)?
 
@@ -906,6 +920,24 @@ struct PDFInkView: UIViewRepresentable {
         private var placing = false
         weak var pdfView: PDFView?
         weak var controller: ReaderController?
+        /// Picking words out of a page with a finger, where fingers do not write.
+        private(set) lazy var picker: TextPicker = {
+            let picker = TextPicker()
+            picker.allowed = { [weak self] view, point in
+                guard let self, !self.fingerDraws, let overlay = view as? PageOverlay else { return false }
+                // (A finger held on a mark is asking for the mark's menu.)
+                return self.mark(at: point, page: overlay.canvas.pageIndex) == nil
+            }
+            picker.pageOf = { [weak self] view in
+                guard let self, let overlay = view as? PageOverlay else { return nil }
+                return self.pdfView?.document?.page(at: overlay.canvas.pageIndex)
+            }
+            picker.zoom = { [weak self] in self?.pdfView?.scaleFactor ?? 1 }
+            picker.onPicked = { [weak self] text in self?.controller?.onPickedText?(text) }
+            picker.onCopied = { [weak self] text in self?.controller?.onCopiedText?(text) }
+            picker.onTranslate = { [weak self] text in self?.controller?.onTranslate?(text) }
+            return picker
+        }()
         var choice = InkChoice()
         var fingerDraws = false
         var darkPaper = false
@@ -926,6 +958,8 @@ struct PDFInkView: UIViewRepresentable {
             if choice.tool != self.choice.tool { Diagnostics.shared.step("tool " + choice.tool.rawValue) }
             self.choice = choice
             self.fingerDraws = fingerDraws
+            // (Fingers that write do not pick words.)
+            if fingerDraws { picker.clear() }
             for overlay in overlays.values {
                 configure(overlay)
             }
@@ -1350,6 +1384,7 @@ struct PDFInkView: UIViewRepresentable {
             tap.cancelsTouchesInView = false
             tap.delaysTouchesEnded = false
             overlay.addGestureRecognizer(tap)
+            picker.attach(to: overlay)
             overlays[page] = overlay
             showMarks(in: overlay)
             return overlay
@@ -1357,6 +1392,7 @@ struct PDFInkView: UIViewRepresentable {
 
         func pdfView(_ pdfView: PDFView, willEndDisplayingOverlayView overlayView: UIView, for page: PDFPage) {
             guard let overlay = overlayView as? PageOverlay else { return }
+            picker.left(overlay)
             // (Its handwriting is in hand already: every change was noted when it was made.)
             overlay.pagePicture.clear()
             overlay.dropInkPicture()
@@ -1874,6 +1910,7 @@ struct PDFInkView: UIViewRepresentable {
         /// part that is in view, and pictures of its handwriting as it stands? Where not, they are asked for.
         private func lookAtPictures() {
             guard let view = pdfView, view.window != nil else { return }
+            picker.fit()
             // Nothing at all while a pen, an eraser or a writing finger is on a page: whatever this would
             // find to do can wait until the line is written, and the main thread is the pen's alone
             // meanwhile. (A touch that was never seen to end counts for twenty seconds and no longer.)
@@ -2356,6 +2393,11 @@ struct PDFInkView: UIViewRepresentable {
 
         @objc private func tapPage(_ gesture: UITapGestureRecognizer) {
             guard gesture.state == .ended, !fingerDraws, let overlay = gesture.view as? PageOverlay else { return }
+            // A touch on the page lets go of the words that were picked.
+            if picker.isActive {
+                picker.clear()
+                return
+            }
             if let hit = mark(at: gesture.location(in: overlay), page: overlay.canvas.pageIndex) {
                 controller?.onOpenMark?(hit.id)
             }
@@ -2388,6 +2430,12 @@ struct PDFInkView: UIViewRepresentable {
                 queue.append(contentsOf: next.subviews)
             }
             return nil
+        }
+
+        func demoPick(from a: CGPoint, to b: CGPoint) {
+            guard let view = pdfView, let page = view.currentPage, let overlay = overlays[page] else { return }
+            picker.pick(from: a, to: b, in: overlay)
+            DebugLog.write("pick: \(picker.text.count) characters picked: \(picker.text.prefix(80))")
         }
 
         func demoShapes() {

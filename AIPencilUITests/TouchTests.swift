@@ -277,6 +277,25 @@ final class TouchTests: XCTestCase {
         sleep(2)
         shot("46-tab-closed")
 
+        // Words picked with a finger: held on a word, then dragged along the lines. The menu comes up
+        // when the finger lets go; its second button has the words translated.
+        start(["-demoTool", "pen", "-apiBase", "http://127.0.0.1:8787"], fingersWrite: false)
+        place(80, 408).press(forDuration: 0.8, thenDragTo: place(300, 426), withVelocity: .slow, thenHoldForDuration: 0.3)
+        sleep(2)
+        shot("50-words-picked")
+        for name in ["번역"] {
+            let item = app.menuItems[name].exists ? app.menuItems[name] : app.buttons[name]
+            if item.waitForExistence(timeout: 3) {
+                item.tap()
+                sleep(4)
+            }
+        }
+        shot("50-words-translated")
+        // A touch elsewhere on the page lets go of the words.
+        place(300, 620).tap()
+        sleep(1)
+        shot("50-words-let-go")
+
         // Reading only: a finger does not write, whatever tool is in hand and whatever the setting for
         // writing with fingers; it scrolls the page.
         start(["-demoTool", "pen", "-readOnly", "YES"])
