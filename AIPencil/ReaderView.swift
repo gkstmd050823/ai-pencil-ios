@@ -63,6 +63,8 @@ struct ReaderView: View {
     private var wantsDark: Bool { darkPaper && scheme == .dark }
     private var showsDark: Bool { paperDark ?? wantsDark }
     private var marked: Bool { bookmarks.contains(controller.pageIndex) }
+    /// How many questions of this document have an answer.
+    private var answered: Int { session.questions.filter { !$0.turns.isEmpty }.count }
 
     /// The marks drawn on the pages: all of them, less the ones taken off the page, unless marks are switched off.
     private var marks: [Question] {
@@ -96,6 +98,11 @@ struct ReaderView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    showingQuestions = true
+                } label: {
+                    Label("질문 목록", systemImage: "text.bubble")
+                }
                 Button {
                     mathDraft = MathDraft()
                 } label: {
@@ -224,8 +231,9 @@ struct ReaderView: View {
         VStack(spacing: 0) {
             ToolBar(
                 choice: $choice, showingOptions: $showingOptions, darkPaper: showsDark,
-                canUndo: controller.canUndo, canRedo: controller.canRedo,
-                onPick: pick, onUndo: controller.undo, onRedo: controller.redo
+                canUndo: controller.canUndo, canRedo: controller.canRedo, questions: answered,
+                onPick: pick, onUndo: controller.undo, onRedo: controller.redo,
+                onQuestions: { showingQuestions = true }, onClearPage: controller.clearPage
             )
             .padding(.vertical, 7)
             .frame(maxWidth: .infinity)
@@ -310,7 +318,10 @@ struct ReaderView: View {
                         .onEnded { _ in dragStart = nil }
                 )
                 .accessibilityLabel("설명 창 크기 조절")
-            ExplainPanel(session: session, onOpenSettings: { showingSettings = true }, onLocate: locate)
+            ExplainPanel(
+                session: session, onOpenSettings: { showingSettings = true }, onLocate: locate,
+                onShowQuestions: { showingQuestions = true }
+            )
         }
         .background(Color(uiColor: .systemBackground))
         .clipShape(UnevenRoundedRectangle(topLeadingRadius: 18, bottomLeadingRadius: wide ? 18 : 0, bottomTrailingRadius: 0, topTrailingRadius: wide ? 0 : 18))
@@ -372,8 +383,17 @@ struct ReaderView: View {
         controller.onHideMark = { id in
             session.setMarkHidden(id, true)
         }
+        controller.onShowMark = { id in
+            session.setMarkHidden(id, false)
+        }
         controller.onDeleteMark = { id in
             session.delete(id)
+        }
+        controller.onToolUsed = { tool in
+            // A tool set to be put down after use gives way to the one held before it.
+            guard choice.tool == tool else { return }
+            pick(previousTool == tool ? .pen : previousTool)
+            DebugLog.write("tool: \(tool.rawValue) put down after use, \(choice.tool.rawValue) in hand")
         }
         controller.onPencil = { action in
             pencil(action)
@@ -495,8 +515,22 @@ struct ReaderView: View {
         if arguments.contains("-demoOptions") {
             later(2) { showingOptions = true }
         }
+        // The eraser's settings, said outright so that one launch's does not carry into the next.
+        if defaults.object(forKey: "demoEraserAuto") != nil { choice.eraserAuto = defaults.bool(forKey: "demoEraserAuto") }
+        if defaults.object(forKey: "demoHighlighterOnly") != nil { choice.eraserHighlighterOnly = defaults.bool(forKey: "demoHighlighterOnly") }
+        if arguments.contains("-demoEraseMark") {
+            // The eraser drawn down through the ring round the sample's heading.
+            later(3) { controller.demoErase(from: CGPoint(x: 130, y: 50), to: CGPoint(x: 130, y: 130)) }
+        }
+        if arguments.contains("-demoUndo") {
+            later(4.5) { controller.undo() }
+        }
         if let tab = NavigatorSheet.Tab(rawValue: defaults.string(forKey: "demoNavigator") ?? "") {
             later(2) { openNavigator(tab, query: defaults.string(forKey: "demoSearch") ?? "") }
+        }
+        if let words = defaults.string(forKey: "demoFind") {
+            // Goes to the first place the words stand at, as picking it from the search results does.
+            later(2) { if let hit = controller.search(words).first { controller.show(hit) } }
         }
         if arguments.contains("-demoBookmark") {
             later(1.5) { if !marked { toggleBookmark() } }
@@ -525,9 +559,13 @@ private struct ToolBar: View {
     var darkPaper: Bool
     var canUndo: Bool
     var canRedo: Bool
+    /// How many questions the document has, shown beside the AI pen.
+    var questions: Int
     var onPick: (InkTool) -> Void
     var onUndo: () -> Void
     var onRedo: () -> Void
+    var onQuestions: () -> Void
+    var onClearPage: () -> Void
 
     /// The width kept for the tool's own part.
     private static let room: CGFloat = 232
@@ -554,7 +592,10 @@ private struct ToolBar: View {
             bar(withRoom: false)
         }
         .popover(isPresented: $showingOptions) {
-            ToolOptions(choice: $choice, darkPaper: darkPaper)
+            ToolOptions(choice: $choice, darkPaper: darkPaper) {
+                showingOptions = false
+                onClearPage()
+            }
         }
     }
 
@@ -642,15 +683,38 @@ private struct ToolBar: View {
                 more(current: choice.penColor)
             }
         case .eraser:
-            Picker("지우개 종류", selection: $choice.eraserKind) {
-                ForEach(EraserKind.allCases) { kind in
-                    Text(kind.label + " 지우개").tag(kind)
+            HStack(spacing: 2) {
+                if choice.eraserHighlighterOnly {
+                    hint("형광펜만 지워요")
+                } else {
+                    Picker("지우개 종류", selection: $choice.eraserKind) {
+                        ForEach(EraserKind.allCases) { kind in
+                            Text(kind.label + " 지우개").tag(kind)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.leading, 6)
                 }
+                more(current: nil)
             }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 6)
         case .ai:
-            hint("모르는 곳에 동그라미를 쳐 보세요")
+            HStack(spacing: 4) {
+                hint("모르는 곳에 동그라미를 쳐요")
+                Button(action: onQuestions) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "text.bubble")
+                        Text("\(questions)")
+                            .monospacedDigit()
+                    }
+                    .font(.footnote.weight(.semibold))
+                    .padding(.horizontal, 10)
+                    .frame(height: 30)
+                    .foregroundStyle(tint(.ai))
+                    .background(tint(.ai).opacity(0.14), in: Capsule())
+                }
+                .accessibilityLabel("질문 목록, \(questions)개")
+                .padding(.trailing, 4)
+            }
         case .lasso:
             hint("둘러서 고른 뒤 끌어 옮겨요")
         case .formula:
@@ -700,7 +764,7 @@ private struct ToolBar: View {
             }
             .frame(width: 40, height: 42)
         }
-        .accessibilityLabel("굵기와 색 더 보기")
+        .accessibilityLabel("도구 설정 더 보기")
     }
 }
 
@@ -719,11 +783,23 @@ private struct Swatch: View {
     }
 }
 
-/// The settings of the tool in hand: the kind of pen, how thick, how much it answers to pressure,
-/// which colour.
+/// The settings of the tool in hand: the kind of pen, how thick, which colour; what the eraser takes;
+/// whether the tool is put down by itself once it has been used.
 private struct ToolOptions: View {
     @Binding var choice: InkChoice
     var darkPaper: Bool
+    var onClearPage: () -> Void
+
+    private var eraserHint: String {
+        if choice.eraserHighlighterOnly { return "형광펜으로 그은 선만 통째로 지우고, 펜으로 쓴 것은 그대로 둬요." }
+        return choice.eraserKind == .stroke ? "닿은 획을 통째로 지워요." : "문지른 자리만 지워요."
+    }
+
+    /// A switch for putting the tool down after one use.
+    private func putDown(_ title: String, _ isOn: Binding<Bool>) -> some View {
+        Toggle(title, isOn: isOn)
+            .font(.subheadline)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -739,19 +815,11 @@ private struct ToolOptions: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 SliderRow(title: "굵기", value: $choice.penWidth, range: InkChoice.penWidths, shown: String(format: "%.1f", choice.penWidth), line: CGFloat(choice.penWidth))
-                SliderRow(title: "필압", value: $choice.pressure, range: 0...2, shown: "\(Int((choice.pressure * 100).rounded()))%", line: nil)
-                    .disabled(choice.penKind == .ball)
-                    .opacity(choice.penKind == .ball ? 0.4 : 1)
-                Text(choice.penKind == .ball
-                     ? "볼펜은 굵기가 일정해서 필압을 쓰지 않아요."
-                     : "0%면 굵기가 일정하고, 100%가 원래 반응, 그 위로는 힘에 따른 굵기 차이가 더 커져요. 100%가 아닐 때는 획을 다 그은 뒤에 굵기가 맞춰져요.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
                 ColorGrid(palette: InkChoice.penPalette, selection: $choice.penColor, darkPaper: darkPaper)
             case .highlighter:
                 SliderRow(title: "굵기", value: $choice.highlighterWidth, range: InkChoice.highlighterWidths, shown: String(format: "%.0f", choice.highlighterWidth), line: CGFloat(choice.highlighterWidth) * 0.8)
                 ColorGrid(palette: InkChoice.highlighterPalette, selection: $choice.highlighterColor, darkPaper: darkPaper)
+                putDown("한 번 긋고 나면 이전 도구로 돌아가기", $choice.highlighterAuto)
             case .shape:
                 Picker("도형", selection: $choice.shapeKind) {
                     ForEach(ShapeKind.allCases) { kind in
@@ -765,6 +833,7 @@ private struct ToolOptions: View {
                     .fixedSize(horizontal: false, vertical: true)
                 SliderRow(title: "굵기", value: $choice.penWidth, range: InkChoice.penWidths, shown: String(format: "%.1f", choice.penWidth), line: CGFloat(choice.penWidth))
                 ColorGrid(palette: InkChoice.penPalette, selection: $choice.penColor, darkPaper: darkPaper)
+                putDown("한 번 그리고 나면 이전 도구로 돌아가기", $choice.shapeAuto)
             case .eraser:
                 Picker("지우개 종류", selection: $choice.eraserKind) {
                     ForEach(EraserKind.allCases) { kind in
@@ -772,9 +841,31 @@ private struct ToolOptions: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                Text(choice.eraserKind == .stroke ? "닿은 획을 통째로 지워요." : "문지른 자리만 지워요.")
+                .disabled(choice.eraserHighlighterOnly)
+                Text(eraserHint)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                // The eraser that takes whole strokes has no size: it takes what its tip touches.
+                SliderRow(title: "크기", value: $choice.eraserWidth, range: InkChoice.eraserWidths, shown: "\(Int(choice.eraserWidth.rounded()))", line: nil)
+                    .disabled(choice.eraserKind == .stroke && !choice.eraserHighlighterOnly)
+                    .opacity(choice.eraserKind == .stroke && !choice.eraserHighlighterOnly ? 0.4 : 1)
+                VStack(alignment: .leading, spacing: 10) {
+                    Toggle("형광펜만 지우기", isOn: $choice.eraserHighlighterOnly)
+                    Toggle("AI 펜 표시도 지우기", isOn: $choice.eraserTakesMarks)
+                        .disabled(choice.eraserHighlighterOnly)
+                    Text("표시만 쪽에서 사라져요. 설명은 질문 목록에 남고, 거기서 표시를 다시 보이게 할 수 있어요.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Toggle("지우고 나면 이전 도구로 돌아가기", isOn: $choice.eraserAuto)
+                }
+                .font(.subheadline)
+                Divider()
+                Button(role: .destructive, action: onClearPage) {
+                    Label("이 쪽 필기 모두 지우기", systemImage: "trash")
+                        .font(.subheadline)
+                }
             default:
                 EmptyView()
             }

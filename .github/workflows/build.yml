@@ -20,7 +20,7 @@ concurrency:
 jobs:
   build:
     runs-on: macos-26
-    timeout-minutes: 40
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
 
@@ -61,6 +61,7 @@ jobs:
                       found = d["udid"]
           print(found)')
           if [ -z "$UDID" ]; then echo "no iPad simulator on this runner"; xcrun simctl list devices available; exit 0; fi
+          echo "$UDID" > udid.txt
           xcrun simctl bootstatus "$UDID" -b
           xcrun simctl install "$UDID" build/Build/Products/Debug-iphonesimulator/AIPencil.app
           # Each launch asks the app to do something no one is there to tap, then a picture is taken.
@@ -72,8 +73,11 @@ jobs:
           }
           shot 1-shelf-empty 12
           shot 2-reader 12 -sample -demoInk
-          # Zoomed in well past fitting the page: the ink has to stay sharp.
+          # Zoomed in well past fitting the page: the ink has to stay sharp, and so has the page.
           shot 2-reader-zoomed 14 -sample -demoInk -demoZoom 2.5
+          # The same two as PDFKit alone draws the page, to set beside the app's own sharper picture of it.
+          shot 2-reader-soft 12 -sample -demoInk -demoSoftPages
+          shot 2-reader-zoomed-soft 14 -sample -demoInk -demoZoom 2.5 -demoSoftPages
           shot 3-formula 16 -sample -demoInk -demoMath
           shot 4-blank-page-added 12 -sample -demoAddPage
           shot 5-new-note 10 -demoNote
@@ -95,6 +99,9 @@ jobs:
           shot 11-marks-hidden 10 -sample -showAiMarks NO
           shot 12-question-list 10 -sample -demoQuestions
           shot 13-wide 16 -sample -demoAsk -demoAskX 380 -demoAskY 520 -demoWide YES $API
+          # The eraser drawn through the ring round the heading: the ring goes, its question stays in the list.
+          shot 28-erase-mark 9 -sample -demoTool eraser -demoEraseMark
+          shot 28-question-list-after 10 -sample -demoQuestions
           # Pages that are turned or cropped: the mark in the pictures sent has to sit where it sits on screen.
           DATA=$(xcrun simctl get_app_container "$UDID" app.aipencil.ios data)
           mkdir -p "$DATA/Documents"
@@ -112,6 +119,9 @@ jobs:
           # The bar must be the same size and in the same place whatever tool is in hand.
           shot 20-tool-eraser 8 -sample -demoTool eraser
           shot 20-tool-lasso 8 -sample -demoTool lasso
+          shot 20-tool-ai 8 -sample -demoTool ai
+          shot 20-eraser-options 10 -sample -demoTool eraser -demoOptions
+          shot 20-highlighter-options 10 -sample -demoTool highlighter -demoOptions
           shot 20-shapes 12 -sample -demoShapes
           # A dotted page added after the first page, and shapes drawn on it: an added page with writing on it.
           shot 20-added-dots 12 -sample -demoAddPage -demoPaper dots
@@ -120,6 +130,8 @@ jobs:
           shot 21-bookmarks 10 -sample -demoNavigator bookmarks
           shot 21-search 10 -sample -demoNavigator search -demoSearch 손실
           shot 21-outline 10 -sample -demoNavigator outline
+          # The words a search found, marked on the page itself.
+          shot 21-search-hit 10 -sample -demoFind 손실
           shot 22-two-up 10 -sample -pageLayout twoUp
           shot 23-paged 12 -sample -pageLayout paged
           shot 23-paged-ask 18 -sample -pageLayout paged -demoAsk -demoAskX 300 -demoAskY 200 $API
@@ -196,6 +208,32 @@ jobs:
           path: AIPencil.ipa
           retention-days: 30
 
+      # Real touches: a finger writes, rubs out and draws in the simulator (AIPencilUITests). What it leaves
+      # is pictures and the app's notes; a failure here does not fail the build, the IPA is made already.
+      - name: Touch the pages with a finger
+        continue-on-error: true
+        run: |
+          UDID=$(cat udid.txt 2>/dev/null || true)
+          if [ -z "$UDID" ]; then echo "no simulator to test on"; exit 0; fi
+          mkdir -p screenshots
+          xcodegen generate --spec uitests.yml
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          python3 tools/mock_claude.py --host 127.0.0.1 --port 8787 --delay 0.004 --think 0.3 --search 1.5 > mock-touch.log 2>&1 &
+          MOCK=$!
+          export TEST_RUNNER_SHOTS="$PWD/screenshots"
+          xcodebuild test \
+            -project AIPencilTests.xcodeproj -scheme Touch \
+            -destination "id=$UDID" \
+            -derivedDataPath build-tests 2>&1 | tee touch-test.log | grep -E "error:|Test Case|Test Suite|Executed|\*\* TEST" || true
+          kill $MOCK || true
+          DATA=$(xcrun simctl get_app_container "$UDID" app.aipencil.ios data || true)
+          if [ -n "$DATA" ]; then cp "$DATA/Documents/debug.log" touch-debug.log 2>/dev/null || true; fi
+          echo "---- the app's own notes during the touch test ----"
+          grep -E "eraser:|tool:|undo:" touch-debug.log || true
+          ls screenshots | grep touch || echo "no pictures came out of the touch test"
+          xcrun simctl shutdown "$UDID" || true
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -205,6 +243,8 @@ jobs:
             mock-dump
             mock.log
             app-debug.log
+            touch-test.log
+            touch-debug.log
             export.pdf
             export-turned.pdf
             export-packed.pdf

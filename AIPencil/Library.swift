@@ -42,6 +42,8 @@ final class Library: ObservableObject {
     @Published private(set) var folders: [Folder] = []
 
     private let root: URL
+    /// The covers already read or drawn since the app started.
+    private let covers = NSCache<NSString, UIImage>()
     private var indexURL: URL { root.appendingPathComponent("index.json") }
     private var foldersURL: URL { root.appendingPathComponent("folders.json") }
 
@@ -126,28 +128,49 @@ final class Library: ObservableObject {
         folder(for: id).appendingPathComponent("document.pdf")
     }
 
-    /// Copies the PDF into the app, so it still opens after the original is moved or deleted.
-    @discardableResult
-    func importPDF(from source: URL, title: String? = nil, into place: UUID? = nil) throws -> Doc {
+    /// Copies a PDF to [target] in a new folder and counts its pages. Run off the main thread: a large
+    /// file, or one that has to come down from iCloud first, takes a while.
+    private static func copy(_ source: URL, to target: URL) throws -> Int {
         // Files picked from the Files app are only readable between these two calls.
         let scoped = source.startAccessingSecurityScopedResource()
         defer { if scoped { source.stopAccessingSecurityScopedResource() } }
-
-        let id = UUID()
-        let directory = folder(for: id)
+        let directory = target.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         do {
-            try FileManager.default.copyItem(at: source, to: pdfURL(for: id))
-            guard let pdf = PDFDocument(url: pdfURL(for: id)), pdf.pageCount > 0 else { throw ImportError.unreadable }
-            let name = title ?? source.deletingPathExtension().lastPathComponent
-            let doc = Doc(id: id, title: name, pageCount: pdf.pageCount, addedAt: Date(), folder: place)
-            docs.insert(doc, at: 0)
-            save()
-            return doc
+            try FileManager.default.copyItem(at: source, to: target)
+            guard let pdf = PDFDocument(url: target), pdf.pageCount > 0 else { throw ImportError.unreadable }
+            return pdf.pageCount
         } catch {
             try? FileManager.default.removeItem(at: directory)
             throw error
         }
+    }
+
+    private func shelve(_ id: UUID, source: URL, title: String?, pages: Int, into place: UUID?) -> Doc {
+        let name = title ?? source.deletingPathExtension().lastPathComponent
+        let doc = Doc(id: id, title: name, pageCount: pages, addedAt: Date(), folder: place)
+        docs.insert(doc, at: 0)
+        save()
+        return doc
+    }
+
+    /// Copies the PDF into the app, so it still opens after the original is moved or deleted.
+    @discardableResult
+    func importPDF(from source: URL, title: String? = nil, into place: UUID? = nil) throws -> Doc {
+        let id = UUID()
+        let pages = try Library.copy(source, to: pdfURL(for: id))
+        return shelve(id, source: source, title: title, pages: pages, into: place)
+    }
+
+    /// The same without holding the screen still while the file is copied.
+    @MainActor
+    func bringIn(_ source: URL, into place: UUID? = nil) async throws -> Doc {
+        let id = UUID()
+        let target = pdfURL(for: id)
+        let pages = try await Task.detached(priority: .userInitiated) {
+            try Library.copy(source, to: target)
+        }.value
+        return shelve(id, source: source, title: nil, pages: pages, into: place)
     }
 
     /// A name for a new notebook that no document has yet: "새 노트", then "새 노트 2", ...
@@ -214,12 +237,33 @@ final class Library: ObservableObject {
         save()
     }
 
-    /// The first page as a picture [width] points wide, for the shelf.
-    func cover(for doc: Doc, width: CGFloat) -> UIImage? {
-        guard let page = DocFile.open(pdfURL(for: doc.id))?.page(at: 0) else { return nil }
-        let bounds = page.bounds(for: .cropBox)
-        let size = CGSize(width: width, height: width * bounds.height / max(bounds.width, 1))
-        return page.thumbnail(of: size, for: .cropBox)
+    /// The first page as a picture [width] pixels wide, for the shelf. It is drawn once, off the main
+    /// thread, and kept beside the document: the first page of a document never changes, and opening
+    /// every document to draw its cover each time the shelf is shown made the shelf slow to appear.
+    @MainActor
+    func cover(for doc: Doc, width: CGFloat) async -> UIImage? {
+        let key = doc.id.uuidString as NSString
+        if let kept = covers.object(forKey: key) { return kept }
+        let pdf = pdfURL(for: doc.id)
+        let file = folder(for: doc.id).appendingPathComponent("cover.jpg")
+        let picture = await Task.detached(priority: .utility) { () -> UIImage? in
+            if let data = try? Data(contentsOf: file), let saved = UIImage(data: data) { return saved }
+            guard let page = DocFile.open(pdf)?.page(at: 0) else { return nil }
+            let shown = AskCapture.shape(of: page).size
+            let size = CGSize(width: width, height: width * shown.height / max(shown.width, 1))
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1
+            format.opaque = true
+            let made = UIGraphicsImageRenderer(size: size, format: format).image { context in
+                UIColor.white.setFill()
+                context.fill(CGRect(origin: .zero, size: size))
+                page.thumbnail(of: size, for: .cropBox).draw(in: CGRect(origin: .zero, size: size))
+            }
+            try? made.jpegData(compressionQuality: 0.85)?.write(to: file, options: .atomic)
+            return made
+        }.value
+        if let picture { covers.setObject(picture, forKey: key) }
+        return picture
     }
 
     private func save() {

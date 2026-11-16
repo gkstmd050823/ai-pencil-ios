@@ -94,6 +94,8 @@ struct ExplainPanel: View {
     var onOpenSettings: () -> Void
     /// Asked to bring the mark of this question into view.
     var onLocate: (Question) -> Void
+    /// Asked for the list of all the document's questions.
+    var onShowQuestions: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var draft = ""
@@ -140,6 +142,12 @@ struct ExplainPanel: View {
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 4)
+            Button(action: onShowQuestions) {
+                Image(systemName: "list.bullet")
+                    .frame(width: 36, height: 36)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("질문 목록")
             Menu {
                 Button {
                     UIPasteboard.general.string = panel.turns.filter { !$0.fromUser }.map(\.text).joined(separator: "\n\n")
@@ -379,9 +387,47 @@ struct QuestionListView: View {
                                     Label("삭제", systemImage: "trash")
                                 }
                             }
+                            // A mark taken off the page (with the eraser, say) is put back from here.
+                            .swipeActions(edge: .leading) {
+                                Button {
+                                    session.setMarkHidden(question.id, !question.markHidden)
+                                } label: {
+                                    Label(
+                                        question.markHidden ? "표시 보이기" : "표시 지우기",
+                                        systemImage: question.markHidden ? "eye" : "eye.slash"
+                                    )
+                                }
+                                .tint(.indigo)
+                            }
+                            .contextMenu {
+                                Button {
+                                    session.setMarkHidden(question.id, !question.markHidden)
+                                } label: {
+                                    Label(
+                                        question.markHidden ? "쪽에 표시 다시 보이기" : "쪽의 표시만 지우기",
+                                        systemImage: question.markHidden ? "eye" : "eye.slash"
+                                    )
+                                }
+                                Button(role: .destructive) {
+                                    session.delete(question.id)
+                                } label: {
+                                    Label("표시와 설명 삭제", systemImage: "trash")
+                                }
+                            }
                         }
                     }
                     .listStyle(.plain)
+                    .safeAreaInset(edge: .bottom) {
+                        if answered.contains(where: \.markHidden) {
+                            Label("눈에 줄이 그어진 질문은 쪽에서 표시를 지운 것이에요. 길게 누르거나 오른쪽으로 밀면 다시 보이게 할 수 있어요.", systemImage: "eye.slash")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 18)
+                                .padding(.vertical, 10)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(.bar)
+                        }
+                    }
                 }
             }
             .navigationTitle("질문 목록")

@@ -1,6 +1,7 @@
 import PDFKit
 import PencilKit
 import SwiftUI
+import UIKit.UIGestureRecognizerSubclass
 
 /// A PencilKit canvas that remembers which page it lies on.
 final class PageCanvas: PKCanvasView {
@@ -12,6 +13,149 @@ final class PageCanvas: PKCanvasView {
 /// The drag that draws a shape: it begins the moment the page is touched, and remembers where.
 final class ShapeGesture: UILongPressGestureRecognizer {
     var start = CGPoint.zero
+}
+
+/// Watches where a touch goes without getting in anyone's way: it never claims the touch and is never made
+/// to let go of it. PencilKit rubs out as it always does, and this tells the app where the eraser is.
+final class TouchWatcher: UIGestureRecognizer {
+    /// Called as the touch moves: where it was last seen and where it is now, in the view's frame.
+    var onMove: ((CGPoint, CGPoint) -> Void)?
+    private weak var followed: UITouch?
+    private var last = CGPoint.zero
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard followed == nil, let touch = touches.first else { return }
+        followed = touch
+        last = touch.location(in: view)
+        onMove?(last, last)
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard let touch = followed, touches.contains(touch) else { return }
+        let point = touch.location(in: view)
+        onMove?(last, point)
+        last = point
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        letGo(touches)
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        letGo(touches)
+    }
+
+    private func letGo(_ touches: Set<UITouch>) {
+        guard let touch = followed, touches.contains(touch) else { return }
+        followed = nil
+        // It never recognises anything; saying so is what readies it for the next touch.
+        state = .failed
+    }
+
+    override func reset() {
+        super.reset()
+        followed = nil
+    }
+
+    override func canPrevent(_ other: UIGestureRecognizer) -> Bool { false }
+
+    override func canBePrevented(by other: UIGestureRecognizer) -> Bool { false }
+}
+
+/// Numbers the requests for a page's picture, so that a picture which comes back late, for a request that
+/// has since been replaced, can be told and dropped. Read from the drawing queue as well as the main one.
+final class Ticket {
+    private let lock = NSLock()
+    private var number = 0
+
+    @discardableResult
+    func next() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        number += 1
+        return number
+    }
+
+    var current: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return number
+    }
+}
+
+/// The page itself, drawn by the app with exactly as many pixels as the screen shows it with, and laid
+/// over PDFKit's own picture of it. PDFKit's picture comes out softer than the screen could show (its
+/// text had blurred edges in the build server's screenshots, at fitting zoom and zoomed in alike), and
+/// there is no setting for that; so the page is drawn once more here, sharp. PDFKit's picture is what
+/// shows until this one is ready, and wherever this one does not reach.
+///
+/// The view is as large as the page is shown and turned back against the overlay's turning, so a point in
+/// it is a point of the page as the reader sees it, measured from its top-left corner.
+final class PagePicture: UIView {
+    /// A part of the page and how finely it is drawn, in pixels per page point.
+    struct Extent: Equatable {
+        var rect: CGRect
+        var scale: CGFloat
+    }
+
+    /// What is on show.
+    private(set) var shown: Extent?
+    /// What has been asked for and is being drawn.
+    var asked: Extent?
+    /// Drawing failed once (no memory for it, most likely); it is not tried again for this page.
+    var gaveUp = false
+    let ticket = Ticket()
+    private let image = CALayer()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        backgroundColor = .clear
+        layer.masksToBounds = true
+        image.actions = ["contents": NSNull(), "position": NSNull(), "bounds": NSNull()]
+        layer.addSublayer(image)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("not used")
+    }
+
+    func show(_ picture: CGImage, _ extent: Extent) {
+        image.frame = extent.rect
+        image.contents = picture
+        shown = extent
+        asked = nil
+    }
+
+    /// Lets the picture go, to give its memory back.
+    func clear() {
+        ticket.next()
+        image.contents = nil
+        shown = nil
+        asked = nil
+    }
+
+    /// A picture of [extent] of [page], whose size as shown is [size]. Made off the main thread.
+    static func draw(_ page: PDFPage, size: CGSize, extent: Extent) -> CGImage? {
+        let rect = extent.rect, scale = extent.scale
+        let width = Int((rect.width * scale).rounded()), height = Int((rect.height * scale).rounded())
+        guard width > 0, height > 0, let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(
+                  data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+              )
+        else { return nil }
+        context.setFillColor(UIColor.white.cgColor)
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.interpolationQuality = .high
+        // PDFKit draws a page with its bottom-left corner at the origin, upward, a point to a unit. The
+        // part asked for is measured from the page's top-left corner, downward.
+        context.scaleBy(x: scale, y: scale)
+        context.translateBy(x: -rect.minX, y: rect.maxY - size.height)
+        context.clip(to: CGRect(origin: .zero, size: size))
+        page.draw(with: .cropBox, to: context)
+        return context.makeImage()
+    }
 }
 
 /// A formula on a page: its shape, filled with its colour.
@@ -70,8 +214,18 @@ final class MarkBadge: UIButton {
 /// measured from the page's top-left corner.
 final class PageOverlay: UIView {
     let canvas = PageCanvas()
+    /// The page drawn sharp, under everything else.
+    let pagePicture = PagePicture()
+    /// Marks the words a search found.
+    private let highlights = UIView()
+    /// Follows the eraser, to take the AI pen's marks off the page where it passes.
+    let watcher = TouchWatcher()
+    /// The drags on the surface below: one draws shapes, the other rubs out highlighter.
+    var shapeDrag: ShapeGesture?
+    var rubDrag: ShapeGesture?
     private let markLines = UIView()
-    /// Takes the drags of the shape tool. Hidden, and so out of the way, while any other tool is in hand.
+    /// Takes the drags of the tools that do not write through PencilKit: the shape tool, and the eraser
+    /// that only takes highlighter. Hidden, and so out of the way, while any other tool is in hand.
     let shapeSurface = UIView()
     /// The shape being drawn, until the hand lets go and it becomes ink.
     let shapePreview = CAShapeLayer()
@@ -93,6 +247,9 @@ final class PageOverlay: UIView {
         // The paper is white whatever the iPad's appearance. PencilKit would otherwise turn dark ink
         // light on a dark screen, and it would vanish on the page.
         overrideUserInterfaceStyle = .light
+        addSubview(pagePicture)
+        highlights.isUserInteractionEnabled = false
+        addSubview(highlights)
         markLines.isUserInteractionEnabled = false
         addSubview(markLines)
         canvas.backgroundColor = .clear
@@ -105,6 +262,11 @@ final class PageOverlay: UIView {
         shapePreview.lineJoin = .round
         shapeSurface.layer.addSublayer(shapePreview)
         addSubview(shapeSurface)
+        watcher.cancelsTouchesInView = false
+        watcher.delaysTouchesBegan = false
+        watcher.delaysTouchesEnded = false
+        watcher.isEnabled = false
+        addGestureRecognizer(watcher)
     }
 
     required init?(coder: NSCoder) {
@@ -122,6 +284,18 @@ final class PageOverlay: UIView {
 
     var badges: [MarkBadge] {
         subviews.compactMap { $0 as? MarkBadge }
+    }
+
+    /// Marks these parts of the page, given in this view's frame, as found by a search.
+    func highlight(_ rects: [CGRect]) {
+        highlights.layer.sublayers?.forEach { $0.removeFromSuperlayer() }
+        for rect in rects {
+            let mark = CALayer()
+            mark.frame = rect.insetBy(dx: -1.5, dy: -1)
+            mark.cornerRadius = 2
+            mark.backgroundColor = UIColor.systemYellow.withAlphaComponent(0.42).cgColor
+            highlights.layer.addSublayer(mark)
+        }
     }
 
     /// Draws these marks, and no others. Hands back their buttons, for the caller to wire up.
@@ -156,6 +330,17 @@ final class PageOverlay: UIView {
         super.layoutSubviews()
         markLines.frame = bounds
         shapeSurface.frame = bounds
+        highlights.frame = bounds
+        // The picture of the page is as large as the page is shown, and stands upright on screen.
+        let sideways = quarterTurns % 2 != 0
+        let shown = sideways ? CGSize(width: bounds.height, height: bounds.width) : bounds.size
+        let middle = CGPoint(x: bounds.midX, y: bounds.midY)
+        if pagePicture.bounds.size != shown || pagePicture.center != middle {
+            pagePicture.transform = .identity
+            pagePicture.bounds = CGRect(origin: .zero, size: shown)
+            pagePicture.center = middle
+            pagePicture.transform = CGAffineTransform(rotationAngle: -CGFloat(quarterTurns) * .pi / 2)
+        }
         if bounds.width > 0, bounds.height > 0, canvasFits.size != bounds.size || canvasFits.scale != inkScale {
             canvasFits = (bounds.size, inkScale)
             let larger = CGSize(width: bounds.width * inkScale, height: bounds.height * inkScale)
@@ -206,7 +391,11 @@ final class ReaderController: ObservableObject {
     /// Called when the user touched a mark to read its explanation again.
     var onOpenMark: ((UUID) -> Void)?
     var onHideMark: ((UUID) -> Void)?
+    /// Called to put a mark back on the page that was taken off it.
+    var onShowMark: ((UUID) -> Void)?
     var onDeleteMark: ((UUID) -> Void)?
+    /// Called when a tool that is to be put down after use has been used.
+    var onToolUsed: ((InkTool) -> Void)?
     /// Called on a double tap or a squeeze of the Apple Pencil.
     var onPencil: ((PencilAction) -> Void)?
 
@@ -270,6 +459,11 @@ final class ReaderController: ObservableObject {
         coordinator?.undoManager?.undo()
     }
 
+    /// Takes all the handwriting off the page in view. It can be undone.
+    func clearPage() {
+        coordinator?.clearPage()
+    }
+
     func redo() {
         coordinator?.undoManager?.redo()
     }
@@ -277,6 +471,11 @@ final class ReaderController: ObservableObject {
     /// For the build server: draws a ring with the AI pen on the page in view, as a hand would have.
     func demoMark(center: CGPoint, radius: CGSize) {
         coordinator?.demoMark(center: center, radius: radius)
+    }
+
+    /// For the build server: moves the eraser across the page in view, as a hand would have.
+    func demoErase(from: CGPoint, to: CGPoint) {
+        coordinator?.demoErase(from: from, to: to)
     }
 
     /// For the build server: zooms in this many times past fitting the page.
@@ -366,6 +565,18 @@ struct PDFInkView: UIViewRepresentable {
         private var inkScale: CGFloat = 1
         private var watching: [NSObjectProtocol] = []
         private var undoHeld = false
+        /// The words a search found: their page, and where they stand on it in the overlay's frame.
+        private var found: (page: Int, rects: [CGRect])?
+        /// The handwriting of every page it has changed on, as it stands now, and the pages whose
+        /// handwriting has not been written to disk yet.
+        private var latest: [Int: PKDrawing] = [:]
+        private var unsaved: Set<Int> = []
+        private let saveQueue = DispatchQueue(label: "app.aipencil.ink", qos: .utility)
+        private let pictureQueue = DispatchQueue(label: "app.aipencil.pages", qos: .userInitiated)
+        private var pictureTimer: Timer?
+        private var scaleSeen: CGFloat = 0
+        /// The drawing a page had when the highlighter eraser was put to it.
+        private var rubbedFrom: PKDrawing?
         weak var pdfView: PDFView?
         weak var controller: ReaderController?
         var choice = InkChoice()
@@ -421,14 +632,22 @@ struct PDFInkView: UIViewRepresentable {
             canvas.tool = choice.pencilKitTool
             canvas.drawingPolicy = fingerDraws ? .anyInput : .pencilOnly
             // With the formula tool the canvas steps aside, so that touches reach the formulas under it;
-            // with the shape tool, so that they reach the surface that draws shapes.
-            canvas.isUserInteractionEnabled = choice.tool != .formula && choice.tool != .shape
-            overlay.shapeSurface.isHidden = choice.tool != .shape
+            // with the shape tool and the eraser that only takes highlighter, so that they reach the
+            // surface those two work on.
+            let onSurface = choice.tool == .shape || choice.rubsHighlighterOnly
+            canvas.isUserInteractionEnabled = choice.tool != .formula && !onSurface
+            overlay.shapeSurface.isHidden = !onSurface
+            overlay.shapeDrag?.isEnabled = choice.tool == .shape
+            overlay.rubDrag?.isEnabled = choice.rubsHighlighterOnly
             let pencil = NSNumber(value: UITouch.TouchType.pencil.rawValue)
             let finger = NSNumber(value: UITouch.TouchType.direct.rawValue)
+            let writing = fingerDraws ? [pencil, finger] : [pencil]
             for gesture in overlay.shapeSurface.gestureRecognizers ?? [] {
-                gesture.allowedTouchTypes = fingerDraws ? [pencil, finger] : [pencil]
+                gesture.allowedTouchTypes = writing
             }
+            // PencilKit's eraser says nothing of where it goes; the watcher does, for the AI pen's marks.
+            overlay.watcher.allowedTouchTypes = writing
+            overlay.watcher.isEnabled = choice.tool == .eraser && choice.eraserTakesMarks && !choice.eraserHighlighterOnly
         }
 
         func classForPage() -> AnyClass {
@@ -449,11 +668,49 @@ struct PDFInkView: UIViewRepresentable {
             }
         }
 
-        func saveAll() {
+        // MARK: saving
+
+        /// The handwriting of a page changed. It goes to disk a moment later and off the main thread:
+        /// writing a full page out after every stroke would hold the pen up on a page with much on it.
+        private func inkChanged(_ canvas: PageCanvas) {
             guard !retired else { return }
-            for overlay in overlays.values {
-                store.save(overlay.canvas.drawing, page: overlay.canvas.pageIndex)
+            latest[canvas.pageIndex] = canvas.drawing
+            unsaved.insert(canvas.pageIndex)
+            NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(saveSoon), object: nil)
+            perform(#selector(saveSoon), with: nil, afterDelay: 0.8)
+        }
+
+        @objc private func saveSoon() {
+            write(waiting: false)
+        }
+
+        /// Writes out the pages that are waiting. One queue does all the writing, in order, so a page is
+        /// never left with an older state than the last one written.
+        private func write(waiting: Bool) {
+            guard !retired else { return }
+            let store = self.store
+            let work = unsaved.compactMap { page in latest[page].map { (page, $0) } }
+            unsaved = []
+            if waiting {
+                saveQueue.sync {
+                    for (page, drawing) in work { store.save(drawing, page: page) }
+                }
+            } else if !work.isEmpty {
+                saveQueue.async {
+                    for (page, drawing) in work { store.save(drawing, page: page) }
+                }
             }
+        }
+
+        /// Everything on disk before this returns.
+        func saveAll() {
+            NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(saveSoon), object: nil)
+            write(waiting: true)
+        }
+
+        /// The handwriting of a page that is not on screen: as last changed here, or else as on disk.
+        private func storedDrawing(page: Int) -> PKDrawing? {
+            latest[page] ?? store.load(page: page)
         }
 
         // MARK: watching the page view
@@ -473,6 +730,14 @@ struct PDFInkView: UIViewRepresentable {
                     DispatchQueue.main.async { self?.tellUndo() }
                 })
             }
+            // Leaving the app may be the last that is seen of it: nothing is left waiting to be written.
+            watching.append(center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.saveAll()
+            })
+            watching.append(center.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.dropUnseenPictures()
+            })
+            startPictures()
             DispatchQueue.main.async { [weak self] in
                 self?.tellPage()
                 self?.tellUndo()
@@ -483,6 +748,8 @@ struct PDFInkView: UIViewRepresentable {
         func stopWatching() {
             watching.forEach { NotificationCenter.default.removeObserver($0) }
             watching = []
+            pictureTimer?.invalidate()
+            pictureTimer = nil
             if undoHeld {
                 undoManager?.enableUndoRegistration()
                 undoHeld = false
@@ -539,7 +806,7 @@ struct PDFInkView: UIViewRepresentable {
         }
 
         func drawing(forPage index: Int) -> PKDrawing? {
-            overlay(forPage: index)?.canvas.drawing ?? store.load(page: index)
+            overlay(forPage: index)?.canvas.drawing ?? storedDrawing(page: index)
         }
 
         func go(toPage index: Int) {
@@ -561,8 +828,20 @@ struct PDFInkView: UIViewRepresentable {
             let draw = ShapeGesture(target: self, action: #selector(drawShape(_:)))
             draw.minimumPressDuration = 0
             overlay.shapeSurface.addGestureRecognizer(draw)
+            overlay.shapeDrag = draw
+            let rub = ShapeGesture(target: self, action: #selector(rubHighlighter(_:)))
+            rub.minimumPressDuration = 0
+            overlay.shapeSurface.addGestureRecognizer(rub)
+            overlay.rubDrag = rub
+            overlay.watcher.onMove = { [weak self, weak overlay] from, to in
+                guard let self, let overlay else { return }
+                self.eraserMoved(from: from, to: to, in: overlay)
+            }
             configure(overlay)
-            if let saved = store.load(page: canvas.pageIndex) {
+            if let found, found.page == canvas.pageIndex {
+                overlay.highlight(found.rects)
+            }
+            if let saved = storedDrawing(page: canvas.pageIndex) {
                 canvas.drawing = saved
             } else if canvas.pageIndex == 0, ProcessInfo.processInfo.arguments.contains("-demoInk") {
                 canvas.drawing = Self.demoDrawing()
@@ -585,9 +864,8 @@ struct PDFInkView: UIViewRepresentable {
 
         func pdfView(_ pdfView: PDFView, willEndDisplayingOverlayView overlayView: UIView, for page: PDFPage) {
             guard let overlay = overlayView as? PageOverlay else { return }
-            if !retired {
-                store.save(overlay.canvas.drawing, page: overlay.canvas.pageIndex)
-            }
+            // (Its handwriting is in hand already: every change was noted when it was made.)
+            overlay.pagePicture.clear()
             overlays[page] = nil
         }
 
@@ -596,6 +874,19 @@ struct PDFInkView: UIViewRepresentable {
         func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
             // The window, and with it the undo history, may not have been there when the tool was chosen.
             holdUndoForMarks()
+        }
+
+        func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
+            toolUsed()
+        }
+
+        /// A tool has done its work. One that is set to be put down after use is handed back now.
+        private func toolUsed() {
+            guard choice.putsDownAfterUse else { return }
+            let tool = choice.tool
+            DispatchQueue.main.async { [weak self] in
+                self?.controller?.onToolUsed?(tool)
+            }
         }
 
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
@@ -618,43 +909,8 @@ struct PDFInkView: UIViewRepresentable {
                 }
                 return
             }
-            if choice.reworksPressure, strokes.count == canvas.strokeCount + 1, let stroke = strokes.last {
-                // The line just drawn is given as much thick-and-thin as the pressure setting asks for.
-                // PencilKit has no such setting of its own, so the line is reworked once it is done; the
-                // canvas is changed a moment later, as with the AI pen's strokes.
-                let reworked = Self.rework(stroke, around: choice.penLineWidth, by: CGFloat(choice.pressure))
-                let count = strokes.count
-                canvas.strokeCount = count
-                DispatchQueue.main.async { [weak self, weak canvas] in
-                    guard let self, let canvas, canvas.drawing.strokes.count == count else { return }
-                    var drawing = canvas.drawing
-                    drawing.strokes[count - 1] = reworked
-                    // The history already holds the stroke; this change to it is not a step of its own.
-                    self.undoManager?.disableUndoRegistration()
-                    canvas.drawing = drawing
-                    self.undoManager?.enableUndoRegistration()
-                }
-                return
-            }
             canvas.strokeCount = strokes.count
-            store.save(canvas.drawing, page: canvas.pageIndex)
-        }
-
-        /// The same line with its widths moved toward [base] or away from it: [amount] 0 gives one
-        /// width throughout, 1 leaves the line as it is, 2 doubles its swelling and thinning.
-        private static func rework(_ stroke: PKStroke, around base: CGFloat, by amount: CGFloat) -> PKStroke {
-            var points: [PKStrokePoint] = []
-            for point in stroke.path {
-                let width = max(0.3, base + (point.size.width - base) * amount)
-                let height = max(0.3, base + (point.size.height - base) * amount)
-                points.append(PKStrokePoint(
-                    location: point.location, timeOffset: point.timeOffset, size: CGSize(width: width, height: height),
-                    opacity: point.opacity, force: point.force, azimuth: point.azimuth, altitude: point.altitude,
-                    secondaryScale: point.secondaryScale
-                ))
-            }
-            let path = PKStrokePath(controlPoints: points, creationDate: stroke.path.creationDate)
-            return PKStroke(ink: stroke.ink, path: path, transform: stroke.transform, mask: stroke.mask)
+            inkChanged(canvas)
         }
 
         // MARK: shapes
@@ -693,6 +949,7 @@ struct PDFInkView: UIViewRepresentable {
                 let before = drawing
                 drawing.strokes.append(stroke)
                 setDrawing(drawing, on: overlay.canvas, undoingTo: before)
+                toolUsed()
             default:
                 overlay.shapePreview.path = nil
             }
@@ -705,6 +962,211 @@ struct PDFInkView: UIViewRepresentable {
                 me.setDrawing(old, on: canvas, undoingTo: new)
             }
             canvas.drawing = new
+            canvas.strokeCount = new.strokes.count
+            inkChanged(canvas)
+        }
+
+        func clearPage() {
+            guard let view = pdfView, let page = view.currentPage, let overlay = overlays[page] else { return }
+            let before = overlay.canvas.drawing
+            guard !before.strokes.isEmpty else { return }
+            setDrawing(PKDrawing(), on: overlay.canvas, undoingTo: before)
+        }
+
+        // MARK: the eraser
+
+        /// The eraser moved over a page, from one place to the next. A mark of the AI pen that it crosses
+        /// is taken off the page; its explanation stays in the list of questions.
+        private func eraserMoved(from: CGPoint, to: CGPoint, in overlay: PageOverlay) {
+            guard !retired, choice.tool == .eraser, choice.eraserTakesMarks else { return }
+            let page = overlay.canvas.pageIndex
+            // About what a pen's tip covers on screen, whatever the zoom.
+            let reach = max(3, 11 / max(pdfView?.scaleFactor ?? 1, 0.1))
+            for mark in marks where mark.page == page && Self.crosses(from, to, mark.points, within: reach) {
+                setMark(mark.id, hidden: true)
+            }
+        }
+
+        /// Takes a mark off the page or puts it back, in a way that can be undone and redone.
+        private func setMark(_ id: UUID, hidden: Bool) {
+            if hidden {
+                // Off the page at once, without waiting for the screen above to hand the marks down again.
+                marks.removeAll { $0.id == id }
+                for overlay in overlays.values {
+                    showMarks(in: overlay)
+                }
+                controller?.onHideMark?(id)
+            } else {
+                controller?.onShowMark?(id)
+            }
+            undoManager?.registerUndo(withTarget: self) { me in
+                me.setMark(id, hidden: !hidden)
+            }
+            DebugLog.write(hidden ? "eraser: a mark of the AI pen taken off the page" : "undo: a mark of the AI pen put back on the page")
+        }
+
+        /// Whether a line, given as points along it, comes within [reach] of the way from [a] to [b].
+        private static func crosses(_ a: CGPoint, _ b: CGPoint, _ line: [CGPoint], within reach: CGFloat) -> Bool {
+            let box = CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(a.x - b.x), height: abs(a.y - b.y))
+                .insetBy(dx: -reach, dy: -reach)
+            let dx = b.x - a.x, dy = b.y - a.y
+            let length = dx * dx + dy * dy
+            for point in line where box.contains(point) {
+                let along = length > 0 ? min(1, max(0, ((point.x - a.x) * dx + (point.y - a.y) * dy) / length)) : 0
+                if hypot(point.x - (a.x + along * dx), point.y - (a.y + along * dy)) <= reach { return true }
+            }
+            return false
+        }
+
+        /// The eraser that only takes highlighter: a highlighter line it touches goes whole, and nothing
+        /// else on the page is changed. One drag is one step of the undo history.
+        @objc private func rubHighlighter(_ gesture: ShapeGesture) {
+            guard let overlay = gesture.view?.superview as? PageOverlay else { return }
+            let canvas = overlay.canvas
+            let point = gesture.location(in: overlay)
+            let reach = CGFloat(choice.eraserWidth) / 2
+            switch gesture.state {
+            case .began, .changed:
+                if gesture.state == .began {
+                    rubbedFrom = canvas.drawing
+                    gesture.start = point
+                }
+                var drawing = canvas.drawing
+                let count = drawing.strokes.count
+                let from = gesture.start
+                drawing.strokes.removeAll { stroke in
+                    guard stroke.ink.inkType == .marker,
+                          stroke.renderBounds.insetBy(dx: -reach, dy: -reach).intersects(CGRect(x: min(from.x, point.x), y: min(from.y, point.y), width: abs(from.x - point.x), height: abs(from.y - point.y)).insetBy(dx: -1, dy: -1))
+                    else { return false }
+                    var line: [CGPoint] = []
+                    var width: CGFloat = 0
+                    for part in stroke.path.interpolatedPoints(by: .distance(4)) {
+                        line.append(part.location.applying(stroke.transform))
+                        width = max(width, part.size.width)
+                    }
+                    return Self.crosses(from, point, line, within: reach + width / 2)
+                }
+                if drawing.strokes.count != count {
+                    canvas.drawing = drawing
+                    canvas.strokeCount = drawing.strokes.count
+                    inkChanged(canvas)
+                }
+                gesture.start = point
+                // A ring shows how much the eraser covers.
+                overlay.shapePreview.path = UIBezierPath(ovalIn: CGRect(x: point.x - reach, y: point.y - reach, width: reach * 2, height: reach * 2)).cgPath
+                overlay.shapePreview.lineWidth = 1
+                overlay.shapePreview.strokeColor = UIColor.systemGray.cgColor
+            default:
+                overlay.shapePreview.path = nil
+                if let before = rubbedFrom, before.strokes.count != canvas.drawing.strokes.count {
+                    let after = canvas.drawing
+                    undoManager?.registerUndo(withTarget: self) { [weak canvas] me in
+                        guard let canvas else { return }
+                        me.setDrawing(before, on: canvas, undoingTo: after)
+                    }
+                    DebugLog.write("eraser: \(before.strokes.count - after.strokes.count) highlighter lines rubbed out, \(after.strokes.count) lines left on the page")
+                }
+                rubbedFrom = nil
+                toolUsed()
+            }
+        }
+
+        // MARK: the pages drawn sharp
+
+        /// No more pixels than this go into one picture of a page. A page shown whole at fitting zoom is
+        /// well under it; zoomed in far, only what is in view and some way round it is drawn.
+        private static let pictureLimit: CGFloat = 9_000_000
+        /// "-demoSoftPages" leaves the pages as PDFKit draws them, for the build server to compare against.
+        private static let drawsPages = !ProcessInfo.processInfo.arguments.contains("-demoSoftPages")
+
+        private func startPictures() {
+            guard Self.drawsPages, pictureTimer == nil else { return }
+            let timer = Timer(timeInterval: 0.12, repeats: true) { [weak self] _ in
+                self?.lookAtPictures()
+            }
+            // In the common modes, so that it also runs while a finger is scrolling.
+            RunLoop.main.add(timer, forMode: .common)
+            pictureTimer = timer
+        }
+
+        /// Several times a second: has every page in or near view a picture as fine as the zoom, of the
+        /// part that is in view? Where not, one is asked for.
+        private func lookAtPictures() {
+            guard let view = pdfView, view.window != nil else { return }
+            let scale = view.scaleFactor * view.traitCollection.displayScale
+            guard scale > 0 else { return }
+            // While the zoom is still changing nothing is drawn: it would be thrown away at once.
+            if abs(scale - scaleSeen) > 0.0005 * scale {
+                scaleSeen = scale
+                return
+            }
+            for (page, overlay) in overlays where overlay.window != nil {
+                refreshPicture(of: page, in: overlay, scale: scale, view: view)
+            }
+        }
+
+        private func refreshPicture(of page: PDFPage, in overlay: PageOverlay, scale: CGFloat, view: PDFView) {
+            let picture = overlay.pagePicture
+            let whole = picture.bounds
+            guard !picture.gaveUp, whole.width > 1, whole.height > 1 else { return }
+            let around = view.bounds.insetBy(dx: -view.bounds.width * 0.5, dy: -view.bounds.height * 0.6)
+            if picture.convert(around, from: view).intersection(whole).isEmpty {
+                // Out of view. Its picture is let go once the page is more than a screen and a half away.
+                let far = view.bounds.insetBy(dx: -view.bounds.width * 1.5, dy: -view.bounds.height * 1.5)
+                if picture.shown != nil, picture.convert(far, from: view).intersection(whole).isEmpty {
+                    picture.clear()
+                }
+                return
+            }
+            var want = whole
+            var need = whole
+            if whole.width * whole.height * scale * scale > Self.pictureLimit {
+                let seen = picture.convert(view.bounds, from: view).intersection(whole)
+                guard !seen.isEmpty else { return }
+                need = seen.insetBy(dx: -seen.width * 0.08, dy: -seen.height * 0.08).intersection(whole)
+                want = seen.insetBy(dx: -seen.width * 0.45, dy: -seen.height * 0.45).intersection(whole)
+                if want.width * want.height * scale * scale > Self.pictureLimit { want = need }
+            }
+            if let have = picture.asked ?? picture.shown, abs(have.scale - scale) < 0.002 * scale,
+               have.rect.insetBy(dx: -0.5, dy: -0.5).contains(need) {
+                return
+            }
+            // Whole pixels, so that the picture's pixels are the screen's.
+            let left = (want.minX * scale).rounded(.down) / scale, top = (want.minY * scale).rounded(.down) / scale
+            let right = (want.maxX * scale).rounded(.up) / scale, bottom = (want.maxY * scale).rounded(.up) / scale
+            let extent = PagePicture.Extent(rect: CGRect(x: left, y: top, width: right - left, height: bottom - top), scale: scale)
+            picture.asked = extent
+            let ticket = picture.ticket
+            let number = ticket.next()
+            let size = whole.size
+            let index = overlay.canvas.pageIndex
+            pictureQueue.async { [weak picture] in
+                // (A page scrolled past, or zoomed again, while this waited its turn is not drawn.)
+                guard ticket.current == number else { return }
+                let image = PagePicture.draw(page, size: size, extent: extent)
+                DispatchQueue.main.async {
+                    guard let picture, ticket.current == number else { return }
+                    if let image {
+                        picture.show(image, extent)
+                        DebugLog.write("page picture: page \(index) part \(extent.rect) at \(extent.scale) pixels a point, \(image.width) x \(image.height)")
+                    } else {
+                        picture.asked = nil
+                        picture.gaveUp = true
+                        DebugLog.write("page picture: page \(index) could not be drawn")
+                    }
+                }
+            }
+        }
+
+        /// Memory is short: the pictures of pages that are not in view are let go.
+        private func dropUnseenPictures() {
+            guard let view = pdfView else { return }
+            for overlay in overlays.values {
+                let picture = overlay.pagePicture
+                if picture.convert(view.bounds, from: view).intersection(picture.bounds).isEmpty {
+                    picture.clear()
+                }
+            }
         }
 
         // MARK: searching
@@ -725,8 +1187,19 @@ struct PDFInkView: UIViewRepresentable {
 
         func show(_ hit: SearchHit) {
             guard let view = pdfView else { return }
-            hit.selection.color = UIColor.systemYellow.withAlphaComponent(0.6)
-            view.highlightedSelections = [hit.selection]
+            // The words are marked on the overlay: PDFKit's own marking would lie under the page's picture.
+            var rects: [CGRect] = []
+            if let page = hit.selection.pages.first {
+                let crop = page.bounds(for: .cropBox)
+                for line in hit.selection.selectionsByLine() {
+                    let box = line.bounds(for: page)
+                    rects.append(CGRect(x: box.minX - crop.minX, y: crop.maxY - box.maxY, width: box.width, height: box.height))
+                }
+            }
+            found = (hit.page, rects)
+            for overlay in overlays.values {
+                overlay.highlight(overlay.canvas.pageIndex == hit.page ? rects : [])
+            }
             view.go(to: hit.selection)
         }
 
@@ -867,6 +1340,11 @@ struct PDFInkView: UIViewRepresentable {
                 drawing.strokes.append(stroke)
                 setDrawing(drawing, on: overlay.canvas, undoingTo: before)
             }
+        }
+
+        func demoErase(from: CGPoint, to: CGPoint) {
+            guard let view = pdfView, let page = view.currentPage, let overlay = overlays[page] else { return }
+            eraserMoved(from: from, to: to, in: overlay)
         }
 
         func demoZoom(_ factor: Double) {

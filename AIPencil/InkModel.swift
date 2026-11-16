@@ -49,10 +49,10 @@ enum PenKind: String, CaseIterable, Identifiable, Codable {
 
     var hint: String {
         switch self {
-        case .fountain: return "누르는 힘에 따라 굵기가 달라져요"
+        case .fountain: return "누르는 힘에 따라 쓰는 동안 굵기가 달라져요"
         case .pen: return "빠르게 그으면 끝이 가늘어져요"
-        case .ball: return "굵기가 늘 같아요"
-        case .pencil: return "기울이면 넓게 칠해져요"
+        case .ball: return "힘을 주어도 굵기가 늘 같아요"
+        case .pencil: return "누르면 진해지고, 기울이면 넓게 칠해져요"
         }
     }
 
@@ -112,13 +112,44 @@ struct InkChoice: Equatable, Codable {
     var penColor: UInt32 = 0x1C1C1F
     /// The pen's line width in page points.
     var penWidth = 2.6
-    /// How much of the pen's own thick-and-thin is kept: 0 a line of one width, 1 as PencilKit draws
-    /// it, 2 twice as marked.
-    var pressure = 1.0
     var highlighterColor: UInt32 = 0xFFD60A
     var highlighterWidth = 14.0
     var eraserKind = EraserKind.stroke
+    /// How wide the eraser that rubs out part of a line is, in page points.
+    var eraserWidth = 16.0
+    /// The eraser leaves everything but highlighter alone.
+    var eraserHighlighterOnly = false
+    /// The eraser takes the marks of the AI pen off the page too. Their explanations are kept.
+    var eraserTakesMarks = true
     var shapeKind = ShapeKind.line
+    /// The tools that are put down by themselves once they have been used, for the one held before.
+    var eraserAuto = false
+    var highlighterAuto = false
+    var shapeAuto = false
+
+    init() {}
+
+    /// Settings saved by an earlier version lack the newer ones; those keep their defaults.
+    init(from decoder: Decoder) throws {
+        let saved = try decoder.container(keyedBy: CodingKeys.self)
+        func read<T: Decodable>(_ key: CodingKeys, _ fallback: T) -> T {
+            (try? saved.decodeIfPresent(T.self, forKey: key)) ?? fallback
+        }
+        tool = read(.tool, tool)
+        penKind = read(.penKind, penKind)
+        penColor = read(.penColor, penColor)
+        penWidth = read(.penWidth, penWidth)
+        highlighterColor = read(.highlighterColor, highlighterColor)
+        highlighterWidth = read(.highlighterWidth, highlighterWidth)
+        eraserKind = read(.eraserKind, eraserKind)
+        eraserWidth = read(.eraserWidth, eraserWidth)
+        eraserHighlighterOnly = read(.eraserHighlighterOnly, eraserHighlighterOnly)
+        eraserTakesMarks = read(.eraserTakesMarks, eraserTakesMarks)
+        shapeKind = read(.shapeKind, shapeKind)
+        eraserAuto = read(.eraserAuto, eraserAuto)
+        highlighterAuto = read(.highlighterAuto, highlighterAuto)
+        shapeAuto = read(.shapeAuto, shapeAuto)
+    }
 
     /// The colours offered for the pen: the first five are on the tool bar itself.
     static let penPalette: [UInt32] = [
@@ -133,6 +164,7 @@ struct InkChoice: Equatable, Codable {
     ]
     static let penWidths: ClosedRange<Double> = 0.6...9
     static let highlighterWidths: ClosedRange<Double> = 6...30
+    static let eraserWidths: ClosedRange<Double> = 6...48
     /// The colour of the AI pen and of the marks it leaves on the page.
     static let markColor = UIColor(red: 0x6D / 255.0, green: 0x5B / 255.0, blue: 0xF6 / 255.0, alpha: 1)
 
@@ -159,9 +191,19 @@ struct InkChoice: Equatable, Codable {
         return min(max(CGFloat(penWidth), allowed.lowerBound), allowed.upperBound)
     }
 
-    /// Whether lines drawn with the pen are to be reworked for the pressure setting once they are done.
-    var reworksPressure: Bool {
-        tool == .pen && penKind != .ball && abs(pressure - 1) > 0.02
+    /// Whether the tool in hand is put down by itself once it has been used.
+    var putsDownAfterUse: Bool {
+        switch tool {
+        case .eraser: return eraserAuto
+        case .highlighter: return highlighterAuto
+        case .shape: return shapeAuto
+        default: return false
+        }
+    }
+
+    /// The eraser that only takes highlighter is the app's own: PencilKit's rubs out whatever it meets.
+    var rubsHighlighterOnly: Bool {
+        tool == .eraser && eraserHighlighterOnly
     }
 
     /// The PencilKit tool this choice stands for. The formula and shape tools do not write through
@@ -173,7 +215,7 @@ struct InkChoice: Equatable, Codable {
         case .highlighter:
             return PKInkingTool(.marker, color: highlighterUIColor, width: CGFloat(highlighterWidth))
         case .eraser:
-            return eraserKind == .stroke ? PKEraserTool(.vector) : PKEraserTool(.bitmap, width: 16)
+            return eraserKind == .stroke ? PKEraserTool(.vector) : PKEraserTool(.bitmap, width: CGFloat(eraserWidth))
         case .ai:
             return PKInkingTool(.monoline, color: Self.markColor, width: 2.6)
         case .lasso:

@@ -1,0 +1,29 @@
+# XcodeGen spec for the touch tests: the app's own spec, plus a UI test bundle and a scheme that runs it.
+# Kept apart from project.yml so that nothing about the tests can get in the way of building the app:
+#   xcodegen generate --spec uitests.yml      (makes AIPencilTests.xcodeproj)
+include:
+  - project.yml
+name: AIPencilTests
+targets:
+  AIPencilUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - AIPencilUITests
+    dependencies:
+      - target: AIPencil
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.aipencil.ios.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: AIPencil
+        TARGETED_DEVICE_FAMILY: "2"
+schemes:
+  Touch:
+    build:
+      targets:
+        AIPencil: all
+        AIPencilUITests: [test]
+    test:
+      targets:
+        - AIPencilUITests

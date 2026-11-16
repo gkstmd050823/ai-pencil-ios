@@ -321,7 +321,10 @@ struct PageThumbnail: View {
         }
         .task(id: index) {
             guard picture == nil, let page = document?.page(at: index) else { return }
-            picture = page.thumbnail(of: CGSize(width: 340, height: 480), for: .cropBox)
+            // Drawn off the main thread: a grid of pages scrolling by asks for many of these at once.
+            picture = await Task.detached(priority: .userInitiated) {
+                page.thumbnail(of: CGSize(width: 340, height: 480), for: .cropBox)
+            }.value
         }
     }
 }

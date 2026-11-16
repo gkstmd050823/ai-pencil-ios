@@ -20,10 +20,12 @@ struct LibraryView: View {
         }
         // A PDF handed over by another app ("open in", share sheet).
         .onOpenURL { url in
-            do {
-                path.append(try library.importPDF(from: url))
-            } catch {
-                errorText = error.localizedDescription
+            Task { @MainActor in
+                do {
+                    path.append(try await library.bringIn(url))
+                } catch {
+                    errorText = error.localizedDescription
+                }
             }
         }
         .alert("하지 못했어요", isPresented: Binding(get: { errorText != nil }, set: { if !$0 { errorText = nil } })) {
@@ -105,6 +107,8 @@ private struct Shelf: View {
     @State private var newName = ""
     @State private var choosingPaper = false
     @State private var ranDemo = false
+    /// How many files are still being copied in.
+    @State private var bringingIn = 0
 
     private let columns = [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 22)]
 
@@ -170,20 +174,39 @@ private struct Shelf: View {
         .fileImporter(isPresented: $importing, allowedContentTypes: [.pdf], allowsMultipleSelection: true) { result in
             switch result {
             case .success(let urls):
-                var last: Doc?
-                for url in urls {
-                    do {
-                        last = try library.importPDF(from: url, into: folder?.id)
-                    } catch {
-                        errorText = error.localizedDescription
+                // Copied in off the main thread: a large file must not hold the shelf still.
+                let place = folder?.id
+                bringingIn += urls.count
+                Task { @MainActor in
+                    var last: Doc?
+                    for url in urls {
+                        do {
+                            last = try await library.bringIn(url, into: place)
+                        } catch {
+                            errorText = error.localizedDescription
+                        }
+                        bringingIn -= 1
                     }
-                }
-                // One file opens straight away; several stay on the shelf.
-                if urls.count == 1, let doc = last {
-                    path.append(doc)
+                    // One file opens straight away; several stay on the shelf.
+                    if urls.count == 1, let doc = last {
+                        path.append(doc)
+                    }
                 }
             case .failure(let error):
                 errorText = error.localizedDescription
+            }
+        }
+        .overlay {
+            if bringingIn > 0 {
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text(bringingIn > 1 ? "PDF \(bringingIn)개를 가져오는 중" : "PDF를 가져오는 중")
+                        .font(.subheadline.weight(.medium))
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 12)
+                .background(.regularMaterial, in: Capsule())
+                .shadow(color: .black.opacity(0.15), radius: 10, y: 3)
             }
         }
         .sheet(isPresented: $showingSettings) {
@@ -510,7 +533,7 @@ private struct DocCard: View {
                 .lineLimit(1)
         }
         .task(id: doc.id) {
-            cover = library.cover(for: doc, width: 360)
+            cover = await library.cover(for: doc, width: 440)
         }
     }
 }
