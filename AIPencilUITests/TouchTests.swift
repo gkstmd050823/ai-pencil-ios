@@ -292,11 +292,12 @@ final class TouchTests: XCTestCase {
         }
         shot("50-words-translated")
         // A touch elsewhere on the page lets go of the words.
-        place(300, 620).tap()
+        // (Up beside the heading: the translation's card lies over the foot of the page.)
+        place(435, 90).tap()
         sleep(1)
         shot("50-words-let-go")
         // A finger held on bare paper picks nothing.
-        place(300, 560).press(forDuration: 0.9)
+        place(435, 90).press(forDuration: 0.9)
         sleep(1)
         shot("50-bare-paper-held")
 
