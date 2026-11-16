@@ -84,10 +84,14 @@ final class Ticket {
 }
 
 /// The page itself, drawn by the app with exactly as many pixels as the screen shows it with, and laid
-/// over PDFKit's own picture of it. PDFKit's picture comes out softer than the screen could show (its
-/// text had blurred edges in the build server's screenshots, at fitting zoom and zoomed in alike), and
-/// there is no setting for that; so the page is drawn once more here, sharp. PDFKit's picture is what
-/// shows until this one is ready, and wherever this one does not reach.
+/// over PDFKit's own picture of it. PDFKit draws a page in tiles, when it gets to them and as fine as it
+/// sees fit, and has no setting for either; this picture is drawn in one piece, off the main thread, as
+/// soon as the page comes near the screen. PDFKit's picture is what shows until this one is ready, and
+/// wherever this one does not reach.
+///
+/// In the build server's simulator the two pictures are the same to within a grey level: PDFKit's is as
+/// sharp there as this one. It is kept for an iPad in the hand, where pages were reported to look
+/// coarser than in other apps, and can be switched off in the app's settings ("sharpPages").
 ///
 /// The view is as large as the page is shown and turned back against the overlay's turning, so a point in
 /// it is a point of the page as the reader sees it, measured from its top-left corner.
@@ -1076,11 +1080,15 @@ struct PDFInkView: UIViewRepresentable {
         /// No more pixels than this go into one picture of a page. A page shown whole at fitting zoom is
         /// well under it; zoomed in far, only what is in view and some way round it is drawn.
         private static let pictureLimit: CGFloat = 9_000_000
-        /// "-demoSoftPages" leaves the pages as PDFKit draws them, for the build server to compare against.
-        private static let drawsPages = !ProcessInfo.processInfo.arguments.contains("-demoSoftPages")
+        /// The setting that has the app draw the pages itself. On unless switched off ("-sharpPages NO"
+        /// leaves the pages as PDFKit draws them, for the build server to compare against).
+        private static var drawsPages: Bool {
+            let defaults = UserDefaults.standard
+            return defaults.object(forKey: "sharpPages") == nil || defaults.bool(forKey: "sharpPages")
+        }
 
         private func startPictures() {
-            guard Self.drawsPages, pictureTimer == nil else { return }
+            guard pictureTimer == nil else { return }
             let timer = Timer(timeInterval: 0.12, repeats: true) { [weak self] _ in
                 self?.lookAtPictures()
             }
@@ -1093,6 +1101,13 @@ struct PDFInkView: UIViewRepresentable {
         /// part that is in view? Where not, one is asked for.
         private func lookAtPictures() {
             guard let view = pdfView, view.window != nil else { return }
+            guard Self.drawsPages else {
+                // Switched off: whatever is on show is taken down, and PDFKit's pages show again.
+                for overlay in overlays.values where overlay.pagePicture.shown != nil || overlay.pagePicture.asked != nil {
+                    overlay.pagePicture.clear()
+                }
+                return
+            }
             let scale = view.scaleFactor * view.traitCollection.displayScale
             guard scale > 0 else { return }
             // While the zoom is still changing nothing is drawn: it would be thrown away at once.
@@ -1350,6 +1365,7 @@ struct PDFInkView: UIViewRepresentable {
         func demoZoom(_ factor: Double) {
             guard let view = pdfView else { return }
             view.scaleFactor = view.scaleFactorForSizeToFit * CGFloat(factor)
+            DebugLog.write("zoom: asked for \(factor) times fitting, at \(view.scaleFactor) now; the view allows \(view.minScaleFactor) to \(view.maxScaleFactor)")
         }
 
         func demoMark(center: CGPoint, radius: CGSize) {
