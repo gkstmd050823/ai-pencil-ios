@@ -330,6 +330,7 @@ jobs:
             export-note.pdf
             export-pages.pdf
             export-packed-pages.pdf
+            export-added.pdf
           if-no-files-found: ignore
           retention-days: 14
 

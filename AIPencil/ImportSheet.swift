@@ -52,13 +52,8 @@ struct ImportSheet: View {
                         .textCase(nil)
                 }
                 if adding {
-                    Section("넣을 문서") {
-                        ForEach(open) { doc in
-                            place(doc.title, symbol: "doc.text", detail: "\(doc.pageCount)쪽", chosen: doc.id == target) {
-                                target = doc.id
-                            }
-                        }
-                    }
+                    // (Where in the document comes before which document: with many open, the list is long,
+                    // and the one on show, chosen to begin with, is nearly always the one meant.)
                     Section {
                         if let page = pageOnShow {
                             Picker("넣을 자리", selection: $atEnd) {
@@ -74,6 +69,13 @@ struct ImportSheet: View {
                         Text("넣을 자리")
                     } footer: {
                         Text("뒤쪽에 써 둔 필기와 AI 표시, 책갈피는 제 쪽을 따라 함께 밀려요.")
+                    }
+                    Section("넣을 문서") {
+                        ForEach(open) { doc in
+                            place(doc.title, symbol: "doc.text", detail: "\(doc.pageCount)쪽", chosen: doc.id == target) {
+                                target = doc.id
+                            }
+                        }
                     }
                 } else {
                     Section("넣을 폴더") {
@@ -118,6 +120,9 @@ struct ImportSheet: View {
         }
     }
 
+    private static let ink = Color(uiColor: .label)
+    private static let faint = Color(uiColor: .secondaryLabel)
+
     /// One of the two things that can be done with the files.
     private func mode(_ value: Bool, _ title: String, _ detail: String) -> some View {
         Button {
@@ -126,14 +131,15 @@ struct ImportSheet: View {
             HStack(spacing: 12) {
                 Image(systemName: adding == value ? "largecircle.fill.circle" : "circle")
                     .font(.title3)
-                    .foregroundStyle(adding == value ? Color.accentColor : Color.secondary)
+                    .foregroundStyle(adding == value ? Color.accentColor : Self.faint)
+                // (In ink: inside a button, "primary" and "secondary" are shades of the button's own colour.)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
                         .font(.body.weight(.semibold))
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(Self.ink)
                     Text(detail)
                         .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Self.faint)
                 }
             }
             .padding(.vertical, 2)
@@ -145,16 +151,16 @@ struct ImportSheet: View {
         Button(action: pick) {
             HStack(spacing: 12) {
                 Image(systemName: symbol)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Self.faint)
                     .frame(width: 24)
                 Text(name)
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(Self.ink)
                     .lineLimit(1)
                 Spacer()
                 if let detail {
                     Text(detail)
                         .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Self.faint)
                 }
                 if chosen {
                     Image(systemName: "checkmark")
