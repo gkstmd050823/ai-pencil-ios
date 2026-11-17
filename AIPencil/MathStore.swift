@@ -46,12 +46,12 @@ struct MathStore {
     }
 
     /// After a page was inserted at [index]: formulas on that page and later ones move one page later.
-    func shiftPages(from index: Int) {
+    func shiftPages(from index: Int, by count: Int = 1) {
         let items = load()
         guard !items.isEmpty else { return }
         save(items.map { item in
             var moved = item
-            if moved.page >= index { moved.page += 1 }
+            if moved.page >= index { moved.page += count }
             return moved
         })
     }

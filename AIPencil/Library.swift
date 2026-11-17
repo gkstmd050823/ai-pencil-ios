@@ -22,12 +22,34 @@ struct Folder: Identifiable, Codable, Hashable {
     var createdAt = Date()
 }
 
+/// Files that have come in (picked, or handed over by another app) and wait to be told where to go.
+struct IncomingFiles: Identifiable {
+    let id = UUID()
+    var urls: [URL]
+    /// The folder the shelf was showing, offered first.
+    var folder: UUID?
+    /// Asked for from inside a document, and so most likely meant for it.
+    var forDocument = false
+}
+
+/// Pages to be put into the document on show. Its own reading screen does it: it has to put away what
+/// it holds of the document first.
+struct PageAddition: Equatable {
+    let id = UUID()
+    var doc: UUID
+    var urls: [URL]
+    /// After the last page when true; after the page being read otherwise.
+    var atEnd: Bool
+}
+
 enum ImportError: LocalizedError {
     case unreadable
     case unwritable
+    case cannotAdd
 
     var errorDescription: String? {
         switch self {
+        case .cannotAdd: return "쪽을 넣지 못했어요. 넣으려는 PDF나 이 문서가 암호로 잠겨 있거나 손상됐을 수 있어요. 새 문서로 가져와 보세요."
         case .unreadable: return "이 파일은 열 수 없어요. 손상됐거나 암호가 걸린 PDF일 수 있어요."
         case .unwritable: return "저장하지 못했어요. 아이패드에 남은 공간이 있는지 확인해 주세요."
         }
@@ -42,6 +64,31 @@ final class Library: ObservableObject {
     @Published private(set) var folders: [Folder] = []
     /// The documents open as tabs above the pages, in the order they were opened.
     @Published private(set) var tabs: [UUID] = []
+    /// Files waiting to be told where to go; while there are some, the question is on screen.
+    @Published var incoming: IncomingFiles?
+    /// Pages for the document on show, for its reading screen to put in.
+    @Published var pagesToAdd: PageAddition?
+    /// The document on show in the reading screen, and how to ask it which page is being read.
+    @Published var showing: UUID?
+    var pageOnShow: (() -> Int?)?
+    /// The folder the shelf is showing, where a file handed over by another app is offered to go.
+    var shelfFolder: UUID?
+    /// What is being done that the screen has to wait for ("쪽을 넣는 중"); nil when nothing is.
+    @Published var working: String?
+    /// The page a document is to open at the next time it is opened: where pages were just put into it.
+    private static var startPages: [UUID: Int] = [:]
+
+    static func openNext(_ id: UUID, atPage page: Int) {
+        startPages[id] = page
+    }
+
+    static func startPage(for id: UUID) -> Int? {
+        startPages[id]
+    }
+
+    static func clearStartPage(for id: UUID) {
+        startPages[id] = nil
+    }
 
     private let root: URL
     /// The covers already read or drawn since the app started.
@@ -276,6 +323,56 @@ final class Library: ObservableObject {
             docs[at].pageCount = before + 1
             save()
         }
+    }
+
+    /// Puts the pages of the PDFs at [sources] into [doc] after its page [index] (as shown, counted from
+    /// zero), one file after another, and says how many pages went in and how many files could not be
+    /// read. Everything written on later pages moves along with them. Nothing of the document may be open
+    /// meanwhile: a reading screen puts what it holds away first and opens the document afresh after.
+    ///
+    /// Unlike a blank page, these pages go into the PDF itself (they are copied in as they are, see
+    /// [PDFCopy]); the blank pages listed beside it are renumbered to stand where they stood.
+    @MainActor
+    func insertPages(from sources: [URL], into doc: Doc, after index: Int) async throws -> (added: Int, failed: Int) {
+        let url = pdfURL(for: doc.id)
+        let directory = folder(for: doc.id)
+        let result = await Task.detached(priority: .userInitiated) { () -> (added: Int, failed: Int) in
+            var at = index
+            var added = 0
+            var failed = 0
+            for source in sources {
+                // Files picked from the Files app are only readable between these two calls.
+                let scoped = source.startAccessingSecurityScopedResource()
+                defer { if scoped { source.stopAccessingSecurityScopedResource() } }
+                guard let own = PDFDocument(url: url)?.pageCount, own > 0 else {
+                    failed += 1
+                    continue
+                }
+                let list = DocFile.addedPages(of: url)
+                let shown = own + list.count
+                let place = min(max(at, 0), shown - 1)
+                let before = DocFile.ownPages(through: place, added: list, ownCount: own)
+                guard let count = PDFCopy.insert(source, into: url, afterPages: before) else {
+                    failed += 1
+                    continue
+                }
+                DocFile.replaceAdded(DocFile.relisted(list, ownCount: own, after: place, by: count), of: url)
+                DrawingStore(folder: directory).shiftPages(from: place + 1, pageCount: shown, by: count)
+                MathStore(folder: directory).shiftPages(from: place + 1, by: count)
+                BookmarkStore(folder: directory).shiftPages(from: place + 1, by: count)
+                QuestionStore(folder: directory).shiftPages(from: place + 1, by: count)
+                DebugLog.write("pages: \(count) put in after page \(place + 1) of \(shown)")
+                at = place + count
+                added += count
+            }
+            return (added, failed)
+        }.value
+        if result.added > 0, let at = docs.firstIndex(where: { $0.id == doc.id }) {
+            docs[at].pageCount += result.added
+            save()
+        }
+        guard result.added > 0 else { throw ImportError.cannotAdd }
+        return result
     }
 
     func rename(_ doc: Doc, to title: String) {

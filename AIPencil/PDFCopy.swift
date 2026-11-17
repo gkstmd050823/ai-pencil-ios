@@ -38,12 +38,18 @@ enum PDFCopy {
         var pages: [Int]?
     }
 
-    static func join(_ parts: [Part]) throws -> Data {
+    /// With [secondAfter] there are two parts, and the pages of the second go in after that many pages of
+    /// the first, which is a document that pages are being put into: its table of contents is kept too,
+    /// with the places it names.
+    static func join(_ parts: [Part], secondAfter: Int? = nil) throws -> Data {
         var out: [UInt8] = Array("%PDF-1.7\n%".utf8) + [0xE2, 0xE3, 0xCF, 0xD3, 0x0A]
         // Object 1 is the catalogue and 2 the list of pages; both are written last.
         var offsets: [Int: Int] = [:]
         var next = 3
-        var kids: [PDFValue] = []
+        // The pages of each part, in their order.
+        var groups: [[PDFValue]] = []
+        // What the catalogue has besides the pages: the first part's table of contents, when it is kept.
+        var extras = PDFDict()
 
         func begin(_ number: Int) {
             offsets[number] = out.count
@@ -53,7 +59,8 @@ enum PDFCopy {
             out += Array("\nendobj\n".utf8)
         }
 
-        for part in parts {
+        for (order, part) in parts.enumerated() {
+            var kids: [PDFValue] = []
             try part.data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
                 let bytes = raw.bindMemory(to: UInt8.self)
                 let reader = try PDFReader(bytes)
@@ -134,6 +141,17 @@ enum PDFCopy {
                     PDFAppend.write(.dict(made), into: &out)
                     end()
                 }
+                if secondAfter != nil, order == 0, let root = try reader.resolve(reader.trailer["Root"])?.dict {
+                    // The table of contents points at pages, all of which have their new numbers by now;
+                    // what it points at by name is listed in one of two other places.
+                    if let outlines = root["Outlines"] { extras["Outlines"] = copied(outlines) }
+                    if let places = root["Dests"] { extras["Dests"] = copied(places) }
+                    if let names = try reader.resolve(root["Names"])?.dict, let places = names["Dests"] {
+                        var kept = PDFDict()
+                        kept["Dests"] = copied(places)
+                        extras["Names"] = .dict(kept)
+                    }
+                }
                 var at = 0
                 while at < waiting.count {
                     let (old, new) = waiting[at]
@@ -163,6 +181,12 @@ enum PDFCopy {
                     if next > 4_000_000 { throw PDFAppendError("too many objects") }
                 }
             }
+            groups.append(kids)
+        }
+        var kids = groups.flatMap { $0 }
+        if let after = secondAfter, groups.count == 2 {
+            let cut = min(max(after, 0), groups[0].count)
+            kids = Array(groups[0][..<cut]) + groups[1] + Array(groups[0][cut...])
         }
         guard !kids.isEmpty else { throw PDFAppendError("no pages to copy") }
 
@@ -176,6 +200,9 @@ enum PDFCopy {
         var catalogue = PDFDict()
         catalogue["Type"] = .name("Catalog")
         catalogue["Pages"] = .ref(2, 0)
+        for key in extras.keys {
+            catalogue[key] = extras[key]
+        }
         begin(1)
         PDFAppend.write(.dict(catalogue), into: &out)
         end()
@@ -205,6 +232,40 @@ enum PDFCopy {
             }
         }
         return made.pageCount > 0 ? made.dataRepresentation() : nil
+    }
+
+    /// Puts every page of [addition] into the file at [base], after its first [count] pages, and says how
+    /// many pages went in; nil when it could not be done, and the file is then as it was.
+    ///
+    /// The file's own pages are copied as they are, or not at all: there is no falling back on PDFKit for
+    /// them, which would write them anew and could lose what their letters are. A file whose pages cannot
+    /// be copied as they are (an encrypted one) cannot have pages put into it. The pages that come in are
+    /// another matter: when the file they come from cannot be read here but PDFKit can read it, PDFKit
+    /// writes that file anew first and its pages are taken from that.
+    static func insert(_ addition: URL, into base: URL, afterPages count: Int) -> Int? {
+        guard let own = try? Data(contentsOf: base, options: .mappedIfSafe),
+              let before = PDFDocument(data: own)?.pageCount, before > 0,
+              let more = try? Data(contentsOf: addition, options: .mappedIfSafe) else { return nil }
+        var made: Data?
+        do {
+            made = try join([Part(data: own, pages: nil), Part(data: more, pages: nil)], secondAfter: count)
+        } catch {
+            DebugLog.write("copy: could not put the pages in as they are (\(error))")
+            if let other = PDFDocument(data: more), !other.isLocked, let anew = other.dataRepresentation() {
+                made = try? join([Part(data: own, pages: nil), Part(data: anew, pages: nil)], secondAfter: count)
+            }
+        }
+        guard let made, let after = PDFDocument(data: made)?.pageCount, after > before else { return nil }
+        // Written beside the file and then put in its place, so that the file is never half written.
+        let beside = base.deletingLastPathComponent().appendingPathComponent("document.new.pdf")
+        do {
+            try made.write(to: beside, options: .atomic)
+            _ = try FileManager.default.replaceItemAt(base, withItemAt: beside)
+            return after - before
+        } catch {
+            try? FileManager.default.removeItem(at: beside)
+            return nil
+        }
     }
 
     /// Pages of files on disk put together into one file at [target]. False when it could not be done.

@@ -1,5 +1,6 @@
 import PDFKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The formula being written: a new one, or one from the page being edited.
 struct MathDraft: Identifiable {
@@ -52,8 +53,11 @@ struct ReaderView: View {
     /// Changed to have the page view built afresh: after the document's pages were renumbered, or when the
     /// paper changes between light and dark.
     @State private var reloadToken = UUID()
-    /// The build server can ask for a page to start on ("-demoPage 2"); otherwise this is the first page.
-    @State private var startPage = max(0, UserDefaults.standard.integer(forKey: "demoPage"))
+    /// The page to start on: where pages were just put into the document, or the page the build server
+    /// asked for ("-demoPage 2"); otherwise the first page.
+    @State private var startPage: Int
+    /// Picking PDFs whose pages are to go into this document.
+    @State private var pickingPages = false
     /// The paper as the page view was built with; nil until it has been rebuilt once.
     @State private var paperDark: Bool?
     @State private var bookmarks: [Int] = []
@@ -67,6 +71,11 @@ struct ReaderView: View {
     @State private var exported: ExportedFile?
     @State private var dragStart: Double?
     @State private var ready = false
+
+    init(doc: Doc) {
+        self.doc = doc
+        _startPage = State(initialValue: Library.startPage(for: doc.id) ?? max(0, UserDefaults.standard.integer(forKey: "demoPage")))
+    }
 
     private var folder: URL { library.folder(for: doc.id) }
     private var mathStore: MathStore { MathStore(folder: folder) }
@@ -214,6 +223,28 @@ struct ReaderView: View {
         }
         .onDisappear {
             InkChoice.saveWaiting()
+            if library.showing == doc.id {
+                library.showing = nil
+                library.pageOnShow = nil
+            }
+        }
+        .fileImporter(isPresented: $pickingPages, allowedContentTypes: [.pdf], allowsMultipleSelection: true) { result in
+            switch result {
+            case .success(let urls):
+                guard !urls.isEmpty else { return }
+                // (A moment later: the file picker is still on its way out.)
+                let place = doc.folder
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    library.incoming = IncomingFiles(urls: urls, folder: place, forDocument: true)
+                }
+            case .failure(let error):
+                errorText = error.localizedDescription
+            }
+        }
+        .onChange(of: library.pagesToAdd) {
+            guard let wanted = library.pagesToAdd, wanted.doc == doc.id else { return }
+            library.pagesToAdd = nil
+            addPages(from: wanted.urls, atEnd: wanted.atEnd)
         }
         .onChange(of: bookmarks) {
             BookmarkStore(folder: folder).save(bookmarks)
@@ -252,6 +283,11 @@ struct ReaderView: View {
                 }
             } label: {
                 Label("이 쪽 뒤에 쪽 추가", systemImage: "doc.badge.plus")
+            }
+            Button {
+                pickingPages = true
+            } label: {
+                Label("PDF 가져오기", systemImage: "arrow.down.doc")
             }
             Button {
                 export(toDocuments: false)
@@ -496,6 +532,10 @@ struct ReaderView: View {
 
     /// Done once, when the document is first shown: the page view's requests are wired to the session.
     private func setUp() {
+        // (Each time the screen comes on show, not once: this is the document that pages picked now go into.)
+        library.showing = doc.id
+        library.pageOnShow = { [weak controller] in controller?.currentPageIndex }
+        Library.clearStartPage(for: doc.id)
         guard !ready else { return }
         ready = true
         let session = self.session
@@ -580,6 +620,34 @@ struct ReaderView: View {
         reloadToken = UUID()
     }
 
+    /// Puts the pages of other PDFs into this document, after the page being read or after the last one,
+    /// and shows the first of them.
+    private func addPages(from urls: [URL], atEnd: Bool) {
+        guard library.working == nil else { return }
+        let count = max(controller.pageCount, doc.pageCount, 1)
+        let index = atEnd ? count - 1 : min(max(controller.currentPageIndex ?? 0, 0), count - 1)
+        Diagnostics.shared.step("putting pages in")
+        session.close()
+        // Everything on disk first, and nothing more written by the old page view: its page numbers are about to be wrong.
+        controller.saveAndRetire()
+        library.working = "쪽을 넣는 중"
+        Task { @MainActor in
+            do {
+                let result = try await library.insertPages(from: urls, into: doc, after: index)
+                startPage = index + 1
+                if result.failed > 0 { errorText = "\(result.failed)개 파일은 넣지 못했어요." }
+            } catch {
+                errorText = error.localizedDescription
+                startPage = index
+            }
+            library.working = nil
+            // The questions' and bookmarks' page numbers changed on disk along with everything else.
+            session.attach(title: doc.title, pdfURL: library.pdfURL(for: doc.id), folder: folder, controller: controller)
+            bookmarks = BookmarkStore(folder: folder).load()
+            reloadToken = UUID()
+        }
+    }
+
     /// Makes a copy of the document with the handwriting drawn in and offers to send it somewhere.
     /// For the build server the copy is put in the app's Documents folder instead.
     private func export(toDocuments: Bool, pages: [Int]? = nil) {
@@ -623,6 +691,11 @@ struct ReaderView: View {
         }
         if arguments.contains("-demoMath") {
             later(2) { mathDraft = MathDraft(preset: "\\frac{a}{b} = \\sqrt{x^2 + 1}", auto: true) }
+        }
+        // ("-demoAddPages name.pdf": that file of the app's Documents folder, put in after the page on show.)
+        if let name = defaults.string(forKey: "demoAddPages") {
+            let file = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(name)
+            later(2) { addPages(from: [file], atEnd: false) }
         }
         if arguments.contains("-demoAddPage") {
             later(2) { addPage(PaperKind(rawValue: defaults.string(forKey: "demoPaper") ?? "") ?? .blank) }

@@ -18,17 +18,35 @@ struct LibraryView: View {
                     ReaderHost(first: doc)
                 }
         }
-        // A PDF handed over by another app ("open in", share sheet): it is copied in and opened at once,
-        // whatever was on screen.
+        // A PDF handed over by another app ("open in", share sheet): asked about like one that was picked,
+        // whatever is on screen.
         .onOpenURL { url in
             Diagnostics.shared.step("handed a file")
-            Task { @MainActor in
-                do {
-                    let doc = try await library.bringIn(url)
-                    path = NavigationPath()
-                    path.append(doc)
-                } catch {
-                    errorText = error.localizedDescription
+            library.incoming = IncomingFiles(urls: [url], folder: library.shelfFolder)
+        }
+        .sheet(item: $library.incoming) { files in
+            ImportSheet(files: files) { place in
+                bringIn(files.urls, into: place)
+            } onAdd: { doc, atEnd in
+                addPages(files.urls, to: doc, atEnd: atEnd)
+            }
+        }
+        // While files are copied or pages put in, nothing else is to be touched: a page written on meanwhile
+        // would be written on a document that is about to be opened afresh.
+        .overlay {
+            if let working = library.working {
+                ZStack {
+                    Color.black.opacity(0.12)
+                        .ignoresSafeArea()
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text(working)
+                            .font(.subheadline.weight(.medium))
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 12)
+                    .background(.regularMaterial, in: Capsule())
+                    .shadow(color: .black.opacity(0.15), radius: 10, y: 3)
                 }
             }
         }
@@ -40,6 +58,56 @@ struct LibraryView: View {
         .onAppear(perform: runDemoIfAsked)
     }
 
+    /// Each file becomes a document in [place]. One file opens straight away; several stay on the shelf.
+    private func bringIn(_ urls: [URL], into place: UUID?) {
+        guard !urls.isEmpty, library.working == nil else { return }
+        library.working = urls.count > 1 ? "PDF \(urls.count)개를 준비하는 중" : "PDF를 준비하는 중"
+        let reading = library.showing != nil
+        Task { @MainActor in
+            var last: Doc?
+            for url in urls {
+                do {
+                    last = try await library.bringIn(url, into: place)
+                } catch {
+                    errorText = error.localizedDescription
+                }
+            }
+            library.working = nil
+            if urls.count == 1, let doc = last {
+                // (In place of a document that is on show; on top of the shelf otherwise, folder and all.)
+                if reading { path = NavigationPath() }
+                path.append(doc)
+            }
+        }
+    }
+
+    /// The files' pages go into a document that is open. The one on show does it itself, having put its
+    /// own things away; any other has nothing open, is added to here, and is then shown.
+    private func addPages(_ urls: [URL], to doc: Doc, atEnd: Bool) {
+        guard !urls.isEmpty, library.working == nil else { return }
+        if doc.id == library.showing {
+            library.pagesToAdd = PageAddition(doc: doc.id, urls: urls, atEnd: atEnd)
+            return
+        }
+        library.working = "쪽을 넣는 중"
+        let reading = library.showing != nil
+        Task { @MainActor in
+            do {
+                let last = max(doc.pageCount - 1, 0)
+                let result = try await library.insertPages(from: urls, into: doc, after: last)
+                if result.failed > 0 { errorText = "\(result.failed)개 파일은 넣지 못했어요." }
+                Library.openNext(doc.id, atPage: last + 1)
+                if let now = library.docs.first(where: { $0.id == doc.id }) {
+                    if reading { path = NavigationPath() }
+                    path.append(now)
+                }
+            } catch {
+                errorText = error.localizedDescription
+            }
+            library.working = nil
+        }
+    }
+
     /// The build server starts the app with these to take pictures without anyone tapping: "-sample" opens
     /// the bundled sample (imported once), "-demoNote" makes a blank notebook and opens it, "-demoImport
     /// name.pdf" opens a file the server put in the app's Documents folder, "-demoShelf" fills the shelf
@@ -48,6 +116,15 @@ struct LibraryView: View {
         guard !ranDemo, path.isEmpty else { return }
         ranDemo = true
         let arguments = ProcessInfo.processInfo.arguments
+        // ("-demoIncoming name.pdf": as if that file of the app's Documents folder had been handed over by
+        // another app; with "-demoIncomingFor YES", as if it had been picked from inside the document on show.)
+        if let name = UserDefaults.standard.string(forKey: "demoIncoming") {
+            let file = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(name)
+            let inside = UserDefaults.standard.bool(forKey: "demoIncomingFor")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                library.incoming = IncomingFiles(urls: [file], folder: library.shelfFolder, forDocument: inside)
+            }
+        }
         if arguments.contains("-sample") {
             if let existing = library.docs.first(where: { $0.title == "샘플" }) {
                 path.append(existing)
@@ -208,23 +285,12 @@ private struct Shelf: View {
         .fileImporter(isPresented: $importing, allowedContentTypes: [.pdf], allowsMultipleSelection: true) { result in
             switch result {
             case .success(let urls):
-                // Copied in off the main thread: a large file must not hold the shelf still.
+                guard !urls.isEmpty else { return }
+                // Where they go is asked next, with this folder offered first. (A moment later: the file
+                // picker is still on its way out, and a sheet put up meanwhile does not come up.)
                 let place = folder?.id
-                bringingIn += urls.count
-                Task { @MainActor in
-                    var last: Doc?
-                    for url in urls {
-                        do {
-                            last = try await library.bringIn(url, into: place)
-                        } catch {
-                            errorText = error.localizedDescription
-                        }
-                        bringingIn -= 1
-                    }
-                    // One file opens straight away; several stay on the shelf.
-                    if urls.count == 1, let doc = last {
-                        path.append(doc)
-                    }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    library.incoming = IncomingFiles(urls: urls, folder: place)
                 }
             case .failure(let error):
                 errorText = error.localizedDescription
@@ -305,6 +371,7 @@ private struct Shelf: View {
                 merge(Array(library.docs.prefix(2)))
             }
             ranDemo = true
+            library.shelfFolder = folder?.id
             Diagnostics.shared.step("shelf shown, \(library.docs.count) documents")
         }
     }

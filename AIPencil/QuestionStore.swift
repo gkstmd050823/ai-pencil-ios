@@ -106,10 +106,10 @@ struct QuestionStore {
         }
     }
 
-    /// After a page was inserted at [index]: questions on that page and later ones move one page later.
-    func shiftPages(from index: Int) {
+    /// After [count] pages were inserted at [index]: questions on that page and later ones move that many pages later.
+    func shiftPages(from index: Int, by count: Int = 1) {
         for var question in load() where question.page >= index {
-            question.page += 1
+            question.page += count
             save(question)
         }
     }

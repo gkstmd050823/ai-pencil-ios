@@ -21,11 +21,11 @@ struct BookmarkStore {
         }
     }
 
-    /// After a page was inserted at [index]: bookmarks on that page and later ones move one page later.
-    func shiftPages(from index: Int) {
+    /// After [count] pages were inserted at [index]: bookmarks on that page and later ones move that many pages later.
+    func shiftPages(from index: Int, by count: Int = 1) {
         let pages = load()
         guard !pages.isEmpty else { return }
-        save(pages.map { $0 >= index ? $0 + 1 : $0 })
+        save(pages.map { $0 >= index ? $0 + count : $0 })
     }
 }
 

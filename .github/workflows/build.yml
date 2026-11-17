@@ -216,6 +216,19 @@ jobs:
           # Reading only: no tools, and the pen is the AI pen.
           shot 45-read-only 9 -sample -readOnly YES
           shot 27-shelf-folders 8 -demoShelf
+          # A PDF that comes in is asked about: a document of its own (and in which folder), or more pages
+          # for a document that is open. Here as handed over while the shelf is on show, and as picked from
+          # inside a document.
+          shot 53-import-asked 9 -demoIncoming mid.pdf
+          shot 53-import-asked-reading 10 -sample -demoIncoming mid.pdf -demoIncomingFor YES
+          # Another file's six pages put into a document after its second page. Its own later pages, with
+          # the rings drawn on them earlier, stand six pages later; its table of contents is still there;
+          # and the copy written out still reads as it did, old pages and new.
+          shot 53-pages-added 14 -demoImport tricky.pdf -demoPage 1 -demoAddPages packed.pdf
+          shot 53-pages-added-mark 10 -demoImport tricky.pdf -demoPage 8
+          shot 53-pages-added-outline 10 -demoImport tricky.pdf -demoNavigator outline
+          shot 53-pages-added-export 14 -demoImport tricky.pdf -demoExport
+          exported export-added
           shot 16-settings 8 -demoSettings
           xcrun simctl ui "$UDID" appearance dark
           shot 17-dark 12 -sample -demoOpenQuestion
