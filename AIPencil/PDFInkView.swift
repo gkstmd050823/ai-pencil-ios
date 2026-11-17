@@ -1571,6 +1571,10 @@ struct PDFInkView: UIViewRepresentable {
                 guard let self, let overlay else { return }
                 self.penDone(kept: kept, in: overlay)
             }
+            pen.onCorrect = { [weak self, weak overlay] id, force, most in
+                guard let self, let overlay else { return }
+                self.penCorrected(id: id, force: force, most: most, in: overlay)
+            }
             overlay.shapeSurface.addGestureRecognizer(pen)
             overlay.penDrag = pen
             overlay.watcher.onMove = { [weak self, weak overlay] from, to in
@@ -1857,6 +1861,17 @@ struct PDFInkView: UIViewRepresentable {
             for sample in fresh { penLine?.add(sample) }
             if let line = penLine {
                 overlay.drawLive(line, ahead: ahead, color: liveColor(penTool), fineness: fineness, grid: penGrid, under: penTool == .highlighter)
+            }
+        }
+
+        /// The pencil made good a force it had guessed at. Where that changes the part of the line that
+        /// is not settled yet, the line is shown again.
+        private func penCorrected(id: Int, force: CGFloat, most: CGFloat, in overlay: PageOverlay) {
+            guard straight == nil, var line = penLine else { return }
+            let changed = line.correct(id: id, force: force, most: most)
+            penLine = line
+            if changed {
+                overlay.drawLive(line, ahead: [], color: liveColor(penTool), fineness: fineness, grid: penGrid, under: penTool == .highlighter)
             }
         }
 

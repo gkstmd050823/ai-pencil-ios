@@ -46,6 +46,34 @@ struct PenSample {
     /// As UIKit gives it, where 1 is an ordinary touch. Zero when the touch has no force to tell (a finger).
     var force: CGFloat
     var time: TimeInterval
+    /// The most force the pencil can tell of (nought: not known, and taken to be an Apple Pencil's).
+    var most: CGFloat = 0
+    /// Set where the force is only the system's guess for now: the number under which the true force is
+    /// told a moment later.
+    var id: Int?
+}
+
+/// How a line's width answers to how hard the pen presses: so many times its ordinary width under no
+/// pressure at all, so many at the pressure where it is widest, and how it bends in between. Each kind
+/// of pen has its own.
+struct PressureCurve: Equatable {
+    var low: CGFloat
+    var high: CGFloat
+    /// Below 1 the line widens quickly under a light hand and slowly under a heavy one; above 1 the other way.
+    var gamma: CGFloat
+    /// The share of the pencil's full force at which the line is widest.
+    var top: CGFloat = 0.72
+
+    /// The fountain pen's. (It is the curve the pen had before the force was reckoned as a share of the
+    /// pencil's full force: 0.35 + 0.65 x force^0.75, up to a force of 3, for a pencil whose full force is 25/6.)
+    static let fountain = PressureCurve(low: 0.35, high: 0.35 + 0.65 * pow(3, 0.75), gamma: 0.75)
+    /// The brush's: from a hair to nearly three times the width, and evenly.
+    static let brush = PressureCurve(low: 0.1, high: 2.8, gamma: 1.05)
+
+    /// How many times its ordinary width the line is at this share of the pencil's full force.
+    func swell(_ share: CGFloat) -> CGFloat {
+        low + (high - low) * pow(min(max(share, 0) / top, 1), gamma)
+    }
 }
 
 /// A line being written: the places the pen went through, steadied, and a width for each.
@@ -75,6 +103,10 @@ struct PenLine {
     let flow: CGFloat
     /// Screen points to a page point, for telling the pen's pace as the hand makes it.
     let zoom: CGFloat
+    /// How the width answers to pressure.
+    let curve: PressureCurve
+    /// Whether the steadying eases off as the pen speeds up (it does; the other way is kept to check against).
+    let adaptive: Bool
 
     private(set) var points: [CGPoint] = []
     private(set) var widths: [CGFloat] = []
@@ -100,6 +132,30 @@ struct PenLine {
     private var pace: CGFloat?
     /// How far the line has gone from where it began, knot to knot, in page points.
     private var run: CGFloat = 0
+    /// How hard the pen presses, as a share of its full force, evened out.
+    private var press: CGFloat?
+
+    /// A place the pen was heard from, with what the line's width was reckoned from there: kept for the
+    /// last few places, so that a force the pencil makes good a moment later can be worked in.
+    private struct Heard {
+        var id: Int?
+        var share: CGFloat?
+        var quick: CGFloat
+        var step: TimeInterval
+        var elapsed: TimeInterval
+        /// The pressure and the width as they stood before this place.
+        var press: CGFloat?
+        var width: CGFloat
+        var first: Bool
+        /// The knot this place became, if it became one, and how far along the line that was.
+        var knot: Int?
+        var run: CGFloat = 0
+    }
+
+    private var heard: [Heard] = []
+
+    /// An Apple Pencil's full force, as UIKit tells it.
+    static let fullForce: CGFloat = 25.0 / 6.0
 
     /// The share of its width a pointed end comes down to, and how far from the end it is back to full width.
     private var tip: CGFloat { 1 - 0.75 * taper }
@@ -115,7 +171,12 @@ struct PenLine {
     /// The longest the line trails the pen at full steadying, in seconds.
     private static let trail = 0.085
 
-    init(width: CGFloat, sense: CGFloat, steady: CGFloat, spacing: CGFloat = 0.6, taper: CGFloat = 0, flow: CGFloat = 0, zoom: CGFloat = 1) {
+    init(
+        width: CGFloat, sense: CGFloat, steady: CGFloat, spacing: CGFloat = 0.6, taper: CGFloat = 0, flow: CGFloat = 0, zoom: CGFloat = 1,
+        curve: PressureCurve = .fountain, adaptive: Bool = true
+    ) {
+        self.curve = curve
+        self.adaptive = adaptive
         self.width = width
         self.sense = min(max(sense, 0), 1)
         self.steady = min(max(steady, 0), 1)
@@ -135,19 +196,25 @@ struct PenLine {
     mutating func add(_ sample: PenSample) {
         let step = last.map { max(0.0005, sample.time - $0.time) } ?? 0.004
         if last == nil { began = sample.time }
-        // The pen's pace: slow, the line is a little wider than it is set; fast, narrower.
-        var quick: CGFloat = 1
-        if flow > 0, let before = last {
+        // The pen's pace, in points of the screen a second, evened out over the last few places.
+        if let before = last {
             let speed = hypot(sample.point.x - before.point.x, sample.point.y - before.point.y) * zoom / CGFloat(step)
-            let even = pace.map { $0 + (speed - $0) * 0.15 } ?? speed
-            pace = even
+            pace = pace.map { $0 + (speed - $0) * 0.15 } ?? speed
+        }
+        // Slow, the line is a little wider than it is set; fast, narrower.
+        var quick: CGFloat = 1
+        if flow > 0, let even = pace {
             let fast = min(1, max(0, (even - 150) / 1350))
             quick = 1 + flow * (0.14 - 0.5 * fast * fast * (3 - 2 * fast))
         }
         last = sample
         // The line goes a share of the way to the pen at each sample, the share shrinking with steadying:
-        // a quick wobble of the hand is over before the line has followed it.
-        let reach = Double(steady) * Self.trail
+        // a quick wobble of the hand is over before the line has followed it. How long the line trails
+        // depends on the pen's pace: a slow pen is where a hand shakes, and is steadied most; a fast one
+        // is on its way somewhere, and is followed closely, so that the line does not hang back behind
+        // it. (Until 0.12.3 it trailed the same at any pace.)
+        let ease = adaptive ? 1.6 / (1 + Double(pace ?? 0) / 300) : 1
+        let reach = Double(steady) * Self.trail * ease
         let share = reach <= 0 ? 1 : CGFloat(1 - exp(-step / reach))
         let place: CGPoint
         if let held {
@@ -156,9 +223,72 @@ struct PenLine {
             place = sample.point
         }
         held = place
-        let wanted = max(0.25, width * (1 + sense * (Self.swell(sample.force) - 1)) * quick)
-        heldWidth = knots.isEmpty ? wanted : heldWidth + (wanted - heldWidth) * 0.35
+        // How hard the pen presses, as a share of the most it can tell.
+        let pressed: CGFloat? = sample.force > 0 ? sample.force / (sample.most > 0 ? sample.most : Self.fullForce) : nil
+        var record = Heard(
+            id: sample.id, share: pressed, quick: quick, step: step, elapsed: sample.time - began,
+            press: press, width: heldWidth, first: knots.isEmpty
+        )
+        var pressure = press
+        heldWidth = widened(record, press: &pressure, held: heldWidth)
+        press = pressure
+        let before = knots.count
         knot(place, heldWidth, time: sample.time)
+        if knots.count > before {
+            record.knot = knots.count - 1
+            record.run = run
+        }
+        heard.append(record)
+        if heard.count > 48 { heard.removeFirst(heard.count - 48) }
+    }
+
+    /// The width the line has after a place of the pen, from the width it had before it. The pressure is
+    /// evened out first: a pencil's force jumps about from one telling to the next, and in the first
+    /// moments of a line, while the pencil is still landing, it jumps most and is evened out most.
+    private func widened(_ place: Heard, press: inout CGFloat?, held: CGFloat) -> CGFloat {
+        var squeeze: CGFloat = 1
+        if let share = place.share {
+            let lag = place.elapsed < 0.04 ? 0.03 : 0.006
+            let even = press.map { $0 + (share - $0) * CGFloat(1 - exp(-place.step / lag)) } ?? share
+            press = even
+            squeeze = curve.swell(even)
+        }
+        let wanted = max(0.25, width * (1 + sense * (squeeze - 1)) * place.quick)
+        return place.first ? wanted : held + (wanted - held) * 0.35
+    }
+
+    /// The pencil has made good a force it had only guessed at: the place it told of under [id] was
+    /// pressed this hard. The width is reckoned again from that place on. What has changed of the line
+    /// is the part that is not settled yet; a knot that is settled stays as it is, however late the word
+    /// of its true force comes. True when the line has changed.
+    @discardableResult
+    mutating func correct(id: Int, force: CGFloat, most: CGFloat = 0) -> Bool {
+        guard force > 0, let at = heard.lastIndex(where: { $0.id == id }) else { return false }
+        heard[at].share = force / (most > 0 ? most : Self.fullForce)
+        heard[at].id = nil
+        var pressure = heard[at].press
+        var held = heard[at].width
+        var changed = false
+        for index in at..<heard.count {
+            heard[index].press = pressure
+            heard[index].width = held
+            let place = heard[index]
+            held = widened(place, press: &pressure, held: held)
+            guard let knot = place.knot, knot < knots.count else { continue }
+            let wide = max(0.2, held * pointed(place.run))
+            if knot == 0, stretches == 0 {
+                knots[0].width = wide
+                if !widths.isEmpty { widths[0] = wide }
+                changed = true
+            } else if knot > stretches {
+                knots[knot].width = wide
+                changed = true
+            }
+        }
+        press = pressure
+        heldWidth = held
+        if changed { work(toTheEnd: false) }
+        return changed
     }
 
     private mutating func knot(_ place: CGPoint, _ size: CGFloat, time: TimeInterval, always: Bool = false) {
@@ -297,6 +427,9 @@ final class PenGesture: UIGestureRecognizer {
     var onDraw: (([PenSample], [PenSample]) -> Void)?
     /// Called when the touch is over: true if the line is to be kept.
     var onDone: ((Bool) -> Void)?
+    /// Called when the pencil makes good a force it had guessed at: the number it was told under, the
+    /// force, and the most the pencil can tell.
+    var onCorrect: ((Int, CGFloat, CGFloat) -> Void)?
     private weak var followed: UITouch?
     private var origin = CGPoint.zero
     private var since: TimeInterval = 0
@@ -311,11 +444,14 @@ final class PenGesture: UIGestureRecognizer {
     private func samples(_ touches: [UITouch], told: Bool = true) -> [PenSample] {
         touches.map { touch in
             var force: CGFloat = 0
+            var id: Int?
             if touch.type == .pencil {
                 if touch.force > 0, told { lastForce = touch.force }
                 force = touch.force > 0 ? touch.force : (lastForce > 0 ? lastForce : 0.15)
+                // (A force the system has only guessed at so far is told again, for good, under this number.)
+                if told, touch.estimatedPropertiesExpectingUpdates.contains(.force) { id = touch.estimationUpdateIndex?.intValue }
             }
-            return PenSample(point: touch.preciseLocation(in: view), force: force, time: touch.timestamp)
+            return PenSample(point: touch.preciseLocation(in: view), force: force, time: touch.timestamp, most: touch.maximumPossibleForce, id: id)
         }
     }
 
@@ -364,6 +500,15 @@ final class PenGesture: UIGestureRecognizer {
         followed = nil
         onDone?(false)
         state = state == .possible ? .failed : .cancelled
+    }
+
+    override func touchesEstimatedPropertiesUpdated(_ touches: Set<UITouch>) {
+        for touch in touches where touch.type == .pencil {
+            // (Only once the force is final: until then more word of it is on its way.)
+            guard let id = touch.estimationUpdateIndex?.intValue, touch.force > 0,
+                  !touch.estimatedPropertiesExpectingUpdates.contains(.force) else { continue }
+            onCorrect?(id, touch.force, touch.maximumPossibleForce)
+        }
     }
 
     override func reset() {

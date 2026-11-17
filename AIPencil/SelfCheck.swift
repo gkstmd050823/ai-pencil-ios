@@ -12,7 +12,82 @@ enum SelfCheck {
     static func run() {
         holding()
         straightLines()
+        pressure()
+        steadying()
         DebugLog.write("check: done")
+    }
+
+    // MARK: pressure
+
+    private static func pressure() {
+        // The fountain pen's curve is the one the pen had before force was reckoned as a share of the
+        // pencil's full force.
+        var apart: CGFloat = 0
+        for force in [0.05, 0.1, 0.5, 1, 2, 3, 4] as [CGFloat] {
+            apart = max(apart, abs(PressureCurve.fountain.swell(force / PenLine.fullForce) - PenLine.swell(force)))
+        }
+        note("the fountain pen's curve is what it was", apart < 0.0001, "\(apart)")
+        note("the brush goes from a hair to much wider", PressureCurve.brush.swell(0) < 0.15 && PressureCurve.brush.swell(1) > 2.5)
+
+        // A pencil that has just landed and hardly moved: its first force was a guess, and is made good.
+        var landing = PenLine(width: 2, sense: 1, steady: 0, spacing: 0.3)
+        landing.add(PenSample(point: CGPoint(x: 100, y: 100), force: 0.15, time: 0, most: PenLine.fullForce, id: 7))
+        landing.add(PenSample(point: CGPoint(x: 100.05, y: 100), force: 0.2, time: 0.004, most: PenLine.fullForce))
+        landing.add(PenSample(point: CGPoint(x: 100.1, y: 100), force: 0.25, time: 0.008, most: PenLine.fullForce))
+        let thin = landing.widths.first ?? 0
+        let changed = landing.correct(id: 7, force: 2.5, most: PenLine.fullForce)
+        note("a force made good widens the line where it is not settled", changed && (landing.widths.first ?? 0) > thin + 0.2, "\(thin) to \(landing.widths.first ?? 0)")
+        note("a force made good twice counts once", !landing.correct(id: 7, force: 3, most: PenLine.fullForce))
+
+        // A line well on its way: word of an early force comes when that part is settled, and leaves it be.
+        var long = PenLine(width: 2, sense: 1, steady: 0, spacing: 0.3)
+        for step in 0..<30 {
+            long.add(PenSample(
+                point: CGPoint(x: 100 + 2 * Double(step), y: 100), force: 0.6, time: Double(step) * 0.004,
+                most: PenLine.fullForce, id: step == 3 ? 9 : nil
+            ))
+        }
+        let settled = long.settled
+        let points = Array(long.points.prefix(settled)), widths = Array(long.widths.prefix(settled))
+        long.correct(id: 9, force: 3.5, most: PenLine.fullForce)
+        note(
+            "a force made good late leaves the settled part as it was",
+            settled > 20 && long.settled >= settled && Array(long.points.prefix(settled)) == points && Array(long.widths.prefix(settled)) == widths,
+            "\(settled) points settled"
+        )
+        note("a force told under a number no place has changes nothing", !long.correct(id: 1234, force: 2))
+    }
+
+    // MARK: steadying
+
+    private static func steadying() {
+        // A slow line by a hand that shakes: twelve times a second, two points either way.
+        func shaky(_ adaptive: Bool) -> CGFloat {
+            var line = PenLine(width: 1.4, sense: 0, steady: 0.5, spacing: 0.3, adaptive: adaptive)
+            for step in 0..<240 {
+                let time = Double(step) / 240
+                line.add(PenSample(point: CGPoint(x: 100 + 80 * time, y: 200 + 2 * sin(2 * Double.pi * 12 * time)), force: 0, time: time))
+            }
+            // (How far the line is from the way straight across, on the whole, past where it sets out.)
+            let later = line.points.dropFirst(line.points.count / 4)
+            let squares = later.reduce(CGFloat(0)) { $0 + ($1.y - 200) * ($1.y - 200) }
+            return (squares / CGFloat(max(later.count, 1))).squareRoot()
+        }
+        let even = shaky(false), eased = shaky(true)
+        note("a slow shaky line is steadied more than it was", eased < even * 0.97, String(format: "off by %.3f points, %.3f before", Double(eased), Double(even)))
+
+        // A fast line: how far behind the pen its end is.
+        func behind(_ adaptive: Bool) -> CGFloat {
+            var line = PenLine(width: 1.4, sense: 0, steady: 0.5, spacing: 0.3, adaptive: adaptive)
+            var pen: CGFloat = 100
+            for step in 0..<48 {
+                pen = 100 + 1500 * CGFloat(step) / 240
+                line.add(PenSample(point: CGPoint(x: pen, y: 200), force: 0, time: Double(step) / 240))
+            }
+            return pen - (line.points.last?.x ?? pen)
+        }
+        let trailing = behind(false), following = behind(true)
+        note("a fast line follows the pen more closely than it did", following < trailing * 0.5, String(format: "%.1f points behind, %.1f before", Double(following), Double(trailing)))
     }
 
     // MARK: draw and hold
