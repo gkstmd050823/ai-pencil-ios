@@ -780,6 +780,7 @@ struct ReaderView: View {
         // The pen's, too: its kind, and the width in millimetres of the one in use.
         if let kind = PenKind(rawValue: defaults.string(forKey: "demoPenKind") ?? "") { choice.penKind = kind }
         if let stroke = PenStroke(rawValue: defaults.string(forKey: "demoPenStroke") ?? "") { choice.penStroke = stroke }
+        if defaults.object(forKey: "demoHighlighterStraight") != nil { choice.highlighterStraight = defaults.bool(forKey: "demoHighlighterStraight") }
         if defaults.double(forKey: "demoPenSize") > 0 {
             choice.penSize = InkChoice.tidy(defaults.double(forKey: "demoPenSize"), in: InkChoice.penSizeRange)
         }
@@ -1293,7 +1294,10 @@ private struct ToolOptions: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 ColorGrid(palette: InkChoice.highlighterPalette, selection: $choice.highlighterColor, darkPaper: darkPaper)
-                putDown("긋고 멈추면 직선으로 펴기", $choice.holdStraight)
+                putDown("항상 직선으로 긋기", $choice.highlighterStraight)
+                if !choice.highlighterStraight {
+                    putDown("긋고 멈추면 직선으로 펴기", $choice.holdStraight)
+                }
                 putDown("한 번 긋고 나면 이전 도구로 돌아가기", $choice.highlighterAuto)
             case .shape:
                 Picker("도형", selection: $choice.shapeKind) {

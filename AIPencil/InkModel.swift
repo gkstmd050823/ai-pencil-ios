@@ -159,6 +159,8 @@ struct InkChoice: Equatable, Codable {
     var shapeAuto = false
     /// Draw and hold: a line whose end the pen is held still at is made straight.
     var holdStraight = true
+    /// The highlighter draws straight lines only: from where it lands to wherever it is.
+    var highlighterStraight = false
 
     init() {}
 
@@ -189,6 +191,7 @@ struct InkChoice: Equatable, Codable {
         highlighterAuto = read(.highlighterAuto, highlighterAuto)
         shapeAuto = read(.shapeAuto, shapeAuto)
         holdStraight = read(.holdStraight, holdStraight)
+        highlighterStraight = read(.highlighterStraight, highlighterStraight)
         // Settings saved before 0.8.0 had one pen width, on a scale of PencilKit's own, and a highlighter
         // width in points. The pen in use keeps the width it had; the highlighter too.
         let old = try? decoder.container(keyedBy: OldKeys.self)

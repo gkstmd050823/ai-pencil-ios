@@ -312,6 +312,12 @@ final class TouchTests: XCTestCase {
         sleep(2)
         shot("58-held-straight")
 
+        // The highlighter set to draw straight: a line dragged a little aslant lies level, with no hold.
+        start(["-demoTool", "highlighter", "-demoPage", "6", "-demoHighlighterStraight", "YES"])
+        drag(from: (80, 560), to: (380, 570))
+        sleep(2)
+        shot("61-highlighter-always-straight")
+
         // Two pages side by side, turned two at a time: a finger swept to the left brings the next two,
         // to the right the two before.
         start(["-demoTool", "pen", "-pageLayout", "twoUpPaged"], fingersWrite: false)

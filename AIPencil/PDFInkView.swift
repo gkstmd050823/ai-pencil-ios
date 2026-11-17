@@ -1852,6 +1852,10 @@ struct PDFInkView: UIViewRepresentable {
                 penOverlay = overlay
                 watchHold()
             }
+            // A highlighter set to draw straight is straight from the first place it lands on.
+            if straight == nil, shaped == nil, penTool == .highlighter, choice.highlighterStraight, let first = fresh.first, penLine?.points.isEmpty ?? false {
+                straight = (first.point, choice.highlighterSeenWidth, false)
+            }
             if straight != nil {
                 // Made straight already: its far end follows the pen.
                 showStraight(in: overlay)
@@ -2034,8 +2038,10 @@ struct PDFInkView: UIViewRepresentable {
                 endJoined = false
             }
             // (A fountain pen's line keeps its pointed ends when it is made straight.)
+            // (A highlighter's line has its points as far apart as any line of the highlighter's.)
+            let apart = penTool == .highlighter ? max(0.5 / zoom, min(1, made.width * 0.05)) : 0.5 / zoom
             var line = PenLine(
-                width: made.width, sense: 0, steady: 0, spacing: 0.5 / zoom,
+                width: made.width, sense: 0, steady: 0, spacing: apart,
                 taper: penTool == .pen ? choice.appPenTaper : 0, flow: 0, zoom: zoom, dash: penTool == .pen ? choice.appPenDash : nil
             )
             let length = hypot(end.point.x - made.from.x, end.point.y - made.from.y)
