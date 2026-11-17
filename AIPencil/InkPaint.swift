@@ -256,11 +256,15 @@ enum InkPaint {
                 return
             }
             let clip = context.boundingBoxOfClipPath
+            // The stretches: which points each has, the room it takes, and the pixels round its first
+            // point, where it joins the one before. (A stretch ends in a disc and the next begins with
+            // the same disc; filled one after the other the pixels on that disc's rim that are half
+            // covered would be covered twice. Each stretch is filled everywhere but at its joints, and
+            // each joint is filled once, with the two stretches that meet there as one shape.)
+            var parts: [(from: Int, to: Int, box: CGRect, joint: CGRect)] = []
             var from = 0
             while from < count - 1 {
-                if let wanted, !wanted() { return }
                 let to = min(count, from + stretch + 1)
-                // (The room the stretch takes, as wide as its widest place.)
                 var left = line.points[from].x, right = left, top = line.points[from].y, bottom = top
                 var reach: CGFloat = 0
                 for index in from..<to {
@@ -271,13 +275,40 @@ enum InkPaint {
                     bottom = max(bottom, point.y)
                     reach = max(reach, line.widths[index])
                 }
-                let box = CGRect(x: left, y: top, width: right - left, height: bottom - top).insetBy(dx: -reach, dy: -reach)
-                if box.intersects(clip) {
-                    context.addPath(shape(points: line.points, widths: line.widths, from: from, to: to, fineness: fineness))
-                    context.fillPath()
+                var joint = CGRect.null
+                if from > 0 {
+                    let at = line.points[from]
+                    let round = line.widths[from] / 2 + 1.5 / fineness
+                    // (Grown to whole pixels of the picture, so that its edge cuts no pixel in two.)
+                    let pixels = context.convertToDeviceSpace(CGRect(x: at.x - round, y: at.y - round, width: round * 2, height: round * 2)).integral
+                    joint = context.convertToUserSpace(pixels)
                 }
+                parts.append((from, to, CGRect(x: left, y: top, width: right - left, height: bottom - top).insetBy(dx: -reach, dy: -reach), joint))
                 // (The next stretch begins on this one's last point, so that the two join.)
                 from = to - 1
+            }
+            for (number, part) in parts.enumerated() {
+                if let wanted, !wanted() { return }
+                if part.box.intersects(clip) {
+                    let after = number + 1 < parts.count ? parts[number + 1].joint : CGRect.null
+                    context.saveGState()
+                    context.addRect(clip)
+                    if !part.joint.isNull { context.addRect(part.joint) }
+                    if !after.isNull { context.addRect(after) }
+                    context.clip(using: .evenOdd)
+                    context.addPath(shape(points: line.points, widths: line.widths, from: part.from, to: part.to, fineness: fineness))
+                    context.fillPath()
+                    context.restoreGState()
+                }
+                if number > 0, part.joint.intersects(clip) {
+                    let before = parts[number - 1]
+                    context.saveGState()
+                    context.clip(to: part.joint)
+                    context.addPath(shape(points: line.points, widths: line.widths, from: before.from, to: before.to, fineness: fineness))
+                    context.addPath(shape(points: line.points, widths: line.widths, from: part.from, to: part.to, fineness: fineness))
+                    context.fillPath()
+                    context.restoreGState()
+                }
             }
         }
     }

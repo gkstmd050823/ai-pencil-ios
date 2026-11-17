@@ -31,6 +31,15 @@ final class WetInk: UIView {
         /// The first of the line's points in the piece, and the one after its last.
         var from = 0
         var to = 0
+        /// Where the piece joins the one before it: the pixels round its first point, which both pieces
+        /// reach. Null for a line's first piece.
+        ///
+        /// Each piece ends in a disc and the next begins with the same disc. Drawn one after the other,
+        /// the pixels on that disc's rim that are half covered were covered twice and came out a little
+        /// darker than in the picture of the handwriting, which fills the line in one go (seventy to a
+        /// hundred and twenty pixels of a screen, on the build server). So a piece is drawn everywhere
+        /// but here, and here everything is drawn again from nothing, each line in one go.
+        var joint = CGRect.null
     }
 
     private final class Line {
@@ -228,11 +237,20 @@ final class WetInk: UIView {
                     self.stale[at] = (self.stale[at] ?? .null).union(made ? tile.frame : part)
                     return
                 }
+                let joint = piece.joint.intersection(part)
                 context.saveGState()
-                context.clip(to: part)
+                if joint.isNull || joint.isEmpty {
+                    context.clip(to: part)
+                } else {
+                    // (Everywhere in the part but at the joint, which is drawn again whole below.)
+                    context.addRect(part)
+                    context.addRect(joint)
+                    context.clip(using: .evenOdd)
+                }
                 self.fill([piece], of: line, in: context, clip: part)
                 context.restoreGState()
                 tile.contents = context.makeImage()
+                if !joint.isNull, !joint.isEmpty { self.stale[at] = joint }
             }
         }
     }
@@ -339,9 +357,16 @@ final class WetInk: UIView {
     /// width, the line itself, to be drawn that wide.
     private func cut(_ line: PenLine, _ from: Int, _ to: Int?) -> Piece {
         let end = min(to ?? line.points.count, line.points.count)
+        // (Where it joins the piece before: the pixels its first point's disc reaches, and one more round them.)
+        var joint = CGRect.null
+        if from > 0, from < line.points.count {
+            let reach = (asLines ? line.width : line.widths[from]) / 2 + 1.5 / scale
+            let at = line.points[from]
+            joint = InkPaint.whole(CGRect(x: at.x - reach, y: at.y - reach, width: reach * 2, height: reach * 2), scale: scale, origin: grid)
+        }
         guard asLines else {
             let path = line.shape(from: from, to: to, fineness: scale)
-            return Piece(path: path, box: path.boundingBoxOfPath, from: from, to: end)
+            return Piece(path: path, box: path.boundingBoxOfPath, from: from, to: end, joint: joint)
         }
         let path = CGMutablePath()
         guard end > 0 else { return Piece(path: path, box: .null, from: from, to: end) }
@@ -350,7 +375,7 @@ final class WetInk: UIView {
         if run.count == 1 { path.addLine(to: run[0]) }
         for point in run.dropFirst() { path.addLine(to: point) }
         let reach = line.width / 2 + 1 / scale
-        return Piece(path: path, box: path.boundingBoxOfPath.insetBy(dx: -reach, dy: -reach), from: from, to: end)
+        return Piece(path: path, box: path.boundingBoxOfPath.insetBy(dx: -reach, dy: -reach), from: from, to: end, joint: joint)
     }
 
     /// Shows the line being written as it stands now.
