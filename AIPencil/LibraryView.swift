@@ -55,7 +55,10 @@ struct LibraryView: View {
         } message: {
             Text(errorText ?? "")
         }
-        .onAppear(perform: runDemoIfAsked)
+        .onAppear {
+            if ProcessInfo.processInfo.arguments.contains("-selfCheck") { SelfCheck.run() }
+            runDemoIfAsked()
+        }
     }
 
     /// Each file becomes a document in [place]. One file opens straight away; several stay on the shelf.

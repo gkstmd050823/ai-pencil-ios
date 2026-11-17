@@ -301,6 +301,17 @@ final class TouchTests: XCTestCase {
         sleep(1)
         shot("50-bare-paper-held")
 
+        // Draw and hold: a line drawn a little off level and held at its end is made straight and level;
+        // one drawn near the diagonal and held lies on the diagonal; one that is let go at once stays as drawn.
+        start(["-demoTool", "pen", "-demoPage", "6"])
+        place(80, 150).press(forDuration: 0.15, thenDragTo: place(380, 160), withVelocity: .slow, thenHoldForDuration: 1.2)
+        sleep(1)
+        place(80, 220).press(forDuration: 0.15, thenDragTo: place(280, 410), withVelocity: .slow, thenHoldForDuration: 1.2)
+        sleep(1)
+        place(80, 480).press(forDuration: 0.15, thenDragTo: place(380, 492), withVelocity: .slow, thenHoldForDuration: 0.05)
+        sleep(2)
+        shot("58-held-straight")
+
         // Two pages side by side, turned two at a time: a finger swept to the left brings the next two,
         // to the right the two before.
         start(["-demoTool", "pen", "-pageLayout", "twoUpPaged"], fingersWrite: false)

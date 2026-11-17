@@ -24,6 +24,24 @@ final class PageCanvas: PKCanvasView {
         byCode = true
         self.drawing = drawing
         byCode = false
+        behind = false
+    }
+
+    /// The app has changed the handwriting since the canvas was last handed it.
+    ///
+    /// Until 0.12.2 the canvas was handed the whole of a page's handwriting every time the app's own pen
+    /// finished a line and every time its eraser took one, though the canvas was out of sight (the app's
+    /// pictures show the handwriting) and no tool of PencilKit's was in hand. PencilKit draws everything
+    /// it is handed, as fine as the zoom: zoomed in on a page with a hundred lines that is a great deal
+    /// of drawing, done over for each line of a scribble and for each line an eraser crossed (a
+    /// diagnostics report had the app not answering for three seconds with the eraser in hand). Now the
+    /// canvas is only noted to be behind, and handed the handwriting when it is about to be seen or used,
+    /// or when the hand has rested.
+    var behind = false
+
+    /// Hands the canvas the handwriting as it stands, if it has not got it.
+    func catchUp() {
+        if behind { take(ink) }
     }
 }
 
@@ -575,6 +593,8 @@ final class PageOverlay: UIView {
     /// The canvas shows the handwriting itself. Whenever the pictures might not be the handwriting as it
     /// stands, this is what is shown: the canvas is always right.
     func showCanvasInk() {
+        // (About to be seen, or seen already: it has to have the handwriting as it stands.)
+        canvas.catchUp()
         guard showsInkPicture || canvas.alpha != 1 else { return }
         showsInkPicture = false
         canvas.alpha = 1
@@ -640,6 +660,28 @@ final class PageOverlay: UIView {
         } else {
             liveTail.path = nil
         }
+    }
+
+    /// Lights up, for a moment, the way from [from] to [to]: a line has just been made straight.
+    func flash(from: CGPoint, to: CGPoint, width: CGFloat, fineness: CGFloat) {
+        let light = CAShapeLayer()
+        let path = CGMutablePath()
+        path.move(to: from)
+        path.addLine(to: to)
+        light.path = path
+        light.fillColor = nil
+        light.lineCap = .round
+        light.lineWidth = width + 6 / max(fineness / 2, 0.5)
+        light.strokeColor = InkChoice.markColor.withAlphaComponent(0.28).cgColor
+        light.contentsScale = fineness
+        light.opacity = 0
+        penMarks.layer.insertSublayer(light, at: 0)
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 1
+        fade.toValue = 0
+        fade.duration = 0.35
+        light.add(fade, forKey: "fade")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { light.removeFromSuperlayer() }
     }
 
     /// The line being written came to nothing.
@@ -923,6 +965,11 @@ final class ReaderController: ObservableObject {
         coordinator?.demoHighlightMany()
     }
 
+    /// For the build server: a line being written, the pen still on the page.
+    func demoLive() {
+        coordinator?.demoLive()
+    }
+
     /// For the build server: turns to the next two pages, as a swipe would.
     func demoTurn() {
         coordinator?.turner.turn(forward: true)
@@ -1048,6 +1095,20 @@ struct PDFInkView: UIViewRepresentable {
         /// The line being written with the app's own pen, the tool it is written with, and where the
         /// screen's pixels fall on its page.
         private var penLine: PenLine?
+        /// Draw and hold. The pen has been held still at the end of a line that was near enough
+        /// straight: the line is straight from here on, from where it began to wherever the pen is, as
+        /// wide as it was on the whole. Nil while a line is written as the hand writes it.
+        private var straight: (from: CGPoint, width: CGFloat, snapped: Bool)?
+        private var hold = HoldWatch()
+        private var holdTimer: Timer?
+        /// Where the pen was last heard from in the line being written, and on which page.
+        private var penAt = CGPoint.zero
+        private weak var penOverlay: PageOverlay?
+        /// Taps the hand through an Apple Pencil Pro when a line is made straight or drawn to a direction.
+        private var canvasFeedback: Any?
+        /// "-demoEagerCanvas" hands the canvas every change at once, as was done until 0.12.2, for the
+        /// build server to set the time that takes beside the time it takes now.
+        private static let eagerCanvas = ProcessInfo.processInfo.arguments.contains("-demoEagerCanvas")
         /// The zoom as last measured off the screen, and when.
         private var zoomMeasured: (zoom: CGFloat, at: CFTimeInterval) = (1, 0)
         /// Until when a change the canvas tells of may be PencilKit's own though no tool of PencilKit's
@@ -1697,7 +1758,7 @@ struct PDFInkView: UIViewRepresentable {
             }
             // Noted first: the canvas tells of the change it is about to be given, and is told it is known.
             record(new, on: canvas, own: true, dirty: dirty)
-            canvas.take(new)
+            hand(new, to: canvas)
             if !live, let overlay = canvas.superview as? PageOverlay {
                 // (Lines still on show as written, whose strokes this change took away, come down now.)
                 if overlay.keptCount > 0 {
@@ -1735,6 +1796,17 @@ struct PDFInkView: UIViewRepresentable {
             return zoom
         }
 
+        /// The canvas is told of a change the app made to a page's handwriting. Where the canvas is what
+        /// shows, or a tool of PencilKit's is in hand, it is handed the handwriting at once; where the
+        /// app's pictures show, it is noted to be behind (see PageCanvas.behind).
+        private func hand(_ drawing: PKDrawing, to canvas: PageCanvas) {
+            if !Self.eagerCanvas, !choice.needsCanvas, let overlay = canvas.superview as? PageOverlay, overlay.showsInkPicture, !overlay.inkInUse {
+                canvas.behind = true
+            } else {
+                canvas.take(drawing)
+            }
+        }
+
         /// How many pixels a point of the page takes on screen now, for shapes drawn over the page.
         private var fineness: CGFloat {
             guard let view = pdfView else { return 2 }
@@ -1748,6 +1820,8 @@ struct PDFInkView: UIViewRepresentable {
             guard !retired, choice.ownPen else { return }
             if penLine == nil {
                 let zoom = max(zoomSeen, 0.5)
+                straight = nil
+                hold = HoldWatch()
                 penTool = choice.tool
                 penGrid = Self.pixelGrid(of: overlay.inkPicture, scale: fineness)
                 switch penTool {
@@ -1765,9 +1839,102 @@ struct PDFInkView: UIViewRepresentable {
                     )
                 }
             }
+            if let last = fresh.last {
+                // (Whether the pen is being held still is told on screen, not on the page: see HoldWatch.)
+                let zoom = max(zoomSeen, 0.1)
+                penAt = last.point
+                hold.moved(to: CGPoint(x: last.point.x * zoom, y: last.point.y * zoom), at: CACurrentMediaTime())
+            }
+            if penOverlay !== overlay || holdTimer == nil {
+                penOverlay = overlay
+                watchHold()
+            }
+            if straight != nil {
+                // Made straight already: its far end follows the pen.
+                showStraight(in: overlay)
+                return
+            }
             for sample in fresh { penLine?.add(sample) }
             if let line = penLine {
                 overlay.drawLive(line, ahead: ahead, color: liveColor(penTool), fineness: fineness, grid: penGrid, under: penTool == .highlighter)
+            }
+        }
+
+        // MARK: draw and hold
+
+        /// Looks several times a second, while a line is being written, whether the pen has come to rest.
+        /// (A pen that is held still tells nothing, so there is nothing else to hear it from.)
+        private func watchHold() {
+            holdTimer?.invalidate()
+            let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+                self?.lookAtHold()
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            holdTimer = timer
+        }
+
+        private func lookAtHold() {
+            guard let line = penLine, let overlay = penOverlay else {
+                holdTimer?.invalidate()
+                holdTimer = nil
+                return
+            }
+            guard straight == nil, choice.holdStraight, penTool == .pen || penTool == .highlighter, hold.held(at: CACurrentMediaTime()) else { return }
+            guard let first = line.points.first else { return }
+            // Long enough on screen to be a line and not a dot with a pause after it; and near enough
+            // straight to have been meant as one.
+            let zoom = max(zoomSeen, 0.1)
+            guard hypot(penAt.x - first.x, penAt.y - first.y) * zoom >= Straighten.shortest else { return }
+            let drawn = line.points + [penAt]
+            guard Straighten.isLine(drawn) else { return }
+            let width = line.widths.isEmpty ? line.width : line.widths.reduce(0, +) / CGFloat(line.widths.count)
+            straight = (first, width, false)
+            DebugLog.write(String(format: "pen: held still, a line of %d points made straight (it bent %.2f points at most)", line.points.count, Double(Straighten.bend(drawn))))
+            Diagnostics.shared.step("line made straight")
+            showStraight(in: overlay)
+            overlay.flash(from: first, to: penAt, width: width, fineness: fineness)
+            tapHand(at: penAt, in: overlay, finished: true)
+        }
+
+        /// The straight line from where the line began to where the pen is, drawn to a direction when it
+        /// is near one. It takes the place of the line being written.
+        private func showStraight(in overlay: PageOverlay) {
+            guard let made = straight else { return }
+            let end = Straighten.end(from: made.from, to: penAt)
+            let zoom = max(zoomSeen, 0.5)
+            // (A fountain pen's line keeps its pointed ends when it is made straight.)
+            var line = PenLine(
+                width: made.width, sense: 0, steady: 0, spacing: 0.5 / zoom,
+                taper: penTool == .pen ? choice.appPenTaper : 0, flow: 0, zoom: zoom
+            )
+            let length = hypot(end.point.x - made.from.x, end.point.y - made.from.y)
+            let steps = max(2, min(240, Int(length / 3)))
+            for step in 0...steps {
+                let along = CGFloat(step) / CGFloat(steps)
+                line.add(PenSample(
+                    point: CGPoint(x: made.from.x + (end.point.x - made.from.x) * along, y: made.from.y + (end.point.y - made.from.y) * along),
+                    force: 0, time: Double(step) * 0.004
+                ))
+            }
+            penLine = line
+            overlay.drawLive(line, ahead: [], color: liveColor(penTool), fineness: fineness, grid: penGrid, under: penTool == .highlighter, afresh: true)
+            if end.snapped, !made.snapped { tapHand(at: end.point, in: overlay, finished: false) }
+            straight?.snapped = end.snapped
+        }
+
+        /// A tap through the pencil, where the pencil can give one: a line was made straight, or was
+        /// drawn to a direction.
+        private func tapHand(at point: CGPoint, in overlay: PageOverlay, finished: Bool) {
+            guard let view = pdfView else { return }
+            if #available(iOS 18.0, *) {
+                let feedback = (canvasFeedback as? UICanvasFeedbackGenerator) ?? UICanvasFeedbackGenerator(view: view)
+                canvasFeedback = feedback
+                let place = overlay.convert(point, to: view)
+                if finished {
+                    feedback.pathCompleted(at: place)
+                } else {
+                    feedback.alignmentOccurred(at: place)
+                }
             }
         }
 
@@ -1776,6 +1943,17 @@ struct PDFInkView: UIViewRepresentable {
         private func penDone(kept: Bool, in overlay: PageOverlay) {
             guard let line = penLine else { return }
             penLine = nil
+            holdTimer?.invalidate()
+            holdTimer = nil
+            if let made = straight, kept, let first = line.points.first, let last = line.points.last {
+                let lies = Straighten.end(from: first, to: last)
+                DebugLog.write(String(
+                    format: "pen: a straight line written, %d points from (%.1f, %.1f) to (%.1f, %.1f), at %.1f degrees%@, %.2f wide, bending %.3f points at most",
+                    line.points.count, Double(first.x), Double(first.y), Double(last.x), Double(last.y), Double(lies.degrees),
+                    made.snapped ? " (drawn to that direction)" : "", Double(made.width), Double(Straighten.bend(line.points))
+                ))
+            }
+            straight = nil
             guard kept, !retired else {
                 overlay.dropLive()
                 return
@@ -1835,6 +2013,25 @@ struct PDFInkView: UIViewRepresentable {
             if overlay.keptCount > 24 { askInk(for: overlay) }
         }
 
+        /// For the build server: a line written and one being written, the pen still down, so that
+        /// the picture taken shows a line as it is on show while it grows.
+        func demoLive() {
+            guard let view = pdfView, let page = view.currentPage, let overlay = overlays[page] else { return }
+            for (row, lifts) in [(0.0, true), (1.0, false)] {
+                var x = 80.0
+                while x < 480 {
+                    var chunk: [PenSample] = []
+                    for _ in 0..<4 {
+                        chunk.append(PenSample(point: CGPoint(x: x, y: 380 + row * 40 + 16 * sin(x / 24)), force: CGFloat(0.4 + 0.5 * abs(sin(x / 60))), time: x / 300))
+                        x += 2
+                    }
+                    penDrew(chunk, ahead: [], in: overlay)
+                }
+                if lifts { penDone(kept: true, in: overlay) }
+            }
+            DebugLog.write("pen: a line written and one left being written; \(overlay.keptCount) waiting as shapes")
+        }
+
         /// For the build server: forty lines of highlighter written one after another the way a pen
         /// writes them (a few places at a time, the screen brought up to date after each), and how long
         /// the main thread took over them. Run once as the highlighter is now and once as it was
@@ -1843,19 +2040,22 @@ struct PDFInkView: UIViewRepresentable {
             guard let view = pdfView, let page = view.currentPage, let overlay = overlays[page] else { return }
             let saved = choice
             let lines = 40
+            // ("-demoManyTool pen": with the pen, the lines one over another as in a scribble.)
+            let scribble = UserDefaults.standard.string(forKey: "demoManyTool") == "pen"
             var total = 0.0, worst = 0.0, points = 0
             // (What writing a line took and what lifting the pen took, for the first ten lines and the last ten.)
             var writing = [0.0, 0.0], lifting = [0.0, 0.0]
             for row in 0..<lines {
-                choice.tool = .highlighter
-                let y = 150 + CGFloat(row % 20) * 28 + CGFloat(row / 20) * 9
+                choice.tool = scribble ? .pen : .highlighter
+                let y = scribble ? 300 + CGFloat(row % 8) * 4 : 150 + CGFloat(row % 20) * 28 + CGFloat(row / 20) * 9
+                let swing: CGFloat = scribble ? 22 : 3
                 var time = Double(row)
                 var x: CGFloat = 60
                 let began = CACurrentMediaTime()
                 while x < 520 {
                     var chunk: [PenSample] = []
                     for _ in 0..<4 {
-                        chunk.append(PenSample(point: CGPoint(x: x, y: y + sin(x / 30) * 3), force: 1, time: time))
+                        chunk.append(PenSample(point: CGPoint(x: x, y: y + sin(x / 30 + CGFloat(row)) * swing), force: 1, time: time))
                         x += 1.5
                         time += 0.004
                     }
@@ -1877,7 +2077,8 @@ struct PDFInkView: UIViewRepresentable {
             choice = saved
             DebugLog.write(String(
                 format: "highlighter: %d lines written %@ at %.2f pixels a point, %d points in all; the main thread took %.0f ms, %.1f ms a line, %.1f ms the slowest; %d lines waiting as shapes",
-                lines, InkPaint.oldHighlighter ? "the old way" : "the new way", Double(fineness), points, total, total / Double(lines), worst, overlay.keptCount
+                lines, scribble ? (Self.eagerCanvas ? "with the pen, the canvas handed every line" : "with the pen") : (InkPaint.oldHighlighter ? "the old way" : "the new way"),
+                Double(fineness), points, total, total / Double(lines), worst, overlay.keptCount
             ))
             DebugLog.write(String(
                 format: "highlighter: a line of the first ten took %.1f ms to write and %.1f ms when the pen lifted; of the last ten, %.1f ms and %.1f ms",
@@ -2144,7 +2345,7 @@ struct PDFInkView: UIViewRepresentable {
                     rubbed = work
                     let drawing = PKDrawing(strokes: work.strokes)
                     record(drawing, on: canvas, own: true, count: work.strokes.count, dirty: dirty)
-                    canvas.take(drawing)
+                    hand(drawing, to: canvas)
                     // A line written a moment ago is still on show as written: rubbed out, it comes
                     // down at once, without waiting for the picture.
                     if overlay.keptCount > 0 {
@@ -2273,6 +2474,9 @@ struct PDFInkView: UIViewRepresentable {
                     // as their own shapes, and go into the picture together.)
                     if now - overlay.inkTouched > 0.4 { askInk(for: overlay) }
                     settleInk(overlay)
+                    // The hand has rested: a canvas that is behind is handed the handwriting now, so that
+                    // it has it by the time it is next seen (when the page is zoomed, say).
+                    if overlay.canvas.behind, now - overlay.inkTouched > 1 { overlay.canvas.catchUp() }
                 } else if overlay.inkPicture.shown != nil || overlay.highPicture.shown != nil {
                     // Far from view: its pictures are let go, and made again when it comes near.
                     overlay.dropInkPicture()
@@ -2827,6 +3031,7 @@ struct PDFInkView: UIViewRepresentable {
                 return
             }
             DebugLog.write("overlay: page \(overlay.canvas.pageIndex) bounds \(overlay.bounds.size) page shown \(AskCapture.shape(of: page).size) turned \(page.rotation) ink scale \(overlay.inkScale)")
+            overlay.canvas.catchUp()
             var drawing = overlay.canvas.drawing
             drawing.strokes.append(Self.ring(center: center, radius: radius, color: InkChoice.markColor))
             expectNews()

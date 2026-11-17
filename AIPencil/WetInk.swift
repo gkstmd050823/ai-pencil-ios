@@ -10,6 +10,13 @@ import UIKit
 ///
 /// The view is as large as the page and holds small square tiles, made only where there is something to
 /// draw. A line that grows redraws just the part of the tiles it grew into.
+///
+/// There are two sets of tiles: one for the lines that are waiting, and above it one for the line being
+/// written. (Until 0.12.2 there was one set for both. Each time the pen moved, the part of a tile the
+/// line grew into was drawn again with everything in it, which is every waiting line that passes there:
+/// a scribble, line over line over line and no pause for a picture to take them, cost more with each
+/// line, and the pen fell behind.) Now a pen that moves has only its own line drawn again, and a line
+/// that is finished is drawn once more, into the other set, when the pen lifts.
 final class WetInk: UIView {
     private struct Piece {
         var path: CGPath
@@ -32,15 +39,16 @@ final class WetInk: UIView {
         }
     }
 
-    /// A tile: a square of the screen's pixels.
+    /// A tile: a square of the screen's pixels, of the lines that are waiting or of the line being written.
     private final class Tile: CALayer {
         weak var ink: WetInk?
+        var ofLive = false
 
         override func draw(in context: CGContext) {
             guard let ink else { return }
             // (From the tile's own measure to the page's.)
             context.translateBy(x: -frame.minX, y: -frame.minY)
-            ink.paint(in: context, clip: context.boundingBoxOfClipPath)
+            ink.paint(in: context, clip: context.boundingBoxOfClipPath, live: ofLive)
         }
     }
 
@@ -54,7 +62,11 @@ final class WetInk: UIView {
     /// The piece of the line being written that is still growing, and the first of the line's points in it.
     private var open: Piece?
     private var openFrom = 0
+    /// The tiles of the lines that are waiting, and those of the line being written.
     private var tiles: [Int64: Tile] = [:]
+    private var liveTiles: [Int64: Tile] = [:]
+    private let waitingLayer = CALayer()
+    private let liveLayer = CALayer()
     /// Pixels to a page point, and where a pixel of the screen begins (see the page view's pixelGrid).
     private(set) var scale: CGFloat = 2
     private var grid = CGPoint.zero
@@ -69,6 +81,10 @@ final class WetInk: UIView {
         isUserInteractionEnabled = false
         backgroundColor = .clear
         isOpaque = false
+        // (Two layers without a size of their own, at the view's corner: what is in them is placed in the
+        // view's own measure.)
+        layer.addSublayer(waitingLayer)
+        layer.addSublayer(liveLayer)
     }
 
     required init?(coder: NSCoder) {
@@ -84,13 +100,15 @@ final class WetInk: UIView {
         self.grid = grid
         tiles.values.forEach { $0.removeFromSuperlayer() }
         tiles = [:]
-        for line in lines { invalidate(line.box) }
-        if let live { invalidate(live.box) }
+        liveTiles.values.forEach { $0.removeFromSuperlayer() }
+        liveTiles = [:]
+        for line in lines { invalidate(line.box, live: false) }
+        if let live { invalidate(live.box, live: true) }
     }
 
     // MARK: drawing
 
-    fileprivate func paint(in context: CGContext, clip: CGRect) {
+    fileprivate func paint(in context: CGContext, clip: CGRect, live ofLive: Bool) {
         func fill(_ line: Line, _ extra: Piece?) {
             var any = false
             for piece in line.pieces where piece.box.intersects(clip) {
@@ -112,16 +130,20 @@ final class WetInk: UIView {
                 context.fillPath()
             }
         }
-        for line in lines where line.box.intersects(clip) { fill(line, nil) }
-        if let live { fill(live, open) }
+        if ofLive {
+            if let live { fill(live, open) }
+        } else {
+            for line in lines where line.box.intersects(clip) { fill(line, nil) }
+        }
     }
 
     private func key(_ column: Int, _ row: Int) -> Int64 {
         Int64(column) << 32 | Int64(UInt32(bitPattern: Int32(row)))
     }
 
-    /// Has the part of the tiles that covers [rect] drawn again, making tiles where there are none.
-    private func invalidate(_ rect: CGRect) {
+    /// Has the part of the tiles that covers [rect] drawn again, making tiles where there are none: the
+    /// tiles of the line being written ([live]), or those of the lines that are waiting.
+    private func invalidate(_ rect: CGRect, live ofLive: Bool) {
         guard !rect.isNull, !rect.isEmpty, rect.width.isFinite, rect.height.isFinite else { return }
         let step = Self.side / scale
         let dirty = rect.insetBy(dx: -1.5 / scale, dy: -1.5 / scale).intersection(bounds.insetBy(dx: -step, dy: -step))
@@ -132,17 +154,23 @@ final class WetInk: UIView {
         for row in firstRow...lastRow {
             for column in firstColumn...lastColumn {
                 let at = key(column, row)
-                var tile = tiles[at]
+                var tile = ofLive ? liveTiles[at] : tiles[at]
                 if tile == nil {
                     let made = Tile()
                     made.ink = self
+                    made.ofLive = ofLive
                     made.contentsScale = scale
                     made.isOpaque = false
                     // (Nothing about a tile is animated: it shows what was drawn at once.)
                     made.actions = ["contents": NSNull(), "onOrderIn": NSNull(), "onOrderOut": NSNull(), "bounds": NSNull(), "position": NSNull()]
                     made.frame = CGRect(x: grid.x + CGFloat(column) * step, y: grid.y + CGFloat(row) * step, width: step, height: step)
-                    layer.addSublayer(made)
-                    tiles[at] = made
+                    if ofLive {
+                        liveLayer.addSublayer(made)
+                        liveTiles[at] = made
+                    } else {
+                        waitingLayer.addSublayer(made)
+                        tiles[at] = made
+                    }
                     tile = made
                 }
                 if let tile {
@@ -153,20 +181,32 @@ final class WetInk: UIView {
         }
     }
 
-    /// Takes away the tiles that no line reaches any more.
+    /// Takes away the tiles that no waiting line reaches any more.
     private func prune() {
         guard !tiles.isEmpty else { return }
-        if lines.isEmpty, live == nil {
+        if lines.isEmpty {
             tiles.values.forEach { $0.removeFromSuperlayer() }
             tiles = [:]
             return
         }
         for (at, tile) in tiles {
-            let reached = lines.contains { $0.box.intersects(tile.frame) } || (live?.box.intersects(tile.frame) ?? false)
+            let reached = lines.contains { $0.box.intersects(tile.frame) }
             if !reached {
                 tile.removeFromSuperlayer()
                 tiles[at] = nil
             }
+        }
+    }
+
+    /// The line that was being written is no longer: where it was, its tiles are drawn again, empty. (The
+    /// tiles themselves stay for the next line, which as a rule begins close by; only when there are many
+    /// are they let go.)
+    private func wipeLive(_ box: CGRect) {
+        if liveTiles.count > 32 {
+            liveTiles.values.forEach { $0.removeFromSuperlayer() }
+            liveTiles = [:]
+        } else {
+            invalidate(box, live: true)
         }
     }
 
@@ -214,14 +254,14 @@ final class WetInk: UIView {
         let piece = cut(openFrom, nil)
         open = piece
         current.box = current.box.union(piece.box)
-        invalidate(dirty.union(piece.box))
+        invalidate(dirty.union(piece.box), live: true)
     }
 
     /// The line being written has changed along its whole length (its ends were shaped as the pen
     /// lifted): what was made of it so far is let go, and the next writing of it makes it anew.
     func restart() {
         guard let live else { return }
-        invalidate(live.box)
+        invalidate(live.box, live: true)
         live.pieces = []
         live.box = .null
         open = nil
@@ -234,12 +274,12 @@ final class WetInk: UIView {
         live = nil
         open = nil
         openFrom = 0
-        invalidate(gone.box)
-        prune()
+        wipeLive(gone.box)
     }
 
     /// The line being written is part of the handwriting from [version] on, as the stroke made at [date].
-    /// It stays on show until the picture has it.
+    /// It stays on show until the picture has it: it goes over from the tiles of the line being written
+    /// to those of the lines that are waiting, where it is drawn this once.
     func keep(version: Int, date: Date?) {
         guard let done = live else { return }
         if let open { done.pieces.append(open) }
@@ -249,6 +289,8 @@ final class WetInk: UIView {
         live = nil
         open = nil
         openFrom = 0
+        invalidate(done.box, live: false)
+        wipeLive(done.box)
     }
 
     /// Any other line that is part of the handwriting from [version] on (a shape, say): the places it
@@ -262,7 +304,7 @@ final class WetInk: UIView {
         line.version = version
         line.date = date
         lines.append(line)
-        invalidate(line.box)
+        invalidate(line.box, live: false)
     }
 
     /// Takes down the lines that [gone] says are no longer wanted.
@@ -270,7 +312,7 @@ final class WetInk: UIView {
         var changed = false
         lines.removeAll { line in
             guard gone(line) else { return false }
-            invalidate(line.box)
+            invalidate(line.box, live: false)
             changed = true
             return true
         }

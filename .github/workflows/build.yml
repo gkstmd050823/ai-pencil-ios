@@ -243,6 +243,14 @@ jobs:
           # Forty lines of highlighter written one after another, as the highlighter is now and as it
           # was: the app notes how long the main thread took over each, and how long the pictures took.
           shot 55-highlighter-many 25 -demoNote -demoHighlightMany
+          # The same with the pen, forty lines one over another as in a scribble: as it is now, and with
+          # the canvas handed every line as it was until 0.12.2. Zoomed in, where the canvas is finest.
+          shot 55-pen-many 30 -demoNote -demoZoom 3 -demoHighlightMany -demoManyTool pen
+          shot 55-pen-many-eager 60 -demoNote -demoZoom 3 -demoHighlightMany -demoManyTool pen -demoEagerCanvas
+          # The app's own reckoning, checked without a screen; a check that fails fails the build (below).
+          shot 58-self-check 6 -selfCheck
+          # A line that is waiting for the picture and a line being written, the pen still on the page.
+          shot 57-live-line 9 -sample -demoPage 1 -demoLiveLine
           shot 55-highlighter-many-old 60 -demoNote -demoHighlightMany -demoOldHighlighter
           shot 16-settings 8 -demoSettings
           xcrun simctl ui "$UDID" appearance dark
@@ -262,6 +270,10 @@ jobs:
           cat mock.log || true
           echo "---- the app's own notes ----"
           cat app-debug.log || true
+          echo "---- the checks ----"
+          grep "^check: " app-debug.log || true
+          if grep -q "^check: .*FAILED" app-debug.log; then echo "a check of the app's reckoning failed"; exit 1; fi
+          if ! grep -q "^check: done" app-debug.log; then echo "the checks did not run to the end"; exit 1; fi
           xcrun simctl shutdown "$UDID" || true
 
       - name: Build for the iPad (unsigned)

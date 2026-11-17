@@ -718,6 +718,9 @@ struct ReaderView: View {
         if arguments.contains("-demoHighlightMany") {
             later(3) { controller.demoHighlightMany() }
         }
+        if arguments.contains("-demoLiveLine") {
+            later(3) { controller.demoLive() }
+        }
         if arguments.contains("-demoTurn") {
             later(3) { controller.demoTurn() }
         }
@@ -1239,6 +1242,7 @@ private struct ToolOptions: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    putDown("긋고 멈추면 직선으로 펴기", $choice.holdStraight)
                 }
                 ColorGrid(palette: InkChoice.penPalette, selection: $choice.penColor, darkPaper: darkPaper)
             case .highlighter:
@@ -1258,6 +1262,7 @@ private struct ToolOptions: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 ColorGrid(palette: InkChoice.highlighterPalette, selection: $choice.highlighterColor, darkPaper: darkPaper)
+                putDown("긋고 멈추면 직선으로 펴기", $choice.holdStraight)
                 putDown("한 번 긋고 나면 이전 도구로 돌아가기", $choice.highlighterAuto)
             case .shape:
                 Picker("도형", selection: $choice.shapeKind) {
