@@ -251,6 +251,9 @@ jobs:
           shot 58-self-check 6 -selfCheck
           # A line that is waiting for the picture and a line being written, the pen still on the page.
           shot 57-live-line 9 -sample -demoPage 1 -demoLiveLine
+          # Draw and hold: a rectangle, a triangle, a circle and an oval drawn by a shaky hand and held,
+          # a wave that is no shape, and a straight line that ends on the end of another.
+          shot 59-held-shapes 20 -demoNote -demoHeldShapes
           shot 55-highlighter-many-old 60 -demoNote -demoHighlightMany -demoOldHighlighter
           shot 16-settings 8 -demoSettings
           xcrun simctl ui "$UDID" appearance dark
@@ -274,6 +277,12 @@ jobs:
           grep "^check: " app-debug.log || true
           if grep -q "^check: .*FAILED" app-debug.log; then echo "a check of the app's reckoning failed"; exit 1; fi
           if ! grep -q "^check: done" app-debug.log; then echo "the checks did not run to the end"; exit 1; fi
+          echo "---- draw and hold ----"
+          grep -E "^pen: (held still|a straight line written|a shape written|the shapes held)" app-debug.log || true
+          for made in "a rectangle" "a triangle" "a circle" "an oval"; do
+            if ! grep -q "^pen: held still, a line of .* made $made" app-debug.log; then echo "a line drawn as $made and held was not made one"; exit 1; fi
+          done
+          if ! grep -q "its end put on the end of another line" app-debug.log; then echo "a straight line ending near the end of another was not put on it"; exit 1; fi
           xcrun simctl shutdown "$UDID" || true
 
       - name: Build for the iPad (unsigned)

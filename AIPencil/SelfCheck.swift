@@ -14,7 +14,113 @@ enum SelfCheck {
         straightLines()
         pressure()
         steadying()
+        shapes()
         DebugLog.write("check: done")
+    }
+
+    // MARK: shapes
+
+    private static func shapes() {
+        func far(_ a: CGPoint, _ b: CGPoint) -> CGFloat { hypot(a.x - b.x, a.y - b.y) }
+        func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: x, y: y) }
+
+        // A rectangle drawn a little askew, its ends not quite meeting: a rectangle that lies level.
+        let askew = ShapeFinder.find(HandDrawn.walk([point(100, 100), point(300, 104), point(297, 222), point(102, 218)], short: 0.08))
+        if case .polygon(let corners)? = askew, corners.count == 4 {
+            let sides = [far(corners[0], corners[1]), far(corners[1], corners[2])].sorted()
+            let wide = sides[1], tall = sides[0]
+            // (Every side runs straight across or straight up.)
+            let level = (0..<4).allSatisfy { index in
+                let a = corners[index], b = corners[(index + 1) % 4]
+                return abs(a.x - b.x) < 0.01 || abs(a.y - b.y) < 0.01
+            }
+            note(
+                "a shaky rectangle is a rectangle that lies level", level && abs(wide - 197.5) < 8 && abs(tall - 118) < 6 && ShapeFinder.name(.polygon(corners)) == "a rectangle",
+                String(format: "%.1f by %.1f", Double(wide), Double(tall))
+            )
+        } else {
+            note("a shaky rectangle is a rectangle that lies level", false, "\(String(describing: askew))")
+        }
+
+        // The same turned by thirty degrees stays turned, and its corners are made right angles.
+        let turned = ShapeFinder.find(HandDrawn.walk([point(200, 100), point(373, 200), point(313, 304), point(140, 204)]))
+        if case .polygon(let corners)? = turned, corners.count == 4 {
+            let sides = [far(corners[0], corners[1]), far(corners[1], corners[2])].sorted()
+            var lies = atan2(corners[1].y - corners[0].y, corners[1].x - corners[0].x) * 180 / .pi
+            lies = lies - (lies / 90).rounded(.down) * 90
+            note(
+                "a rectangle turned thirty degrees stays turned", abs(lies - 30) < 2.5 && abs(sides[0] - 120) < 6 && abs(sides[1] - 200) < 8 && ShapeFinder.name(.polygon(corners)) == "a rectangle",
+                String(format: "%.1f by %.1f at %.1f degrees", Double(sides[1]), Double(sides[0]), Double(lies))
+            )
+        } else {
+            note("a rectangle turned thirty degrees stays turned", false, "\(String(describing: turned))")
+        }
+
+        // A triangle: its three corners near where they were drawn.
+        let meant = [point(100, 300), point(260, 304), point(180, 170)]
+        let three = ShapeFinder.find(HandDrawn.walk(meant, short: 0.05))
+        if case .polygon(let corners)? = three, corners.count == 3 {
+            let off = meant.map { corner in corners.map { far($0, corner) }.min() ?? 99 }.max() ?? 99
+            note("a shaky triangle is a triangle", off < 6, String(format: "corners off by %.1f points at most", Double(off)))
+        } else {
+            note("a shaky triangle is a triangle", false, "\(String(describing: three))")
+        }
+
+        // Five corners are kept as five corners.
+        let five = ShapeFinder.find(HandDrawn.walk([point(200, 100), point(295, 169), point(259, 281), point(141, 281), point(105, 169)]))
+        if case .polygon(let corners)? = five {
+            note("five corners are five corners", corners.count == 5)
+        } else {
+            note("five corners are five corners", false, "\(String(describing: five))")
+        }
+
+        // A circle a little wider than tall, gone a little past where it began: a circle.
+        let ring = ShapeFinder.find(HandDrawn.oval(center: point(200, 200), a: 60, b: 57, over: 0.04))
+        if case .ellipse(let center, let a, let b, _)? = ring {
+            note(
+                "a shaky circle is a circle", a == b && abs(a - 58.5) < 2.5 && far(center, point(200, 200)) < 5,
+                String(format: "%.1f across, its middle off by %.1f", Double(a * 2), Double(far(center, point(200, 200))))
+            )
+        } else {
+            note("a shaky circle is a circle", false, "\(String(describing: ring))")
+        }
+
+        // An oval turned thirty degrees: as long, as wide and as turned as it was drawn.
+        let egg = ShapeFinder.find(HandDrawn.oval(center: point(200, 200), a: 90, b: 40, degrees: 30))
+        if case .ellipse(_, let a, let b, let turn)? = egg {
+            var lies = turn * 180 / .pi
+            lies = lies - (lies / 180).rounded(.down) * 180
+            note(
+                "an oval turned thirty degrees is that oval", abs(a - 90) < 3.6 && abs(b - 40) < 2.4 && abs(lies - 30) < 3,
+                String(format: "%.1f by %.1f at %.1f degrees", Double(a), Double(b), Double(lies))
+            )
+        } else {
+            note("an oval turned thirty degrees is that oval", false, "\(String(describing: egg))")
+        }
+
+        // One lying nearly level is made to lie level.
+        let flat = ShapeFinder.find(HandDrawn.oval(center: point(200, 200), a: 90, b: 40, degrees: 5))
+        if case .ellipse(_, let a, let b, let turn)? = flat {
+            note("an oval nearly level lies level", abs(sin(turn)) < 0.0001 && abs(a - 90) < 3.6 && abs(b - 40) < 2.4)
+        } else {
+            note("an oval nearly level lies level", false, "\(String(describing: flat))")
+        }
+
+        // What is not a shape stays as it was drawn: a wave, a star, a ring left open.
+        let wave = (0..<60).map { point(100 + 3 * CGFloat($0), 200 + 40 * sin(CGFloat($0) / 8)) }
+        note("a wave is no shape", ShapeFinder.find(wave) == nil)
+        let star = HandDrawn.walk([
+            point(200, 100), point(230, 190), point(320, 190), point(250, 240), point(280, 330),
+            point(200, 275), point(120, 330), point(150, 240), point(80, 190), point(170, 190),
+        ], shake: 1)
+        note("a star is no shape", ShapeFinder.find(star) == nil)
+        let open = Array(HandDrawn.oval(center: point(200, 200), a: 30, b: 45, shake: 1).prefix(70))
+        note("a ring left open is no shape", ShapeFinder.find(open) == nil)
+
+        // The end of a straight line is put on the nearest end of another within reach, and on none beyond it.
+        let ends = [point(100, 100), point(300, 100), point(306, 108)]
+        note("an end near another line's end is put on it", Straighten.joined(point(304, 104), to: ends, reach: 12) == point(306, 108))
+        note("an end far from any other stays", Straighten.joined(point(330, 140), to: ends, reach: 12) == nil)
     }
 
     // MARK: pressure

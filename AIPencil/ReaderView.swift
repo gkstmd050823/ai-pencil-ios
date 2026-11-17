@@ -721,6 +721,9 @@ struct ReaderView: View {
         if arguments.contains("-demoLiveLine") {
             later(3) { controller.demoLive() }
         }
+        if arguments.contains("-demoHeldShapes") {
+            later(3) { controller.demoHeldShapes() }
+        }
         if arguments.contains("-demoTurn") {
             later(3) { controller.demoTurn() }
         }
@@ -1242,7 +1245,7 @@ private struct ToolOptions: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    putDown("긋고 멈추면 직선으로 펴기", $choice.holdStraight)
+                    putDown("긋고 멈추면 직선·도형으로 펴기", $choice.holdStraight)
                 }
                 ColorGrid(palette: InkChoice.penPalette, selection: $choice.penColor, darkPaper: darkPaper)
             case .highlighter:

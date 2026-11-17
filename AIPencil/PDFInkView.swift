@@ -970,6 +970,11 @@ final class ReaderController: ObservableObject {
         coordinator?.demoLive()
     }
 
+    /// For the build server: shapes drawn by hand and held, made true.
+    func demoHeldShapes() {
+        coordinator?.demoHeldShapes()
+    }
+
     /// For the build server: turns to the next two pages, as a swipe would.
     func demoTurn() {
         coordinator?.turner.turn(forward: true)
@@ -1099,6 +1104,16 @@ struct PDFInkView: UIViewRepresentable {
         /// straight: the line is straight from here on, from where it began to wherever the pen is, as
         /// wide as it was on the whole. Nil while a line is written as the hand writes it.
         private var straight: (from: CGPoint, width: CGFloat, snapped: Bool)?
+        /// Draw and hold, for a line that came back round to where it began: the outline of the shape it
+        /// was meant to be, which stands in for the line from then on. Nil while there is none.
+        private var shaped: [CGPoint]?
+        /// The ends of the straight lines on the page being written on. A line made straight that begins
+        /// or ends near one is put on it.
+        private var joints: [CGPoint] = []
+        private var endJoined = false
+        /// How many places the line had when it was last looked at for being held: a line that has not
+        /// grown since is what it was then.
+        private var heldLooked = -1
         private var hold = HoldWatch()
         private var holdTimer: Timer?
         /// Where the pen was last heard from in the line being written, and on which page.
@@ -1714,38 +1729,14 @@ struct PDFInkView: UIViewRepresentable {
                 gesture.start = point
             case .changed:
                 let outline = ShapeOutline.points(choice.shapeKind, from: gesture.start, to: point, lineWidth: width)
-                guard let first = outline.first else { return }
-                let path = UIBezierPath()
-                path.move(to: first)
-                for next in outline.dropFirst() { path.addLine(to: next) }
-                overlay.shapePreview.path = path.cgPath
-                overlay.shapePreview.lineWidth = width
-                overlay.shapePreview.contentsScale = fineness
-                overlay.shapePreview.strokeColor = (darkPaper ? choice.penUIColor.onDarkPaper : choice.penUIColor).cgColor
+                guard !outline.isEmpty else { return }
+                preview(outline, width: width, in: overlay)
             case .ended:
                 overlay.shapePreview.path = nil
                 guard hypot(point.x - gesture.start.x, point.y - gesture.start.y) > 4 else { return }
                 let outline = ShapeOutline.points(choice.shapeKind, from: gesture.start, to: point, lineWidth: width)
                 guard outline.count > 1 else { return }
-                var points: [PKStrokePoint] = []
-                let size = InkWidth.size(drawing: width)
-                for (index, place) in outline.enumerated() {
-                    points.append(PKStrokePoint(
-                        location: place, timeOffset: Double(index) * 0.004, size: CGSize(width: size, height: size),
-                        opacity: 1, force: 1, azimuth: 0, altitude: CGFloat.pi / 2
-                    ))
-                }
-                let stroke = PKStroke(ink: PKInk(.monoline, color: choice.penUIColor), path: PKStrokePath(controlPoints: points, creationDate: Date()))
-                var drawing = overlay.canvas.ink
-                let before = drawing
-                drawing.strokes.append(stroke)
-                setDrawing(drawing, on: overlay.canvas, undoingTo: before, dirty: stroke.renderBounds.insetBy(dx: -2, dy: -2), live: true)
-                // The shape as it was dragged out stays on show until the picture of the handwriting has it.
-                overlay.keep(
-                    points: outline, width: width, color: (darkPaper ? choice.penUIColor.onDarkPaper : choice.penUIColor).cgColor,
-                    fineness: fineness, grid: Self.pixelGrid(of: overlay.inkPicture, scale: fineness),
-                    for: overlay.canvas.inkVersion, date: stroke.path.creationDate
-                )
+                addOutline(outline, width: width, to: overlay)
                 toolUsed()
             default:
                 overlay.shapePreview.path = nil
@@ -1825,6 +1816,9 @@ struct PDFInkView: UIViewRepresentable {
             if penLine == nil {
                 let zoom = max(zoomSeen, 0.5)
                 straight = nil
+                shaped = nil
+                joints = []
+                heldLooked = -1
                 hold = HoldWatch()
                 penTool = choice.tool
                 penGrid = Self.pixelGrid(of: overlay.inkPicture, scale: fineness)
@@ -1858,6 +1852,8 @@ struct PDFInkView: UIViewRepresentable {
                 showStraight(in: overlay)
                 return
             }
+            // Made a shape already: the shape stays as it is until the pen lifts.
+            if shaped != nil { return }
             for sample in fresh { penLine?.add(sample) }
             if let line = penLine {
                 overlay.drawLive(line, ahead: ahead, color: liveColor(penTool), fineness: fineness, grid: penGrid, under: penTool == .highlighter)
@@ -1867,7 +1863,7 @@ struct PDFInkView: UIViewRepresentable {
         /// The pencil made good a force it had guessed at. Where that changes the part of the line that
         /// is not settled yet, the line is shown again.
         private func penCorrected(id: Int, force: CGFloat, most: CGFloat, in overlay: PageOverlay) {
-            guard straight == nil, var line = penLine else { return }
+            guard straight == nil, shaped == nil, var line = penLine else { return }
             let changed = line.correct(id: id, force: force, most: most)
             penLine = line
             if changed {
@@ -1894,29 +1890,119 @@ struct PDFInkView: UIViewRepresentable {
                 holdTimer = nil
                 return
             }
-            guard straight == nil, choice.holdStraight, penTool == .pen || penTool == .highlighter, hold.held(at: CACurrentMediaTime()) else { return }
-            guard let first = line.points.first else { return }
+            guard straight == nil, shaped == nil, choice.holdStraight, penTool == .pen || penTool == .highlighter, hold.held(at: CACurrentMediaTime()) else { return }
+            guard line.points.count != heldLooked, let first = line.points.first else { return }
+            heldLooked = line.points.count
+            let zoom = max(zoomSeen, 0.1)
+            let drawn = line.points + [penAt]
             // Long enough on screen to be a line and not a dot with a pause after it; and near enough
             // straight to have been meant as one.
-            let zoom = max(zoomSeen, 0.1)
-            guard hypot(penAt.x - first.x, penAt.y - first.y) * zoom >= Straighten.shortest else { return }
-            let drawn = line.points + [penAt]
-            guard Straighten.isLine(drawn) else { return }
-            let width = line.widths.isEmpty ? line.width : line.widths.reduce(0, +) / CGFloat(line.widths.count)
-            straight = (first, width, false)
-            DebugLog.write(String(format: "pen: held still, a line of %d points made straight (it bent %.2f points at most)", line.points.count, Double(Straighten.bend(drawn))))
-            Diagnostics.shared.step("line made straight")
-            showStraight(in: overlay)
-            overlay.flash(from: first, to: penAt, width: width, fineness: fineness)
+            if hypot(penAt.x - first.x, penAt.y - first.y) * zoom >= Straighten.shortest, Straighten.isLine(drawn) {
+                let width = line.widths.isEmpty ? line.width : line.widths.reduce(0, +) / CGFloat(line.widths.count)
+                // (It begins on the end of another straight line it began near.)
+                joints = lineEnds(on: overlay.canvas, atLeast: Straighten.shortest / zoom)
+                let from = Straighten.joined(first, to: joints, reach: Straighten.joinReach / zoom) ?? first
+                straight = (from, width, false)
+                DebugLog.write(String(
+                    format: "pen: held still, a line of %d points made straight (it bent %.2f points at most)%@",
+                    line.points.count, Double(Straighten.bend(drawn)), from == first ? "" : "; it begins on the end of another line"
+                ))
+                Diagnostics.shared.step("line made straight")
+                showStraight(in: overlay)
+                overlay.flash(from: from, to: penAt, width: width, fineness: fineness)
+                tapHand(at: penAt, in: overlay, finished: true)
+                return
+            }
+            // Not a line. With the pen, a line that comes round to where it began and is a triangle, a
+            // rectangle, a circle or an oval as a hand draws one becomes that shape, drawn true.
+            guard penTool == .pen, let shape = ShapeFinder.find(drawn) else { return }
+            let outline = ShapeFinder.outline(shape)
+            guard let start = outline.first else { return }
+            var box = CGRect(origin: start, size: .zero)
+            for place in outline { box = box.union(CGRect(origin: place, size: .zero)) }
+            // (Not a letter with a pause after it: "o", "ㅁ".)
+            guard max(box.width, box.height) * zoom >= Straighten.shortest * 1.2 else { return }
+            shaped = outline
+            overlay.dropLive()
+            preview(outline, width: choice.penSeenWidth, in: overlay)
+            DebugLog.write(String(
+                format: "pen: held still, a line of %d points made %@, %.0f by %.0f points",
+                line.points.count, ShapeFinder.name(shape), Double(box.width), Double(box.height)
+            ))
+            Diagnostics.shared.step("line made a shape")
             tapHand(at: penAt, in: overlay, finished: true)
+        }
+
+        /// The ends of the straight lines among a page's handwriting that are at least [long]: the last
+        /// few hundred lines written are looked at.
+        private func lineEnds(on canvas: PageCanvas, atLeast long: CGFloat) -> [CGPoint] {
+            var ends: [CGPoint] = []
+            for stroke in canvas.ink.strokes.suffix(400) {
+                let path = stroke.path
+                guard path.count > 1 else { continue }
+                let last = CGFloat(path.count - 1)
+                let along = (0...8).map { path.interpolatedLocation(at: last * CGFloat($0) / 8) }
+                guard let a = along.first, let b = along.last, hypot(b.x - a.x, b.y - a.y) >= long, Straighten.isLine(along) else { continue }
+                ends.append(a.applying(stroke.transform))
+                ends.append(b.applying(stroke.transform))
+            }
+            return ends
+        }
+
+        /// Shows an outline over the page as the line it will be: a shape being dragged out, or one a
+        /// line drawn by hand has just been made.
+        private func preview(_ outline: [CGPoint], width: CGFloat, in overlay: PageOverlay) {
+            guard let first = outline.first else {
+                overlay.shapePreview.path = nil
+                return
+            }
+            let path = UIBezierPath()
+            path.move(to: first)
+            for next in outline.dropFirst() { path.addLine(to: next) }
+            overlay.shapePreview.path = path.cgPath
+            overlay.shapePreview.lineWidth = width
+            overlay.shapePreview.contentsScale = fineness
+            overlay.shapePreview.strokeColor = (darkPaper ? choice.penUIColor.onDarkPaper : choice.penUIColor).cgColor
+        }
+
+        /// An outline becomes a line of the page's handwriting, of the pen's colour and [width] wide.
+        private func addOutline(_ outline: [CGPoint], width: CGFloat, to overlay: PageOverlay) {
+            guard outline.count > 1 else { return }
+            var points: [PKStrokePoint] = []
+            let size = InkWidth.size(drawing: width)
+            for (index, place) in outline.enumerated() {
+                points.append(PKStrokePoint(
+                    location: place, timeOffset: Double(index) * 0.004, size: CGSize(width: size, height: size),
+                    opacity: 1, force: 1, azimuth: 0, altitude: CGFloat.pi / 2
+                ))
+            }
+            let stroke = PKStroke(ink: PKInk(.monoline, color: choice.penUIColor), path: PKStrokePath(controlPoints: points, creationDate: Date()))
+            var drawing = overlay.canvas.ink
+            let before = drawing
+            drawing.strokes.append(stroke)
+            setDrawing(drawing, on: overlay.canvas, undoingTo: before, dirty: stroke.renderBounds.insetBy(dx: -2, dy: -2), live: true)
+            // The shape as it was shown stays on show until the picture of the handwriting has it.
+            overlay.keep(
+                points: outline, width: width, color: (darkPaper ? choice.penUIColor.onDarkPaper : choice.penUIColor).cgColor,
+                fineness: fineness, grid: Self.pixelGrid(of: overlay.inkPicture, scale: fineness),
+                for: overlay.canvas.inkVersion, date: stroke.path.creationDate
+            )
         }
 
         /// The straight line from where the line began to where the pen is, drawn to a direction when it
         /// is near one. It takes the place of the line being written.
         private func showStraight(in overlay: PageOverlay) {
             guard let made = straight else { return }
-            let end = Straighten.end(from: made.from, to: penAt)
+            var end = Straighten.end(from: made.from, to: penAt)
             let zoom = max(zoomSeen, 0.5)
+            // An end near the end of another straight line is put on it, before any direction.
+            if let joint = Straighten.joined(penAt, to: joints, reach: Straighten.joinReach / zoom),
+               hypot(joint.x - made.from.x, joint.y - made.from.y) * zoom >= Straighten.shortest {
+                end = (joint, true, Straighten.end(from: made.from, to: joint).degrees)
+                endJoined = true
+            } else {
+                endJoined = false
+            }
             // (A fountain pen's line keeps its pointed ends when it is made straight.)
             var line = PenLine(
                 width: made.width, sense: 0, steady: 0, spacing: 0.5 / zoom,
@@ -1965,10 +2051,23 @@ struct PDFInkView: UIViewRepresentable {
                 DebugLog.write(String(
                     format: "pen: a straight line written, %d points from (%.1f, %.1f) to (%.1f, %.1f), at %.1f degrees%@, %.2f wide, bending %.3f points at most",
                     line.points.count, Double(first.x), Double(first.y), Double(last.x), Double(last.y), Double(lies.degrees),
-                    made.snapped ? " (drawn to that direction)" : "", Double(made.width), Double(Straighten.bend(line.points))
+                    endJoined ? " (its end put on the end of another line)" : made.snapped ? " (drawn to that direction)" : "",
+                    Double(made.width), Double(Straighten.bend(line.points))
                 ))
             }
             straight = nil
+            joints = []
+            endJoined = false
+            if let outline = shaped {
+                // The shape the line was made, as it is shown, is what is written.
+                shaped = nil
+                overlay.shapePreview.path = nil
+                overlay.dropLive()
+                guard kept, !retired else { return }
+                addOutline(outline, width: choice.penSeenWidth, to: overlay)
+                DebugLog.write("pen: a shape written, \(outline.count) points round")
+                return
+            }
             guard kept, !retired else {
                 overlay.dropLive()
                 return
@@ -2045,6 +2144,51 @@ struct PDFInkView: UIViewRepresentable {
                 if lifts { penDone(kept: true, in: overlay) }
             }
             DebugLog.write("pen: a line written and one left being written; \(overlay.keptCount) waiting as shapes")
+        }
+
+        /// For the build server: shapes drawn by a shaky hand with the pen held still at the end of each,
+        /// as draw and hold has them made true; a line that is no shape; and two straight lines, the
+        /// second ending near the end of the first.
+        func demoHeldShapes() {
+            guard let view = pdfView, let page = view.currentPage, let overlay = overlays[page] else { return }
+            func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: x, y: y) }
+            func line(from a: CGPoint, to b: CGPoint) -> [CGPoint] {
+                (0...40).map { step in
+                    let along = CGFloat(step) / 40
+                    return point(a.x + (b.x - a.x) * along, a.y + (b.y - a.y) * along + 1.5 * sin(along * 17))
+                }
+            }
+            let drawings: [[CGPoint]] = [
+                HandDrawn.walk([point(70, 130), point(250, 136), point(246, 236), point(73, 230)], short: 0.08),
+                HandDrawn.walk([point(320, 240), point(500, 236), point(405, 120)], short: 0.05),
+                HandDrawn.oval(center: point(150, 340), a: 62, b: 58, over: 0.04),
+                HandDrawn.oval(center: point(400, 340), a: 100, b: 42, degrees: 25),
+                (0..<70).map { point(70 + 3 * CGFloat($0), 450 + 22 * sin(CGFloat($0) / 6)) },
+                line(from: point(80, 520), to: point(300, 560)),
+                line(from: point(420, 680), to: point(302, 561)),
+            ]
+            choice.tool = .pen
+            func write(_ index: Int) {
+                guard index < drawings.count else {
+                    DebugLog.write("pen: the shapes held are written; the page has \(overlay.canvas.strokeCount) lines")
+                    return
+                }
+                var chunk: [PenSample] = []
+                for (step, place) in drawings[index].enumerated() {
+                    chunk.append(PenSample(point: place, force: 0.5, time: Double(step) * 0.004))
+                    if chunk.count == 4 {
+                        self.penDrew(chunk, ahead: [], in: overlay)
+                        chunk = []
+                    }
+                }
+                if !chunk.isEmpty { self.penDrew(chunk, ahead: [], in: overlay) }
+                // (The pen rests where it is for longer than the hold takes, then lifts.)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                    self.penDone(kept: true, in: overlay)
+                    write(index + 1)
+                }
+            }
+            write(0)
         }
 
         /// For the build server: forty lines of highlighter written one after another the way a pen

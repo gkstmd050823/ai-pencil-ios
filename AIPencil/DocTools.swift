@@ -100,7 +100,7 @@ enum ShapeOutline {
 
     /// Straight runs joined at corners. Each corner is given three times over, which keeps the smooth
     /// curve PencilKit draws through the points from cutting it.
-    private static func polyline(_ corners: [CGPoint]) -> [CGPoint] {
+    static func polyline(_ corners: [CGPoint]) -> [CGPoint] {
         var points: [CGPoint] = []
         for index in 1..<corners.count {
             points += run(corners[index - 1], corners[index])
