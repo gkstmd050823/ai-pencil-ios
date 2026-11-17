@@ -154,6 +154,10 @@ struct LibraryView: View {
                     library.move(tricky, to: folder.id)
                 }
             }
+        } else if let doc = library.lastShown {
+            // The document that was being read when the app was last seen, at the page it was at.
+            Diagnostics.shared.step("back to the document last read")
+            path.append(doc)
         }
     }
 }

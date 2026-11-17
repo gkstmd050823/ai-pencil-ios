@@ -119,6 +119,10 @@ struct InkChoice: Equatable, Codable {
     /// how far a shaky line is steadied, from 0 (the line goes exactly where the pen goes) to 1.
     var penSense = 0.5
     var penSteady = 0.25
+    /// For the fountain pen. How pointed a line's ends are, from 0 (as wide as the rest) to 1; and how
+    /// much the pen's pace changes the width, from 0 (not at all) to 1.
+    var penTaper = 0.3
+    var penFlow = 0.35
     var highlighterColor: UInt32 = 0xFFD60A
     /// The highlighter's width in millimetres on the paper.
     var highlighterSize = 5.0
@@ -150,6 +154,8 @@ struct InkChoice: Equatable, Codable {
         penSlot = read(.penSlot, penSlot)
         penSense = read(.penSense, penSense)
         penSteady = read(.penSteady, penSteady)
+        penTaper = read(.penTaper, penTaper)
+        penFlow = read(.penFlow, penFlow)
         highlighterColor = read(.highlighterColor, highlighterColor)
         highlighterSize = read(.highlighterSize, highlighterSize)
         eraserKind = read(.eraserKind, eraserKind)
@@ -275,6 +281,10 @@ struct InkChoice: Equatable, Codable {
         case .ball, .pencil: return 0
         }
     }
+
+    /// Pointed ends and a width that follows the pen's pace are the fountain pen's alone.
+    var appPenTaper: CGFloat { penKind == .fountain ? CGFloat(penTaper) : 0 }
+    var appPenFlow: CGFloat { penKind == .fountain ? CGFloat(penFlow) : 0 }
 
     /// Whether the tool in hand is put down by itself once it has been used.
     var putsDownAfterUse: Bool {

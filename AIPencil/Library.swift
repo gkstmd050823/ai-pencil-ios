@@ -68,8 +68,48 @@ final class Library: ObservableObject {
     @Published var incoming: IncomingFiles?
     /// Pages for the document on show, for its reading screen to put in.
     @Published var pagesToAdd: PageAddition?
-    /// The document on show in the reading screen, and how to ask it which page is being read.
-    @Published var showing: UUID?
+    /// The document on show in the reading screen, and how to ask it which page is being read. Which
+    /// document it is is kept: the app opens on it the next time, unless the shelf was on show.
+    @Published var showing: UUID? {
+        didSet {
+            guard Self.remembers, showing != oldValue else { return }
+            if let showing {
+                UserDefaults.standard.set(showing.uuidString, forKey: "lastShown")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "lastShown")
+            }
+        }
+    }
+
+    /// "-noRestore" (every picture the build server takes) has the app open on its shelf and every
+    /// document at its first page, whatever was on show the time before.
+    static let remembers = !ProcessInfo.processInfo.arguments.contains("-noRestore")
+
+    /// The document that was on show when the app was last seen, if one was and it is still there.
+    var lastShown: Doc? {
+        guard Self.remembers, let text = UserDefaults.standard.string(forKey: "lastShown"), let id = UUID(uuidString: text) else { return nil }
+        return docs.first { $0.id == id }
+    }
+
+    /// The page a document was last read at, counted from zero.
+    static func lastPage(for id: UUID) -> Int? {
+        guard remembers else { return nil }
+        return (UserDefaults.standard.dictionary(forKey: "lastPages") as? [String: Int])?[id.uuidString]
+    }
+
+    static func notePage(_ page: Int, for id: UUID) {
+        guard remembers, page >= 0 else { return }
+        var pages = (UserDefaults.standard.dictionary(forKey: "lastPages") as? [String: Int]) ?? [:]
+        guard pages[id.uuidString] != page else { return }
+        pages[id.uuidString] = page
+        UserDefaults.standard.set(pages, forKey: "lastPages")
+    }
+
+    private static func forgetPage(of id: UUID) {
+        guard var pages = UserDefaults.standard.dictionary(forKey: "lastPages") as? [String: Int], pages[id.uuidString] != nil else { return }
+        pages[id.uuidString] = nil
+        UserDefaults.standard.set(pages, forKey: "lastPages")
+    }
     var pageOnShow: (() -> Int?)?
     /// The folder the shelf is showing, where a file handed over by another app is offered to go.
     var shelfFolder: UUID?
@@ -384,6 +424,7 @@ final class Library: ObservableObject {
 
     func delete(_ doc: Doc) {
         closeTab(doc.id)
+        Self.forgetPage(of: doc.id)
         docs.removeAll { $0.id == doc.id }
         try? FileManager.default.removeItem(at: folder(for: doc.id))
         save()

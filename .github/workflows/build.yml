@@ -67,7 +67,8 @@ jobs:
           # Each launch asks the app to do something no one is there to tap, then a picture is taken.
           shot() {
             name="$1"; wait="$2"; shift 2
-            xcrun simctl launch --terminate-running-process "$UDID" app.aipencil.ios "$@"
+            # ("-noRestore": on its shelf and at every document's first page, whatever was on show before.)
+            xcrun simctl launch --terminate-running-process "$UDID" app.aipencil.ios -noRestore "$@"
             sleep "$wait"
             xcrun simctl io "$UDID" screenshot "screenshots/$name.png"
           }
@@ -229,13 +230,20 @@ jobs:
           shot 53-pages-added-outline 10 -demoImport tricky.pdf -demoNavigator outline
           shot 53-pages-added-export 14 -demoImport tricky.pdf -demoExport
           exported export-added
+          # The place is kept: a document left at its fifth page is what the app opens on the next time,
+          # at that page.
+          xcrun simctl launch --terminate-running-process "$UDID" app.aipencil.ios -demoImport tricky.pdf -demoPage 4
+          sleep 9
+          xcrun simctl launch --terminate-running-process "$UDID" app.aipencil.ios
+          sleep 9
+          xcrun simctl io "$UDID" screenshot screenshots/56-reopened-where-it-was.png
           # Two pages side by side, turned two at a time: as opened, and turned once.
           shot 54-spreads 10 -sample -pageLayout twoUpPaged
           shot 54-spreads-turned 12 -sample -pageLayout twoUpPaged -demoTurn
           # Forty lines of highlighter written one after another, as the highlighter is now and as it
           # was: the app notes how long the main thread took over each, and how long the pictures took.
-          shot 55-highlighter-many 20 -demoNote -demoHighlightMany
-          shot 55-highlighter-many-old 20 -demoNote -demoHighlightMany -demoOldHighlighter
+          shot 55-highlighter-many 25 -demoNote -demoHighlightMany
+          shot 55-highlighter-many-old 60 -demoNote -demoHighlightMany -demoOldHighlighter
           shot 16-settings 8 -demoSettings
           xcrun simctl ui "$UDID" appearance dark
           shot 17-dark 12 -sample -demoOpenQuestion

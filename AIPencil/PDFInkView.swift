@@ -296,7 +296,45 @@ final class SpreadTurner: NSObject, UIGestureRecognizerDelegate {
         didSet {
             forward.isEnabled = isOn
             back.isEnabled = isOn
+            keepBackSwipe()
         }
+    }
+
+    /// The recogniser of the system's own "sweep right anywhere to go back", once it has been found and
+    /// switched off.
+    private weak var stilled: UIGestureRecognizer?
+
+    /// Since iPadOS 26 a finger swept to the right anywhere on a screen goes back a screen: here it left
+    /// the document for the shelf where it was meant to turn back two pages. While pages are turned by
+    /// sweeping, that is switched off (going back from the screen's left edge, and by the arrow, stays).
+    /// Called now and then as well: the screen above may not be there yet when the pages are laid out.
+    func keepBackSwipe() {
+        guard isOn else {
+            stilled?.isEnabled = true
+            stilled = nil
+            return
+        }
+        guard stilled == nil, let view else { return }
+        var above: UIResponder? = view
+        while let here = above {
+            if let navigation = here as? UINavigationController {
+                // (Asked for by name: the property is not in every version of the system this is built for.)
+                let name = NSSelectorFromString("interactiveContentPopGestureRecognizer")
+                if navigation.responds(to: name), let found = navigation.perform(name)?.takeUnretainedValue() as? UIGestureRecognizer {
+                    found.isEnabled = false
+                    stilled = found
+                    DebugLog.write("turning: the system's sweep to go back is off while pages are turned by sweeping")
+                }
+                return
+            }
+            above = here.next
+        }
+    }
+
+    /// The document is being closed: the system's sweep is as it was.
+    func letGo() {
+        stilled?.isEnabled = true
+        stilled = nil
     }
 
     func attach(to view: PDFView) {
@@ -584,9 +622,10 @@ final class PageOverlay: UIView {
     /// Shows the line being written with the app's own pen, and where the pen is expected to go next.
     /// [under] puts it where highlighter goes: under the canvas, as a tint. [fineness] is how many pixels
     /// of the screen a page point takes and [grid] where a pixel begins.
-    func drawLive(_ line: PenLine, ahead: [PenSample], color: CGColor, fineness: CGFloat, grid: CGPoint, under: Bool = false) {
+    func drawLive(_ line: PenLine, ahead: [PenSample], color: CGColor, fineness: CGFloat, grid: CGPoint, under: Bool = false, afresh: Bool = false) {
         let wet = under ? wetHigh : wetPens
         wet.fit(scale: fineness, grid: grid)
+        if afresh { wet.restart() }
         wet.write(line, color: color)
         // A steadied line trails the pen on purpose; only a line that keeps up with it is drawn ahead.
         if !under, line.steady < 0.05, let end = line.points.last, let width = line.widths.last, !ahead.isEmpty {
@@ -844,6 +883,7 @@ final class ReaderController: ObservableObject {
     }
 
     func undo() {
+        coordinator?.expectNews()
         coordinator?.undoManager?.undo()
         Diagnostics.shared.step("undo")
     }
@@ -854,6 +894,7 @@ final class ReaderController: ObservableObject {
     }
 
     func redo() {
+        coordinator?.expectNews()
         coordinator?.undoManager?.redo()
     }
 
@@ -971,6 +1012,7 @@ struct PDFInkView: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ view: PDFView, coordinator: Coordinator) {
+        coordinator.turner.letGo()
         coordinator.saveAll()
         coordinator.stopWatching()
         Diagnostics.shared.step("document closed")
@@ -1006,6 +1048,14 @@ struct PDFInkView: UIViewRepresentable {
         /// The line being written with the app's own pen, the tool it is written with, and where the
         /// screen's pixels fall on its page.
         private var penLine: PenLine?
+        /// The zoom as last measured off the screen, and when.
+        private var zoomMeasured: (zoom: CGFloat, at: CFTimeInterval) = (1, 0)
+        /// Until when a change the canvas tells of may be PencilKit's own though no tool of PencilKit's
+        /// is in hand: for a few seconds after one was, and after an undo or redo (which may be of
+        /// something PencilKit did).
+        private var newsUntil: CFTimeInterval = 0
+        /// Whether the eraser's drag in progress has rubbed anything out.
+        private var rubbedAny = false
         /// Turns the pages two at a time where two are shown side by side to be turned.
         let turner = SpreadTurner()
         private var penTool = InkTool.pen
@@ -1033,7 +1083,7 @@ struct PDFInkView: UIViewRepresentable {
                 guard let self, let overlay = view as? PageOverlay else { return nil }
                 return self.pdfView?.document?.page(at: overlay.canvas.pageIndex)
             }
-            picker.zoom = { [weak self] in self?.pdfView?.scaleFactor ?? 1 }
+            picker.zoom = { [weak self] in self?.zoomSeen ?? 1 }
             picker.onPicked = { [weak self] text in self?.controller?.onPickedText?(text) }
             picker.onCopied = { [weak self] text in self?.controller?.onCopiedText?(text) }
             picker.onTranslate = { [weak self] text in self?.controller?.onTranslate?(text) }
@@ -1054,9 +1104,26 @@ struct PDFInkView: UIViewRepresentable {
         /// Every canvas shares the undo history of the window it is in.
         var undoManager: UndoManager? { pdfView?.undoManager }
 
+        /// What the canvas tells of in the next few seconds may be a change PencilKit made.
+        func expectNews(for seconds: CFTimeInterval = 2.5) {
+            newsUntil = max(newsUntil, CACurrentMediaTime() + seconds)
+        }
+
+        /// Whether a change the canvas tells of can be one PencilKit made on its own: with a tool in hand
+        /// that works on the canvas, with a touch on the canvas now or a moment ago (PencilKit takes a
+        /// while to make a stroke of what its pencil wrote), or when it has just been said to expect one.
+        private func mayBeNews(from canvas: PageCanvas) -> Bool {
+            let now = CACurrentMediaTime()
+            if choice.needsCanvas || now < newsUntil { return true }
+            if let overlay = canvas.superview as? PageOverlay, overlay.inkInUse || now - overlay.canvasUsed < 4 { return true }
+            return false
+        }
+
         func apply(choice: InkChoice, fingerDraws: Bool) {
             guard choice != self.choice || fingerDraws != self.fingerDraws else { return }
             if choice.tool != self.choice.tool { Diagnostics.shared.step("tool " + choice.tool.rawValue) }
+            // (A tool of PencilKit's put down: what it did last may still be on its way.)
+            if self.choice.needsCanvas, !choice.needsCanvas { expectNews(for: 4) }
             self.choice = choice
             self.fingerDraws = fingerDraws
             // (Fingers that write do not pick words.)
@@ -1284,14 +1351,15 @@ struct PDFInkView: UIViewRepresentable {
             // PencilKit's drawing of it took the place of the app's.) No finer than eight times the page;
             // and after a memory warning, no finer than half as fine again as the page.
             let finest: CGFloat = Self.tight ? 1.5 : max(8, view.maxScaleFactor)
-            let wanted = min(finest, max(1, view.scaleFactor))
+            let zoom = zoomSeen
+            let wanted = min(finest, max(1, zoom))
             if abs(wanted - inkScale) > 0.0005 {
                 inkScale = wanted
                 for overlay in overlays.values where !overlay.inkInUse {
                     overlay.inkScale = wanted
                 }
-                DebugLog.write("ink: page zoom \(view.scaleFactor), canvases drawn \(wanted) times finer than the page")
-                Diagnostics.shared.step(String(format: "zoom %.2f", Double(view.scaleFactor)))
+                DebugLog.write("ink: page zoom \(zoom) (PDFKit says \(view.scaleFactor)), canvases drawn \(wanted) times finer than the page")
+                Diagnostics.shared.step(String(format: "zoom %.2f", Double(zoom)))
             }
             placeCanvases()
         }
@@ -1402,7 +1470,7 @@ struct PDFInkView: UIViewRepresentable {
         }
 
         func drawing(forPage index: Int) -> PKDrawing? {
-            overlay(forPage: index)?.canvas.drawing ?? storedDrawing(page: index)
+            overlay(forPage: index)?.canvas.ink ?? storedDrawing(page: index)
         }
 
         func go(toPage index: Int) {
@@ -1552,6 +1620,19 @@ struct PDFInkView: UIViewRepresentable {
                 }
                 return
             }
+            guard mayBeNews(from: canvas) else {
+                // The app's own pen and eraser change the handwriting themselves and hand the canvas the
+                // result. The canvas tells of what it was handed, sometimes a moment later, and by then
+                // it may not be the newest any more: taken for a change of PencilKit's, an older state
+                // told of late put the handwriting back to what it was before the last line, and that
+                // line, still to be seen on the page, was not there for the eraser to find. Nothing the
+                // canvas tells of is taken while nothing of PencilKit's can have changed it.
+                if strokes.count != canvas.strokeCount {
+                    DebugLog.write("canvas: told of \(strokes.count) lines while the page has \(canvas.strokeCount); not taken, the page's own note stands")
+                    Diagnostics.shared.step("canvas told of \(strokes.count) lines, page has \(canvas.strokeCount)")
+                }
+                return
+            }
             record(drawing, on: canvas, count: strokes.count)
         }
 
@@ -1626,10 +1707,38 @@ struct PDFInkView: UIViewRepresentable {
             }
         }
 
+        /// How many times its own size a page is shown, measured off the screen: how far apart two places
+        /// of a page's overlay are in the page view.
+        ///
+        /// PDFKit has a figure for this (its scaleFactor), and until 0.12.0 everything drawn here was
+        /// drawn as fine as that figure said. On an iPad with iPadOS 27 the figure cannot be relied on:
+        /// after a quick pinch out and in again it went on saying the zoom at which the page fits the
+        /// screen (0.97) while the page stood on screen nearly eight times its size, and said nothing of
+        /// a change. The page and the handwriting were then drawn for the smaller size and stretched,
+        /// soft, until something else had them drawn again.
+        private var zoomSeen: CGFloat {
+            let now = CACurrentMediaTime()
+            // (Asked for with every place a pen reports; measured a few times a second at most.)
+            if now - zoomMeasured.at < 0.05 { return zoomMeasured.zoom }
+            var zoom = pdfView?.scaleFactor ?? 1
+            if let view = pdfView {
+                for overlay in overlays.values where overlay.window != nil && overlay.bounds.width > 1 {
+                    let a = overlay.convert(CGPoint.zero, to: view), b = overlay.convert(CGPoint(x: 100, y: 0), to: view)
+                    let length = hypot(b.x - a.x, b.y - a.y)
+                    if length > 0.01, length.isFinite {
+                        zoom = length / 100
+                        break
+                    }
+                }
+            }
+            zoomMeasured = (zoom, now)
+            return zoom
+        }
+
         /// How many pixels a point of the page takes on screen now, for shapes drawn over the page.
         private var fineness: CGFloat {
             guard let view = pdfView else { return 2 }
-            return min(64, max(1, view.scaleFactor) * view.traitCollection.displayScale)
+            return min(64, max(1, zoomSeen) * view.traitCollection.displayScale)
         }
 
         // MARK: the app's own pen
@@ -1638,7 +1747,7 @@ struct PDFInkView: UIViewRepresentable {
         private func penDrew(_ fresh: [PenSample], ahead: [PenSample], in overlay: PageOverlay) {
             guard !retired, choice.ownPen else { return }
             if penLine == nil {
-                let zoom = max(pdfView?.scaleFactor ?? 1, 0.5)
+                let zoom = max(zoomSeen, 0.5)
                 penTool = choice.tool
                 penGrid = Self.pixelGrid(of: overlay.inkPicture, scale: fineness)
                 switch penTool {
@@ -1650,7 +1759,10 @@ struct PDFInkView: UIViewRepresentable {
                 case .ai:
                     penLine = PenLine(width: 2.4, sense: 0, steady: 0, spacing: 0.5 / zoom)
                 default:
-                    penLine = PenLine(width: choice.penSeenWidth, sense: choice.appPenSense, steady: CGFloat(choice.penSteady), spacing: 0.5 / zoom)
+                    penLine = PenLine(
+                        width: choice.penSeenWidth, sense: choice.appPenSense, steady: CGFloat(choice.penSteady), spacing: 0.5 / zoom,
+                        taper: choice.appPenTaper, flow: choice.appPenFlow, zoom: zoom
+                    )
                 }
             }
             for sample in fresh { penLine?.add(sample) }
@@ -1708,7 +1820,11 @@ struct PDFInkView: UIViewRepresentable {
                 overlay.dropLive()
                 return
             }
-            overlay.drawLive(line, ahead: [], color: liveColor(tool), fineness: fineness, grid: Self.pixelGrid(of: overlay.inkPicture, scale: fineness), under: high)
+            // (A line with pointed ends was given its end just now, as the pen lifted: it is shown anew.)
+            overlay.drawLive(
+                line, ahead: [], color: liveColor(tool), fineness: fineness, grid: Self.pixelGrid(of: overlay.inkPicture, scale: fineness),
+                under: high, afresh: line.taper > 0
+            )
             let canvas = overlay.canvas
             var drawing = canvas.ink
             let before = drawing
@@ -1728,6 +1844,8 @@ struct PDFInkView: UIViewRepresentable {
             let saved = choice
             let lines = 40
             var total = 0.0, worst = 0.0, points = 0
+            // (What writing a line took and what lifting the pen took, for the first ten lines and the last ten.)
+            var writing = [0.0, 0.0], lifting = [0.0, 0.0]
             for row in 0..<lines {
                 choice.tool = .highlighter
                 let y = 150 + CGFloat(row % 20) * 28 + CGFloat(row / 20) * 9
@@ -1745,16 +1863,25 @@ struct PDFInkView: UIViewRepresentable {
                     CATransaction.flush()
                 }
                 points += penLine?.points.count ?? 0
+                let written = CACurrentMediaTime()
                 penDone(kept: true, in: overlay)
                 CATransaction.flush()
                 let took = (CACurrentMediaTime() - began) * 1000
                 total += took
                 worst = max(worst, took)
+                if row < 10 || row >= lines - 10 {
+                    writing[row < 10 ? 0 : 1] += (written - began) * 100
+                    lifting[row < 10 ? 0 : 1] += (CACurrentMediaTime() - written) * 100
+                }
             }
             choice = saved
             DebugLog.write(String(
                 format: "highlighter: %d lines written %@ at %.2f pixels a point, %d points in all; the main thread took %.0f ms, %.1f ms a line, %.1f ms the slowest; %d lines waiting as shapes",
                 lines, InkPaint.oldHighlighter ? "the old way" : "the new way", Double(fineness), points, total, total / Double(lines), worst, overlay.keptCount
+            ))
+            DebugLog.write(String(
+                format: "highlighter: a line of the first ten took %.1f ms to write and %.1f ms when the pen lifted; of the last ten, %.1f ms and %.1f ms",
+                writing[0], lifting[0], writing[1], lifting[1]
             ))
         }
 
@@ -1806,6 +1933,21 @@ struct PDFInkView: UIViewRepresentable {
                     line.add(PenSample(point: point, force: CGFloat(0.6 + 0.8 * abs(sin(angle))), time: Double(step) / 240))
                 }
                 commit(line, in: overlay)
+            }
+            // The fountain pen: the same hook written slowly and fast, with ends as pointed as they are
+            // set to begin with and with ends fully pointed; and dots, which have no ends to point.
+            for (column, (pace, taper)) in [(1.0, 0.3), (5.0, 0.3), (1.0, 1.0), (5.0, 1.0)].enumerated() {
+                var line = PenLine(width: 2.2, sense: 0.5, steady: 0, spacing: 0.3, taper: CGFloat(taper), flow: 0.35, zoom: 1.36)
+                let left = 300 + 56 * Double(column)
+                for step in 0...90 {
+                    let along = Double(step) / 90
+                    let point = CGPoint(x: left + 34 * along + 10 * sin(along * 3 * Double.pi), y: 640 + 70 * along * along)
+                    line.add(PenSample(point: point, force: CGFloat(0.5 + 0.5 * sin(along * Double.pi)), time: Double(step) / (60 * pace)))
+                }
+                commit(line, in: overlay)
+                var dot = PenLine(width: 2.2, sense: 0.5, steady: 0, spacing: 0.3, taper: CGFloat(taper), flow: 0.35, zoom: 1.36)
+                dot.add(PenSample(point: CGPoint(x: left + 20, y: 730), force: 0.8, time: 0))
+                commit(dot, in: overlay)
             }
             for (row, width) in [0.4, 1.0, 2.0, 4.0, 8.0].enumerated() {
                 var line = PenLine(width: CGFloat(width), sense: 0, steady: 0)
@@ -1872,8 +2014,8 @@ struct PDFInkView: UIViewRepresentable {
         /// the zoom: PencilKit's eraser for part of a line is (measured on the build server: sizes of 40
         /// and 16 took 39.5 and 16 points of screen), and the app's own are made to be.
         private var eraserReach: CGFloat? {
-            guard choice.tool == .eraser, let view = pdfView else { return nil }
-            return CGFloat(choice.eraserWidth) / 2 / max(view.scaleFactor, 0.2)
+            guard choice.tool == .eraser, pdfView != nil else { return nil }
+            return CGFloat(choice.eraserWidth) / 2 / max(zoomSeen, 0.2)
         }
 
         /// Shows the ring of the eraser at a place on a page, while the eraser is in hand.
@@ -1903,10 +2045,11 @@ struct PDFInkView: UIViewRepresentable {
             guard !retired, choice.tool == .eraser, choice.eraserTakesMarks, !choice.eraserHighlighterOnly else { return }
             let page = overlay.canvas.pageIndex
             // What the eraser covers, and no less than a pen's tip does on screen.
-            let zoom = max(pdfView?.scaleFactor ?? 1, 0.1)
+            let zoom = max(zoomSeen, 0.1)
             let reach = max(3, 11 / zoom, eraserReach ?? 0)
             for mark in marks where mark.page == page && Self.crosses(from, to, mark.points, within: reach) {
                 setMark(mark.id, hidden: true)
+                rubbedAny = true
             }
         }
 
@@ -1975,6 +2118,7 @@ struct PDFInkView: UIViewRepresentable {
                     let strokes = canvas.ink.strokes
                     rubbed = (strokes, strokes.map(\.renderBounds), canvas.ink, .null, strokes.count)
                     gesture.start = point
+                    rubbedAny = false
                 }
                 guard var work = rubbed else { return }
                 let from = gesture.start
@@ -1988,6 +2132,7 @@ struct PDFInkView: UIViewRepresentable {
                     if Self.touches(stroke, from, point, within: reach) { gone.append(index) }
                 }
                 if !gone.isEmpty {
+                    rubbedAny = true
                     var dirty = CGRect.null
                     for index in gone.reversed() {
                         dirty = dirty.union(work.boxes[index])
@@ -2020,9 +2165,14 @@ struct PDFInkView: UIViewRepresentable {
                         me.setDrawing(before, on: canvas, undoingTo: after, dirty: dirty)
                     }
                     DebugLog.write("eraser: \(work.count - work.strokes.count) \(choice.eraserHighlighterOnly ? "highlighter lines" : "lines") rubbed out, \(work.strokes.count) lines left on the page")
+                } else if let work = rubbed {
+                    // Noted for the diagnostics: an eraser that met nothing, and what there was to meet.
+                    Diagnostics.shared.step("eraser met nothing: \(work.count) lines on the page, \(overlay.keptCount) on show as written")
                 }
                 rubbed = nil
-                toolUsed()
+                // (An eraser set to be put down after use is not put down for having met nothing.)
+                if rubbedAny { toolUsed() }
+                rubbedAny = false
             }
         }
 
@@ -2079,7 +2229,10 @@ struct PDFInkView: UIViewRepresentable {
             }
             ticks += 1
             if ticks % 16 == 1 { keepZoomRange(view) }
-            if ticks % 16 == 9 { freeScrolling(in: view) }
+            if ticks % 16 == 9 {
+                freeScrolling(in: view)
+                turner.keepBackSwipe()
+            }
             placeCanvases()
             let pages = Self.drawsPages
             if ticks == 30 {
@@ -2094,12 +2247,23 @@ struct PDFInkView: UIViewRepresentable {
                     overlay.pagePicture.clear()
                 }
             }
-            let scale = view.scaleFactor * view.traitCollection.displayScale
+            let zoom = zoomSeen
+            let scale = zoom * view.traitCollection.displayScale
             guard scale > 0 else { return }
             // While the zoom is still changing nothing is drawn: it would be thrown away at once.
             if abs(scale - scaleSeen) > 0.0005 * scale {
                 scaleSeen = scale
                 return
+            }
+            // PDFKit does not always say that the zoom changed (see zoomSeen). The canvases are made as
+            // fine as the zoom that is seen, whether it was said or not.
+            let finest: CGFloat = Self.tight ? 1.5 : max(8, view.maxScaleFactor)
+            if abs(min(finest, max(1, zoom)) - inkScale) > 0.0005 {
+                if abs(zoom - view.scaleFactor) > 0.01 * zoom {
+                    DebugLog.write("zoom: the pages are seen at \(zoom) times their size while PDFKit says \(view.scaleFactor)")
+                    Diagnostics.shared.step(String(format: "zoom seen %.2f, PDFKit says %.2f", Double(zoom), Double(view.scaleFactor)))
+                }
+                settleScale()
             }
             let around = view.bounds.insetBy(dx: -view.bounds.width * 0.5, dy: -view.bounds.height * 0.6)
             for overlay in overlays.values where overlay.window != nil {
@@ -2195,7 +2359,7 @@ struct PDFInkView: UIViewRepresentable {
             let picture = overlay.inkPicture
             let version = canvas.inkVersion
             let whole = overlay.bounds
-            let scale = view.scaleFactor * view.traitCollection.displayScale
+            let scale = zoomSeen * view.traitCollection.displayScale
             guard scale > 0, whole.width > 1, whole.height > 1, !picture.gaveUp else { return }
             if canvas.strokeCount == 0 {
                 // Nothing written: no pictures, and nothing to draw.
@@ -2390,7 +2554,7 @@ struct PDFInkView: UIViewRepresentable {
             guard let view = pdfView, let page = view.currentPage, let overlay = overlays[page] else { return "no page in view" }
             let canvas = overlay.canvas
             var lines: [String] = []
-            lines.append("zoom \(view.scaleFactor), fits at \(view.scaleFactorForSizeToFit), up to \(view.maxScaleFactor); display scale \(view.traitCollection.displayScale); view \(Int(view.bounds.width)) x \(Int(view.bounds.height))")
+            lines.append("zoom \(view.scaleFactor), seen \(zoomSeen), fits at \(view.scaleFactorForSizeToFit), up to \(view.maxScaleFactor); display scale \(view.traitCollection.displayScale); view \(Int(view.bounds.width)) x \(Int(view.bounds.height))")
             let shown = overlay.convert(overlay.bounds, to: nil)
             lines.append("page \(canvas.pageIndex): \(Int(overlay.bounds.width)) x \(Int(overlay.bounds.height)) points, on screen \(Int(shown.width)) x \(Int(shown.height)); \(overlays.count) pages laid out; canvases \(inkScale) times the page")
             lines.append("canvas: \(Int(canvas.bounds.width)) x \(Int(canvas.bounds.height)), zoom \(canvas.zoomScale), content scale \(canvas.contentScaleFactor), \(canvas.strokeCount) lines")
@@ -2665,6 +2829,7 @@ struct PDFInkView: UIViewRepresentable {
             DebugLog.write("overlay: page \(overlay.canvas.pageIndex) bounds \(overlay.bounds.size) page shown \(AskCapture.shape(of: page).size) turned \(page.rotation) ink scale \(overlay.inkScale)")
             var drawing = overlay.canvas.drawing
             drawing.strokes.append(Self.ring(center: center, radius: radius, color: InkChoice.markColor))
+            expectNews()
             overlay.canvas.drawing = drawing
         }
 

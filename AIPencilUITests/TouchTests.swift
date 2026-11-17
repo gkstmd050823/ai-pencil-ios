@@ -19,7 +19,7 @@ final class TouchTests: XCTestCase {
 
     private func start(_ arguments: [String], fingersWrite: Bool = true) {
         app.terminate()
-        app.launchArguments = ["-sample", "-fingerDraws", fingersWrite ? "YES" : "NO"] + arguments
+        app.launchArguments = ["-noRestore", "-sample", "-fingerDraws", fingersWrite ? "YES" : "NO"] + arguments
         app.launch()
         sleep(5)
     }
@@ -243,7 +243,7 @@ final class TouchTests: XCTestCase {
 
         // The shelf: several documents picked at once, all of them, and done.
         app.terminate()
-        app.launchArguments = []
+        app.launchArguments = ["-noRestore"]
         app.launch()
         sleep(5)
         let pick = app.buttons["여러 개 선택"]

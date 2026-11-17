@@ -67,6 +67,14 @@ struct PenLine {
     /// Knots nearer than this to the one before are left out. It is given in page points for half a
     /// point of the screen: zoomed in, a letter is small on the page and large on the screen.
     let spacing: CGFloat
+    /// How pointed the line's two ends are: 0 as wide as the rest of it, 1 down to a quarter of that.
+    /// (A fountain pen's line comes to a point where the nib lands and where it lifts.)
+    let taper: CGFloat
+    /// How much the pen's pace changes the width, from 0 (not at all) to 1: a nib that moves slowly
+    /// leaves more ink, one that moves fast less.
+    let flow: CGFloat
+    /// Screen points to a page point, for telling the pen's pace as the hand makes it.
+    let zoom: CGFloat
 
     private(set) var points: [CGPoint] = []
     private(set) var widths: [CGFloat] = []
@@ -88,15 +96,33 @@ struct PenLine {
     private var heldWidth: CGFloat = 0
     private var last: PenSample?
     private var began: TimeInterval = 0
+    /// The pen's pace in screen points a second, evened out over the last few places.
+    private var pace: CGFloat?
+    /// How far the line has gone from where it began, knot to knot, in page points.
+    private var run: CGFloat = 0
+
+    /// The share of its width a pointed end comes down to, and how far from the end it is back to full width.
+    private var tip: CGFloat { 1 - 0.75 * taper }
+    private var tipReach: CGFloat { max(0.6, width * (1.2 + 2.8 * taper)) }
+
+    /// How much of its width the line has at [distance] from one of its ends.
+    private func pointed(_ distance: CGFloat) -> CGFloat {
+        guard taper > 0 else { return 1 }
+        let along = min(1, max(0, distance / tipReach))
+        return tip + (1 - tip) * along * (2 - along)
+    }
 
     /// The longest the line trails the pen at full steadying, in seconds.
     private static let trail = 0.085
 
-    init(width: CGFloat, sense: CGFloat, steady: CGFloat, spacing: CGFloat = 0.6) {
+    init(width: CGFloat, sense: CGFloat, steady: CGFloat, spacing: CGFloat = 0.6, taper: CGFloat = 0, flow: CGFloat = 0, zoom: CGFloat = 1) {
         self.width = width
         self.sense = min(max(sense, 0), 1)
         self.steady = min(max(steady, 0), 1)
         self.spacing = min(max(spacing, 0.05), 1)
+        self.taper = min(max(taper, 0), 1)
+        self.flow = min(max(flow, 0), 1)
+        self.zoom = max(zoom, 0.05)
     }
 
     /// How many times the ordinary width a line is at this force: thinner for a light hand, up to nearly
@@ -109,6 +135,15 @@ struct PenLine {
     mutating func add(_ sample: PenSample) {
         let step = last.map { max(0.0005, sample.time - $0.time) } ?? 0.004
         if last == nil { began = sample.time }
+        // The pen's pace: slow, the line is a little wider than it is set; fast, narrower.
+        var quick: CGFloat = 1
+        if flow > 0, let before = last {
+            let speed = hypot(sample.point.x - before.point.x, sample.point.y - before.point.y) * zoom / CGFloat(step)
+            let even = pace.map { $0 + (speed - $0) * 0.15 } ?? speed
+            pace = even
+            let fast = min(1, max(0, (even - 150) / 1350))
+            quick = 1 + flow * (0.14 - 0.5 * fast * fast * (3 - 2 * fast))
+        }
         last = sample
         // The line goes a share of the way to the pen at each sample, the share shrinking with steadying:
         // a quick wobble of the hand is over before the line has followed it.
@@ -121,14 +156,16 @@ struct PenLine {
             place = sample.point
         }
         held = place
-        let wanted = max(0.25, width * (1 + sense * (Self.swell(sample.force) - 1)))
+        let wanted = max(0.25, width * (1 + sense * (Self.swell(sample.force) - 1)) * quick)
         heldWidth = knots.isEmpty ? wanted : heldWidth + (wanted - heldWidth) * 0.35
         knot(place, heldWidth, time: sample.time)
     }
 
     private mutating func knot(_ place: CGPoint, _ size: CGFloat, time: TimeInterval, always: Bool = false) {
         if let end = knots.last, !always, hypot(place.x - end.point.x, place.y - end.point.y) < spacing { return }
-        knots.append(Knot(point: place, width: size, time: max(0, time - began)))
+        if let end = knots.last { run += hypot(place.x - end.point.x, place.y - end.point.y) }
+        // (Where the line begins it comes up from a point, if it is a line with pointed ends.)
+        knots.append(Knot(point: place, width: max(0.2, size * pointed(run)), time: max(0, time - began)))
         work(toTheEnd: false)
     }
 
@@ -209,6 +246,20 @@ struct PenLine {
             knot(CGPoint(x: knots[0].point.x + 0.1, y: knots[0].point.y), knots[0].width, time: last.time, always: true)
         }
         work(toTheEnd: true)
+        guard taper > 0, points.count > 1 else { return }
+        if run < tipReach {
+            // Too short to have ends (a dot, the stroke of a comma): as wide as it is, all of it.
+            for index in widths.indices { widths[index] = max(widths[index], heldWidth) }
+            return
+        }
+        // Where the line ends it goes down to a point as it came up from one.
+        var along: CGFloat = 0
+        var index = points.count - 1
+        while index >= 0, along < tipReach {
+            widths[index] = max(0.2, widths[index] * pointed(along))
+            if index > 0 { along += hypot(points[index].x - points[index - 1].x, points[index].y - points[index - 1].y) }
+            index -= 1
+        }
     }
 
     /// The line as a PencilKit stroke. The ink is PencilKit's "monoline", which draws every point as wide
@@ -249,10 +300,22 @@ final class PenGesture: UIGestureRecognizer {
     private weak var followed: UITouch?
     private var origin = CGPoint.zero
     private var since: TimeInterval = 0
+    /// The force the pencil last told of in the line being written.
+    private var lastForce: CGFloat = 0
 
-    private func samples(_ touches: [UITouch]) -> [PenSample] {
+    /// A pencil that has just left the page tells a force of nought, and so at times does one that has
+    /// only just landed. Nought is what a finger tells, which has no force to tell and is written at the
+    /// ordinary width: handed on as it was, the end of a line written lightly swelled to that width, a
+    /// lump on the end of every stroke with the pen set to answer much to pressure. The force last told
+    /// stands in for it; where none has been told yet, a light one.
+    private func samples(_ touches: [UITouch], told: Bool = true) -> [PenSample] {
         touches.map { touch in
-            PenSample(point: touch.preciseLocation(in: view), force: touch.type == .pencil ? touch.force : 0, time: touch.timestamp)
+            var force: CGFloat = 0
+            if touch.type == .pencil {
+                if touch.force > 0, told { lastForce = touch.force }
+                force = touch.force > 0 ? touch.force : (lastForce > 0 ? lastForce : 0.15)
+            }
+            return PenSample(point: touch.preciseLocation(in: view), force: force, time: touch.timestamp)
         }
     }
 
@@ -272,13 +335,14 @@ final class PenGesture: UIGestureRecognizer {
         followed = touch
         origin = touch.location(in: view)
         since = touch.timestamp
+        lastForce = 0
         onDraw?(samples([touch]), [])
         if touch.type == .pencil { state = .began }
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
         guard let touch = followed, touches.contains(touch) else { return }
-        onDraw?(samples(event.coalescedTouches(for: touch) ?? [touch]), samples(event.predictedTouches(for: touch) ?? []))
+        onDraw?(samples(event.coalescedTouches(for: touch) ?? [touch]), samples(event.predictedTouches(for: touch) ?? [], told: false))
         if state == .possible {
             let here = touch.location(in: view)
             if hypot(here.x - origin.x, here.y - origin.y) > 5 || touch.timestamp - since > 0.15 { state = .began }

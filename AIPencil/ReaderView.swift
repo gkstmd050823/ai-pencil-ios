@@ -58,6 +58,9 @@ struct ReaderView: View {
     @State private var startPage: Int
     /// Picking PDFs whose pages are to go into this document.
     @State private var pickingPages = false
+    /// The page view has gone to the page the document was opened at; from then on the page in view is
+    /// the page the reader is at, and is kept.
+    @State private var placeKept: Bool
     /// The paper as the page view was built with; nil until it has been rebuilt once.
     @State private var paperDark: Bool?
     @State private var bookmarks: [Int] = []
@@ -74,7 +77,12 @@ struct ReaderView: View {
 
     init(doc: Doc) {
         self.doc = doc
-        _startPage = State(initialValue: Library.startPage(for: doc.id) ?? max(0, UserDefaults.standard.integer(forKey: "demoPage")))
+        // Where pages were just put in; or the page the build server asked for; or the page it was last read at.
+        let asked = UserDefaults.standard.object(forKey: "demoPage") != nil ? max(0, UserDefaults.standard.integer(forKey: "demoPage")) : nil
+        let start = Library.startPage(for: doc.id) ?? asked ?? Library.lastPage(for: doc.id) ?? 0
+        let page = min(max(start, 0), max(doc.pageCount - 1, 0))
+        _startPage = State(initialValue: page)
+        _placeKept = State(initialValue: page == 0)
     }
 
     private var folder: URL { library.folder(for: doc.id) }
@@ -240,6 +248,14 @@ struct ReaderView: View {
             case .failure(let error):
                 errorText = error.localizedDescription
             }
+        }
+        .onChange(of: controller.pageIndex) {
+            // (A page view begins at the first page and goes to the page asked for a moment later.)
+            if !placeKept {
+                guard controller.pageIndex == startPage else { return }
+                placeKept = true
+            }
+            Library.notePage(controller.pageIndex, for: doc.id)
         }
         .onChange(of: library.pagesToAdd) {
             guard let wanted = library.pagesToAdd, wanted.doc == doc.id else { return }
@@ -538,6 +554,8 @@ struct ReaderView: View {
         Library.clearStartPage(for: doc.id)
         guard !ready else { return }
         ready = true
+        // (Should the page asked for never come into view, the page in view counts all the same.)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { placeKept = true }
         let session = self.session
         let controller = self.controller
         controller.onEditMath = { item in
@@ -1210,8 +1228,14 @@ private struct ToolOptions: View {
                     SliderRow(title: "필압 감도", value: $choice.penSense, range: 0...1, shown: "\(Int((choice.penSense * 100).rounded()))%")
                         .disabled(choice.penKind != .fountain)
                         .opacity(choice.penKind != .fountain ? 0.4 : 1)
+                    if choice.penKind == .fountain {
+                        SliderRow(title: "펜끝 선명도", value: $choice.penTaper, range: 0...1, shown: "\(Int((choice.penTaper * 100).rounded()))%")
+                        SliderRow(title: "속도 반응", value: $choice.penFlow, range: 0...1, shown: "\(Int((choice.penFlow * 100).rounded()))%")
+                    }
                     SliderRow(title: "획 안정화", value: $choice.penSteady, range: 0...1, shown: "\(Int((choice.penSteady * 100).rounded()))%")
-                    Text("필압 감도는 만년필에서 누르는 힘이 굵기를 얼마나 바꿀지, 획 안정화는 손떨림을 얼마나 펴 줄지예요. 안정화를 높이면 선이 펜을 조금 늦게 따라와요.")
+                    Text(choice.penKind == .fountain
+                        ? "필압 감도는 누르는 힘이, 속도 반응은 펜의 빠르기가 굵기를 얼마나 바꿀지예요(천천히 쓰면 굵게, 빨리 쓰면 가늘게). 펜끝 선명도는 획의 처음과 끝이 얼마나 뾰족할지, 획 안정화는 손떨림을 얼마나 펴 줄지예요."
+                        : "획 안정화는 손떨림을 얼마나 펴 줄지예요. 높이면 선이 펜을 조금 늦게 따라와요.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

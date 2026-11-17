@@ -217,6 +217,17 @@ final class WetInk: UIView {
         invalidate(dirty.union(piece.box))
     }
 
+    /// The line being written has changed along its whole length (its ends were shaped as the pen
+    /// lifted): what was made of it so far is let go, and the next writing of it makes it anew.
+    func restart() {
+        guard let live else { return }
+        invalidate(live.box)
+        live.pieces = []
+        live.box = .null
+        open = nil
+        openFrom = 0
+    }
+
     /// The line being written came to nothing.
     func drop() {
         guard let gone = live else { return }
