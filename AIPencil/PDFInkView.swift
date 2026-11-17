@@ -2403,6 +2403,15 @@ struct PDFInkView: UIViewRepresentable {
                     writing[row < 10 ? 0 : 1] += (written - began) * 100
                     lifting[row < 10 ? 0 : 1] += (CACurrentMediaTime() - written) * 100
                 }
+                // (Told as it goes: zoomed in, on the build server, forty lines can take longer than the
+                // picture waits for, and nothing was known of a run that did not end.)
+                if (row + 1) % 5 == 0 {
+                    DebugLog.write(String(
+                        format: "many lines: %d written so far %@ at %.2f pixels a point; the main thread took %.0f ms, the last one %.0f ms (%.0f ms of it when the pen lifted)",
+                        row + 1, scribble ? (Self.eagerCanvas ? "with the pen, the canvas handed every line" : "with the pen") : "with the highlighter",
+                        Double(fineness), total, took, (CACurrentMediaTime() - written) * 1000
+                    ))
+                }
             }
             choice = saved
             DebugLog.write(String(
