@@ -314,7 +314,7 @@ final class Diagnostics: NSObject, MXMetricManagerSubscriber {
         lock.lock()
         let last = steps
         lock.unlock()
-        lines.append("last steps: " + last.suffix(8).joined(separator: " | "))
+        lines.append("last steps: " + last.suffix(16).joined(separator: " | "))
         lines.append("")
         if let seen = viewAsked?(), !seen.isEmpty {
             lines.append("page view as last seen:")

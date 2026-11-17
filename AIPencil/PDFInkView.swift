@@ -1183,6 +1183,8 @@ struct PDFInkView: UIViewRepresentable {
         private var rubTold: (began: CFTimeInterval, last: CFTimeInterval, tellings: Int, places: Int, longest: CFTimeInterval) = (0, 0, 0, 0, 0)
         /// When a pencil was last seen held just above a page.
         private var hoverSeen: CFTimeInterval = 0
+        /// When a double tap or a squeeze of the pencil last changed the tool.
+        private var pencilActed: CFTimeInterval = 0
         /// Turns the pages two at a time where two are shown side by side to be turned.
         let turner = SpreadTurner()
         private var penTool = InkTool.pen
@@ -1711,11 +1713,30 @@ struct PDFInkView: UIViewRepresentable {
         // MARK: PKCanvasViewDelegate
 
         func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
-            if let overlay = canvasView.superview as? PageOverlay { canvasInUse(overlay, true) }
+            guard let overlay = canvasView.superview as? PageOverlay else { return }
+            // Only a tool that works on the canvas can be at work on it. (See below.)
+            guard choice.needsCanvas, canvasView.isUserInteractionEnabled else {
+                Diagnostics.shared.step("canvas said a tool began with \(choice.tool.rawValue) in hand; not taken")
+                return
+            }
+            canvasInUse(overlay, true)
         }
 
+        /// PencilKit says a tool has finished on the canvas. That counts as the tool in hand having been
+        /// used only when the tool in hand is one of PencilKit's and a touch was on the canvas.
+        ///
+        /// Until 0.13.0 it counted whatever was in hand. The canvas is handed the handwriting by code,
+        /// at times a moment after the last line was written, and should PencilKit say "finished" for
+        /// anything of that kind while the app's own eraser was in hand and set to be put down after
+        /// use, the eraser was put down before it had touched the page: taken up right after writing,
+        /// it was the pen again by the time it reached the paper.
         func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
-            if let overlay = canvasView.superview as? PageOverlay { canvasInUse(overlay, false) }
+            guard let overlay = canvasView.superview as? PageOverlay else { return }
+            guard choice.needsCanvas, overlay.inkInUse else {
+                Diagnostics.shared.step("canvas said a tool ended with \(choice.tool.rawValue) in hand; not taken")
+                return
+            }
+            canvasInUse(overlay, false)
             toolUsed()
         }
 
@@ -1723,6 +1744,7 @@ struct PDFInkView: UIViewRepresentable {
         private func toolUsed() {
             guard choice.putsDownAfterUse else { return }
             let tool = choice.tool
+            Diagnostics.shared.step("\(tool.rawValue) used, put down")
             DispatchQueue.main.async { [weak self] in
                 self?.controller?.onToolUsed?(tool)
             }
@@ -3184,6 +3206,7 @@ struct PDFInkView: UIViewRepresentable {
             guard let view = pdfView, let page = view.currentPage, let overlay = overlays[page] else { return "no page in view" }
             let canvas = overlay.canvas
             var lines: [String] = []
+            lines.append("tool \(choice.tool.rawValue); eraser takes \(choice.eraserHighlighterOnly ? "highlighter only" : choice.eraserKind.rawValue), \(Int(choice.eraserWidth)) wide; put down after use: eraser \(choice.eraserAuto), highlighter \(choice.highlighterAuto), shape \(choice.shapeAuto); pen \(choice.penKind.rawValue)")
             lines.append("zoom \(view.scaleFactor), seen \(zoomSeen), fits at \(view.scaleFactorForSizeToFit), up to \(view.maxScaleFactor); display scale \(view.traitCollection.displayScale); view \(Int(view.bounds.width)) x \(Int(view.bounds.height))")
             let shown = overlay.convert(overlay.bounds, to: nil)
             lines.append("page \(canvas.pageIndex): \(Int(overlay.bounds.width)) x \(Int(overlay.bounds.height)) points, on screen \(Int(shown.width)) x \(Int(shown.height)); \(overlays.count) pages laid out; canvases \(inkScale) times the page")
@@ -3302,6 +3325,14 @@ struct PDFInkView: UIViewRepresentable {
         /// What the gesture does is the user's choice in this app's settings; left at "system", it is
         /// what they chose for the Pencil in the iPad's own settings.
         private func pencil(setting: String, system: UIPencilPreferredAction) {
+            // One gesture of the hand is one change of tool. A double tap and a squeeze that come within
+            // a moment of each other (a Pencil Pro held tightly while it is tapped tells of both), or the
+            // same gesture told twice, would take the eraser up and put it down again at once.
+            let now = CACurrentMediaTime()
+            if now - pencilActed < 0.45 {
+                Diagnostics.shared.step("pencil \(setting == "pencilTap" ? "tap" : "squeeze") right after another; not taken")
+                return
+            }
             let action: PencilAction?
             switch UserDefaults.standard.string(forKey: setting) ?? "system" {
             case "eraser": action = .eraser
@@ -3318,7 +3349,11 @@ struct PDFInkView: UIViewRepresentable {
                 default: action = nil
                 }
             }
-            if let action { controller?.onPencil?(action) }
+            if let action {
+                pencilActed = now
+                Diagnostics.shared.step("pencil \(setting == "pencilTap" ? "tap" : "squeeze")")
+                controller?.onPencil?(action)
+            }
         }
 
         // MARK: marks of the AI pen
