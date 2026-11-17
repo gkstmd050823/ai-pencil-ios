@@ -65,8 +65,18 @@ final class WetInk: UIView {
     /// The tiles of the lines that are waiting, and those of the line being written.
     private var tiles: [Int64: Tile] = [:]
     private var liveTiles: [Int64: Tile] = [:]
-    private let waitingLayer = CALayer()
-    private let liveLayer = CALayer()
+    /// What the two sets of tiles are put in: two views, without a size of their own, at this view's corner.
+    ///
+    /// They have to be views. In 0.12.3 they were plain layers, and every line blinked as the pen
+    /// lifted: a layer that is not a view's animates what is done to it, the coming and going of its
+    /// sublayers too, as a fade of a quarter of a second. A finished line goes from one set of tiles to
+    /// the other; it was wiped from the first at once and faded into the second. (The tiles themselves
+    /// were told to animate nothing, which does not cover the layer they are put in. Until 0.12.2 they
+    /// were put in this view's own layer, and a view's layer animates nothing by itself.)
+    private let waitingHost = UIView()
+    private let liveHost = UIView()
+    private var waitingLayer: CALayer { waitingHost.layer }
+    private var liveLayer: CALayer { liveHost.layer }
     /// Pixels to a page point, and where a pixel of the screen begins (see the page view's pixelGrid).
     private(set) var scale: CGFloat = 2
     private var grid = CGPoint.zero
@@ -81,10 +91,16 @@ final class WetInk: UIView {
         isUserInteractionEnabled = false
         backgroundColor = .clear
         isOpaque = false
-        // (Two layers without a size of their own, at the view's corner: what is in them is placed in the
-        // view's own measure.)
-        layer.addSublayer(waitingLayer)
-        layer.addSublayer(liveLayer)
+        // (What is in them is placed in this view's own measure.)
+        for host in [waitingHost, liveHost] {
+            host.isUserInteractionEnabled = false
+            host.backgroundColor = .clear
+            host.isOpaque = false
+            host.frame = .zero
+            // (And nothing of theirs is animated even where something asks for animations around them.)
+            host.layer.actions = ["sublayers": NSNull(), "contents": NSNull(), "opacity": NSNull(), "bounds": NSNull(), "position": NSNull()]
+            addSubview(host)
+        }
     }
 
     required init?(coder: NSCoder) {
@@ -162,7 +178,10 @@ final class WetInk: UIView {
                     made.contentsScale = scale
                     made.isOpaque = false
                     // (Nothing about a tile is animated: it shows what was drawn at once.)
-                    made.actions = ["contents": NSNull(), "onOrderIn": NSNull(), "onOrderOut": NSNull(), "bounds": NSNull(), "position": NSNull()]
+                    made.actions = [
+                        "contents": NSNull(), "onOrderIn": NSNull(), "onOrderOut": NSNull(), "bounds": NSNull(), "position": NSNull(),
+                        "opacity": NSNull(), "hidden": NSNull(), "sublayers": NSNull(),
+                    ]
                     made.frame = CGRect(x: grid.x + CGFloat(column) * step, y: grid.y + CGFloat(row) * step, width: step, height: step)
                     if ofLive {
                         liveLayer.addSublayer(made)
