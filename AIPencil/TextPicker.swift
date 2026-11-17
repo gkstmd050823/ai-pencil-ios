@@ -32,6 +32,8 @@ final class TextPicker: NSObject, UIEditMenuInteractionDelegate, UIGestureRecogn
     private var boxes: [CGRect] = []
     /// Where each letter of the page stands (see readLetters).
     private var letters: [CGRect] = []
+    /// How tall a letter of the page is, as a rule.
+    private var letterHeight: CGFloat = 10
     private let shade = UIView()
     private let head = UIView()
     private let tail = UIView()
@@ -108,22 +110,35 @@ final class TextPicker: NSObject, UIEditMenuInteractionDelegate, UIGestureRecogn
     }
 
     /// Notes where every letter of the page stands, in the overlay's frame. A letter with no place of its
-    /// own (a line's end) is given a null box.
+    /// own (a line's end) is given a null box, and so are the gaps between words and anything far larger
+    /// than a letter (the room PDFKit gives a gap can reach over other lines): a finger means a letter.
     private func readLetters() {
         guard let page else {
             letters = []
             return
         }
         let count = min(page.numberOfCharacters, 30000)
+        let written = Array((page.string ?? "").utf16)
         var all: [CGRect] = []
         all.reserveCapacity(count)
+        var heights: [CGFloat] = []
         for index in 0..<count {
             let box = page.characterBounds(at: index)
-            if box.width > 0, box.height > 0 {
+            var blank = false
+            if index < written.count, let mark = Unicode.Scalar(UInt32(written[index])) {
+                blank = mark.properties.isWhitespace
+            }
+            if !blank, box.width > 0, box.height > 0 {
                 all.append(CGRect(x: box.minX - crop.minX, y: crop.maxY - box.maxY, width: box.width, height: box.height))
+                heights.append(box.height)
             } else {
                 all.append(.null)
             }
+        }
+        heights.sort()
+        letterHeight = heights.isEmpty ? 10 : max(2, heights[heights.count / 2])
+        for index in all.indices where !all[index].isNull {
+            if all[index].height > letterHeight * 3 || all[index].width > letterHeight * 8 { all[index] = .null }
         }
         letters = all
     }
@@ -131,19 +146,56 @@ final class TextPicker: NSObject, UIEditMenuInteractionDelegate, UIGestureRecogn
     /// The letter a dragging finger means: on the line nearest the finger, up or down, the letter nearest
     /// along it. A finger out past the end of a line means the end of that line, and one between two
     /// lines the nearer of them.
+    ///
+    /// The words picked are the letters between two numbers in the page's own order of letters, and on a
+    /// page with formulas that order is not always the order they stand in: a letter of a fraction, or
+    /// one written small above or below the line, can stand on a line and be numbered far from the rest
+    /// of it. Taken for what the finger meant, such a letter made the words picked leap to wherever it
+    /// was numbered (a film of 0.13.3 has them begin two lines up, twice, with a formula between). So of
+    /// the letters on the finger's line, those numbered together with few others are passed over when
+    /// letters numbered together with many are within a few letters' reach.
     private func letter(near point: CGPoint) -> Int? {
-        var best: Int?
+        // The line: where the letter nearest the finger, up or down, has its middle.
         var bestScore = CGFloat.greatestFiniteMagnitude
-        for (index, box) in letters.enumerated() where !box.isNull {
+        var middle: CGFloat?
+        for box in letters where !box.isNull {
             let dx = max(box.minX - point.x, point.x - box.maxX, 0)
             let dy = max(box.minY - point.y, point.y - box.maxY, 0)
             let score = dy * 10000 + dx
             if score < bestScore {
                 bestScore = score
-                best = index
+                middle = box.midY
             }
         }
-        return best
+        guard let middle else { return nil }
+        // The letters on it, in the page's order, each with how far along the line it is from the finger.
+        var onLine: [(index: Int, off: CGFloat)] = []
+        for (index, box) in letters.enumerated() where !box.isNull && abs(box.midY - middle) <= letterHeight * 0.6 {
+            onLine.append((index, max(box.minX - point.x, point.x - box.maxX, 0)))
+        }
+        guard !onLine.isEmpty else { return nil }
+        // Those numbered close together belong together (a run of words; the other column's line, at
+        // the same height, is another run). Each run: how many letters, and its letter nearest the finger.
+        var runs: [(count: Int, index: Int, off: CGFloat)] = []
+        var last = -1000
+        for letter in onLine {
+            if letter.index - last > 40 || runs.isEmpty {
+                runs.append((1, letter.index, letter.off))
+            } else {
+                runs[runs.count - 1].count += 1
+                if letter.off < runs[runs.count - 1].off {
+                    runs[runs.count - 1].index = letter.index
+                    runs[runs.count - 1].off = letter.off
+                }
+            }
+            last = letter.index
+        }
+        let near = letterHeight * 3
+        let full = runs.filter { $0.count >= 6 && $0.off <= near }
+        let wanted = full.isEmpty ? runs : full
+        var best = wanted[0]
+        for run in wanted where run.off < best.off { best = run }
+        return best.index
     }
 
     @objc private func held(_ gesture: UILongPressGestureRecognizer) {
@@ -184,6 +236,14 @@ final class TextPicker: NSObject, UIEditMenuInteractionDelegate, UIGestureRecogn
         let to = max(fixed.location + fixed.length, index + 1)
         let next = NSRange(location: from, length: to - from)
         guard next != range else { return }
+        if abs(next.length - range.length) > 60, index < letters.count {
+            // (Noted for a test: the words picked grew or shrank by much at once.)
+            let box = letters[index]
+            DebugLog.write(String(
+                format: "words: from %d letters to %d at once; the finger at (%.0f, %.0f) meant letter %d, which stands at (%.0f, %.0f), %.0f x %.0f",
+                range.length, next.length, Double(point.x), Double(point.y), index, Double(box.minX), Double(box.minY), Double(box.width), Double(box.height)
+            ))
+        }
         range = next
         show()
     }
