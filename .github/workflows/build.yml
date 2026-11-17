@@ -24,7 +24,8 @@ on:
         default: false
 
 concurrency:
-  group: build-${{ github.ref }}
+  # (A push does not stop a run that was asked for by hand, the hour of checks: they are apart.)
+  group: build-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:

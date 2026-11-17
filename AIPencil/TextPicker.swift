@@ -222,7 +222,7 @@ final class TextPicker: NSObject, UIEditMenuInteractionDelegate, UIGestureRecogn
             Diagnostics.shared.step("words picked")
         case .changed:
             guard view === overlay else { return }
-            stretch(to: point)
+            stretch(to: point, whole: true)
         case .ended:
             guard view === overlay, isActive else { return }
             onPicked?(text)
@@ -234,19 +234,53 @@ final class TextPicker: NSObject, UIEditMenuInteractionDelegate, UIGestureRecogn
         }
     }
 
-    /// Picks from the part that stays to the letter at this place.
-    private func stretch(to point: CGPoint) {
-        guard let index = letter(near: point) else { return }
-        let from = min(fixed.location, index)
-        let to = max(fixed.location + fixed.length, index + 1)
+    /// Picks from the part that stays to this place. [whole]: the word at the place is taken whole (a
+    /// finger dragging); otherwise the letter there ends it (a knob being moved).
+    ///
+    /// Which letters lie between two places of a page is PDFKit's to say: it is asked for what is picked
+    /// from the middle of the part that stays to where the finger is, as it would pick them itself.
+    /// (Until 0.13.6 the app found the letter nearest the finger by rules of its own and took everything
+    /// between the two in the page's order of letters. On a page of two columns, or with formulas, the
+    /// rules kept being wrong one way or another, while Apple's own reader, which leaves it to PDFKit,
+    /// picked the same pages smoothly.) Only when PDFKit has nothing to say are the app's own rules used.
+    private func stretch(to point: CGPoint, whole: Bool = false) {
+        guard let page else { return }
+        var from = fixed.location
+        var to = fixed.location + fixed.length
+        var how = "nothing"
+        func take(_ picked: PDFSelection?) -> Bool {
+            guard let picked else { return false }
+            var any = false
+            for part in 0..<picked.numberOfTextRanges(on: page) {
+                let letters = picked.range(at: part, on: page)
+                guard letters.length > 0 else { continue }
+                from = min(from, letters.location)
+                to = max(to, letters.location + letters.length)
+                any = true
+            }
+            return any
+        }
+        let finger = CGPoint(x: crop.minX + point.x, y: crop.maxY - point.y)
+        let middle = page.characterBounds(at: min(fixed.location + fixed.length / 2, max(page.numberOfCharacters - 1, 0)))
+        if middle.width > 0, take(page.selection(from: CGPoint(x: middle.midX, y: middle.midY), to: finger)) {
+            how = "as PDFKit picks"
+        } else if let index = letter(near: point) {
+            from = min(from, index)
+            to = max(to, index + 1)
+            how = "the nearest letter"
+        } else {
+            return
+        }
+        if whole, let word = page.selectionForWord(at: finger), word.bounds(for: page).insetBy(dx: -4, dy: -4).contains(finger) {
+            _ = take(word)
+        }
         let next = NSRange(location: from, length: to - from)
         guard next != range else { return }
-        if abs(next.length - range.length) > 60, index < letters.count {
+        if abs(next.length - range.length) > 60 {
             // (Noted for a test: the words picked grew or shrank by much at once.)
-            let box = letters[index]
             DebugLog.write(String(
-                format: "words: from %d letters to %d at once; the finger at (%.0f, %.0f) meant letter %d, which stands at (%.0f, %.0f), %.0f x %.0f",
-                range.length, next.length, Double(point.x), Double(point.y), index, Double(box.minX), Double(box.minY), Double(box.width), Double(box.height)
+                format: "words: from %d letters to %d at once (%@); the finger at (%.0f, %.0f), the part that stays at letter %d",
+                range.length, next.length, how, Double(point.x), Double(point.y), fixed.location
             ))
         }
         range = next
