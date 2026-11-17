@@ -520,6 +520,8 @@ final class PageOverlay: UIView {
     /// Pictures are being made; and whether more has changed meanwhile.
     var inkBusy = false
     var inkAgain = false
+    /// How fine the pictures being made are to be (pixels to a page point); nought when none are being made.
+    var inkAsking: CGFloat = 0
     /// Pictures that were ready while a line was being written, waiting for the pen to be off the page.
     var inkLanding: (() -> Void)?
     /// A pen or finger is on the canvas at this moment.
@@ -3089,6 +3091,14 @@ struct PDFInkView: UIViewRepresentable {
             guard !retired, !Self.holdsPreviews, let view = pdfView, overlay.window != nil else { return }
             if overlay.inkBusy {
                 overlay.inkAgain = true
+                // Pictures being made for a zoom the page has left would be stretched when they came, and
+                // the ones for this zoom could not begin until they had: they are told to stop. (A test's
+                // notes had a picture six seconds in the making land four zooms late, and none after it.)
+                let wanted = zoomSeen * view.traitCollection.displayScale
+                if overlay.inkAsking > 0, abs(wanted - overlay.inkAsking) > 0.002 * wanted {
+                    overlay.inkAsking = 0
+                    overlay.inkPicture.ticket.next()
+                }
                 return
             }
             let canvas = overlay.canvas
@@ -3142,6 +3152,7 @@ struct PDFInkView: UIViewRepresentable {
             overlay.inkDirty = .null
             overlay.inkDirtyAll = false
             overlay.inkBusy = true
+            overlay.inkAsking = extent.scale
             overlay.inkAgain = false
             let ticket = picture.ticket
             let number = ticket.next()
@@ -3153,7 +3164,10 @@ struct PDFInkView: UIViewRepresentable {
             // The highlighter's picture is brought up to date the same way, where there is one of the same part.
             let highBase: CGImage? = base != nil && overlay.highPicture.shown == extent ? overlay.highPicture.picture : nil
             inkQueue.async { [weak self, weak overlay] in
-                let made = InkPaint.pictures(of: drawing, rect: extent.rect, scale: extent.scale, dark: dark, over: base, redoing: dirty, highOver: highBase)
+                let made = InkPaint.pictures(
+                    of: drawing, rect: extent.rect, scale: extent.scale, dark: dark, over: base, redoing: dirty, highOver: highBase,
+                    still: { ticket.current == number }
+                )
                 let took = (CACurrentMediaTime() - began) * 1000
                 DispatchQueue.main.async {
                     guard let self, let overlay else { return }
@@ -3207,7 +3221,15 @@ struct PDFInkView: UIViewRepresentable {
                         // (Unless PencilKit changed the handwriting meanwhile: then the canvas goes on showing.)
                         if overlay.inkPicture.breaks == breaks {
                             overlay.inkTrusted = true
-                            overlay.dropPreviews(upTo: version)
+                            // The lines just written are on show as they were written, sharp. A picture
+                            // made for another zoom than the page stands at now is not as sharp as they
+                            // are: they stay until one made for this zoom has them.
+                            let now = self.zoomSeen * (self.pdfView?.traitCollection.displayScale ?? 2)
+                            if abs(extent.scale - now) < 0.002 * now {
+                                overlay.dropPreviews(upTo: version)
+                            } else {
+                                DebugLog.write(String(format: "ink picture: made at %.3f pixels a point while the page stands at %.3f; the lines just written stay on show", Double(extent.scale), Double(now)))
+                            }
                         } else {
                             overlay.inkDirtyAll = true
                         }

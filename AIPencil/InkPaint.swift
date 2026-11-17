@@ -78,7 +78,11 @@ enum InkPaint {
         let count = line.points.count
         guard count > 1 else { return line }
         let apart = length / CGFloat(max(steps, 1))
-        if apart <= step * 1.5 { return line }
+        // (Its own points do while they are no more than three pixels apart: a line through points that
+        // close keeps within a tenth of a pixel of the curve even round a tight bend. Until 0.13.3 they
+        // were given up at under two pixels, and PencilKit's curve was worked out anew through a line of
+        // tens of thousands of points every time the page was zoomed in a little past where it was written.)
+        if apart <= step * 2.5 { return line }
         // Too far apart for this zoom (a shape's outline, a stroke from PencilKit's own pens, a line
         // written zoomed out and looked at zoomed in): the curve PencilKit runs through them is followed.
         line = Line()
@@ -221,7 +225,16 @@ enum InkPaint {
     }
 
     /// Draws a line in a colour. [wide] says it is a highlighter's, which needs only some of its points.
-    static func draw(_ line: Line, color: CGColor, in context: CGContext, fineness: CGFloat = 4, wide: Bool = false) {
+    ///
+    /// A line of many widths is filled a stretch at a time, and only the stretches that reach the part
+    /// being drawn. (Until 0.13.3 the whole of it was one shape, filled in one go: a line of fifty
+    /// thousand points, zoomed in on so that a tenth of it was in the picture, was made and filled whole,
+    /// and one shape of so many pieces costs far more to fill than the same pieces a few hundred at a
+    /// time. A picture of such lines took six seconds.) [wanted] is asked between stretches whether the
+    /// picture is still wanted; when it is not, the drawing stops where it is.
+    static func draw(
+        _ line: Line, color: CGColor, in context: CGContext, fineness: CGFloat = 4, wide: Bool = false, wanted: (() -> Bool)? = nil
+    ) {
         guard let first = line.points.first else { return }
         if line.even {
             let run = wide && !oldHighlighter ? thinned(line.points, gap: line.widths[0] * wideGap) : line.points
@@ -236,10 +249,41 @@ enum InkPaint {
             context.strokePath()
         } else {
             context.setFillColor(color)
-            context.addPath(shape(points: line.points, widths: line.widths, from: 0, fineness: fineness))
-            context.fillPath()
+            let count = line.points.count
+            guard count > stretch + 1 else {
+                context.addPath(shape(points: line.points, widths: line.widths, from: 0, fineness: fineness))
+                context.fillPath()
+                return
+            }
+            let clip = context.boundingBoxOfClipPath
+            var from = 0
+            while from < count - 1 {
+                if let wanted, !wanted() { return }
+                let to = min(count, from + stretch + 1)
+                // (The room the stretch takes, as wide as its widest place.)
+                var left = line.points[from].x, right = left, top = line.points[from].y, bottom = top
+                var reach: CGFloat = 0
+                for index in from..<to {
+                    let point = line.points[index]
+                    left = min(left, point.x)
+                    right = max(right, point.x)
+                    top = min(top, point.y)
+                    bottom = max(bottom, point.y)
+                    reach = max(reach, line.widths[index])
+                }
+                let box = CGRect(x: left, y: top, width: right - left, height: bottom - top).insetBy(dx: -reach, dy: -reach)
+                if box.intersects(clip) {
+                    context.addPath(shape(points: line.points, widths: line.widths, from: from, to: to, fineness: fineness))
+                    context.fillPath()
+                }
+                // (The next stretch begins on this one's last point, so that the two join.)
+                from = to - 1
+            }
         }
     }
+
+    /// How many points of a long line are filled at a time.
+    private static let stretch = 256
 
     /// The colour a stroke is seen in: on dark paper, PencilKit's dark-screen counterpart of it.
     static func color(of stroke: PKStroke, dark: Bool, solid: Bool) -> CGColor {
@@ -278,7 +322,7 @@ enum InkPaint {
     /// in this picture; [solid] draws them in their colour at full strength.
     private static func paint(
         _ strokes: [PKStroke], where wanted: (PKStroke) -> Bool, in context: CGContext, picture: CGRect,
-        region: CGRect, scale: CGFloat, dark: Bool, solid: Bool
+        region: CGRect, scale: CGFloat, dark: Bool, solid: Bool, still: (() -> Bool)? = nil
     ) {
         // (A highlighter's line is wide: its own points do, a good half point apart, without working out more.)
         let step = solid && !oldHighlighter ? max(0.6, 1.2 / scale) : max(0.02, 1.2 / scale)
@@ -307,9 +351,10 @@ enum InkPaint {
         for stroke in strokes where wanted(stroke) {
             let box = stroke.renderBounds
             guard box.intersects(region) else { continue }
+            if let still, !still() { return }
             if isPlain(stroke) {
                 flush()
-                draw(line(of: stroke, step: step), color: color(of: stroke, dark: dark, solid: solid), in: context, fineness: scale, wide: solid)
+                draw(line(of: stroke, step: step), color: color(of: stroke, dark: dark, solid: solid), in: context, fineness: scale, wide: solid, wanted: still)
             } else {
                 others.append(stroke)
                 othersBox = othersBox.union(box)
@@ -338,7 +383,7 @@ enum InkPaint {
     /// copied: a line added or rubbed out on a full page costs what its neighbourhood costs.
     static func pictures(
         of drawing: PKDrawing, rect: CGRect, scale: CGFloat, dark: Bool, over base: CGImage?, redoing dirty: CGRect?,
-        highOver highBase: CGImage? = nil
+        highOver highBase: CGImage? = nil, still: (() -> Bool)? = nil
     ) -> Made? {
         let strokes = drawing.strokes
         guard let context = canvas(rect, scale: scale) else { return nil }
@@ -357,8 +402,10 @@ enum InkPaint {
                 context.clip(to: region)
                 context.clear(region)
             }
-            paint(strokes, where: { !isHighlighter($0) }, in: context, picture: rect, region: region, scale: scale, dark: dark, solid: false)
+            paint(strokes, where: { !isHighlighter($0) }, in: context, picture: rect, region: region, scale: scale, dark: dark, solid: false, still: still)
         }
+        // (No longer wanted: what there is of it is let go, and whoever asked knows why nothing came.)
+        if let still, !still() { return nil }
         guard let pens = context.makeImage() else { return nil }
         var made = Made(pens: pens, strokes: strokes.count)
         if oldHighlighter {
