@@ -25,6 +25,7 @@ struct SettingsView: View {
     @AppStorage("contextScope") private var scope = ContextScope.whole
     @AppStorage("webSearch") private var webSearch = true
     @AppStorage("fingerDraws") private var fingerDraws = false
+    @ObservedObject private var recorder = TestRecorder.shared
     @AppStorage("pencilTap") private var pencilTap = "system"
     @AppStorage("pencilSqueeze") private var pencilSqueeze = "system"
     @AppStorage("theme") private var theme = "system"
@@ -224,10 +225,13 @@ struct SettingsView: View {
                 diagnosticsCopied = false
                 diagnosticsCleared += 1
             }
+            Button(recorder.recording ? "테스트 기록 끝내고 내보내기" : "테스트 기록 시작") {
+                if recorder.recording { recorder.stop() } else { recorder.start() }
+            }
         } header: {
             Text("진단")
         } footer: {
-            Text("앱이 멈추거나 꺼졌을 때 원인을 찾기 위한 기록이에요. 아이패드 안에만 있고 앱이 어디로도 보내지 않아요. 문서 내용이나 API 키는 들어 있지 않아요. \"화면에 떠 있다가 끝난 실행\"에는 앱을 쓰다가 위로 밀어 끈 경우도 들어가요.")
+            Text("테스트 기록: 시작하면 화면 맨 위에 \"기록 중\" 표시가 뜨고, 그때부터 앱이 한 일(도구 바꿈, 펜과 지우개가 닿고 떨어진 때, 선이 그림으로 넘어간 때 등)을 시각과 함께 적어요. 표시를 누르면 끝나고 글 파일을 내보낼 수 있어요. 문제를 재현할 때 아이패드의 화면 기록과 함께 켜 두면 영상과 기록을 나란히 볼 수 있어요.\n\n앱이 멈추거나 꺼졌을 때 원인을 찾기 위한 기록이에요. 아이패드 안에만 있고 앱이 어디로도 보내지 않아요. 문서 내용이나 API 키는 들어 있지 않아요. \"화면에 떠 있다가 끝난 실행\"에는 앱을 쓰다가 위로 밀어 끈 경우도 들어가요.")
         }
         .id(diagnosticsCleared)
     }

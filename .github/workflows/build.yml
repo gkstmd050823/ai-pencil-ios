@@ -1,8 +1,13 @@
 # Builds the iPad app on a macOS runner, since there is no Mac to build it on.
 #
+# A push builds the app and makes the IPA, and that is all: a few minutes. The app is tried out on the iPad
+# by its user, who hands back a film of the screen and the app's notes of the test (Settings > 테스트 기록).
+# The hour of pictures and touches in a simulator that every build used to run is still here, and is run
+# only when asked for: Actions > iPad build > Run workflow, with "verify" ticked.
+#
 # What comes out (Actions > the run > Artifacts):
 #   AIPencil-ipa      an unsigned IPA. Sideloadly on Windows signs it with your Apple ID and installs it.
-#   screenshots       the app running in an iPad simulator, to see what a change looks like; with them what
+#   screenshots       (only with "verify")      the app running in an iPad simulator, to see what a change looks like; with them what
 #                     the stand-in Claude server received (mock.log, the pictures in mock-dump) and the app's
 #                     own notes (app-debug.log).
 #   logs              the full build logs, when something went wrong.
@@ -12,6 +17,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      verify:
+        description: Also run the app in a simulator (pictures, the app's own checks, touches). About an hour.
+        type: boolean
+        default: false
 
 concurrency:
   group: build-${{ github.ref }}
@@ -36,6 +46,7 @@ jobs:
 
       # First for the simulator: it is the quicker build, so a compile error shows up sooner.
       - name: Build for the simulator
+        if: github.event_name == 'workflow_dispatch' && inputs.verify
         run: |
           set -o pipefail
           xcodebuild build \
@@ -47,6 +58,7 @@ jobs:
           grep -q "\*\* BUILD SUCCEEDED \*\*" build-simulator.log
 
       - name: Run it in an iPad simulator and take pictures
+        if: github.event_name == 'workflow_dispatch' && inputs.verify
         run: |
           set -e
           mkdir -p screenshots
@@ -329,6 +341,7 @@ jobs:
       # Real touches: a finger writes, rubs out and draws in the simulator (AIPencilUITests). What it leaves
       # is pictures and the app's notes; a failure here does not fail the build, the IPA is made already.
       - name: Touch the pages with a finger
+        if: github.event_name == 'workflow_dispatch' && inputs.verify
         continue-on-error: true
         run: |
           UDID=$(cat udid.txt 2>/dev/null || true)
@@ -356,7 +369,7 @@ jobs:
           xcrun simctl shutdown "$UDID" || true
 
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.verify
         with:
           name: screenshots
           path: |

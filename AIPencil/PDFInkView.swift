@@ -1679,7 +1679,9 @@ struct PDFInkView: UIViewRepresentable {
                 self.showEraser(at: to, in: overlay)
             }
             overlay.watcher.onDown = { [weak self, weak overlay] in
-                guard let self, let overlay, overlay.canvas.isUserInteractionEnabled else { return }
+                guard let self, let overlay else { return }
+                DebugLog.write("touch: down on page \(overlay.canvas.pageIndex), \(overlay.watcher.pencil ? "pencil" : "finger"), tool \(self.choice.tool.rawValue)")
+                guard overlay.canvas.isUserInteractionEnabled else { return }
                 self.canvasInUse(overlay, true)
             }
             overlay.watcher.onPath = { [weak self, weak overlay] way in
@@ -1688,6 +1690,7 @@ struct PDFInkView: UIViewRepresentable {
             }
             overlay.watcher.onLift = { [weak self, weak overlay] in
                 overlay?.showEraser(at: nil, radius: 0, fineness: 1)
+                DebugLog.write("touch: up")
                 // (An eraser that worked through the watcher's touch is done when that touch is.)
                 if let self, let overlay, self.watchRubs {
                     self.watchRubs = false
@@ -1925,6 +1928,7 @@ struct PDFInkView: UIViewRepresentable {
             guard !retired, choice.ownPen else { return }
             if penLine == nil {
                 let zoom = max(zoomSeen, 0.5)
+                DebugLog.write(String(format: "pen: down with %@ at zoom %.2f", choice.tool.rawValue, Double(zoom)))
                 straight = nil
                 shaped = nil
                 joints = []
@@ -2184,6 +2188,7 @@ struct PDFInkView: UIViewRepresentable {
         /// pen's becomes a question.
         private func penDone(kept: Bool, in overlay: PageOverlay) {
             guard let line = penLine else { return }
+            DebugLog.write("pen: up, \(line.points.count) points, \(kept ? "kept" : "let go")\(straight != nil ? ", made straight" : "")\(shaped != nil ? ", made a shape" : "")")
             penLine = nil
             holdTimer?.invalidate()
             holdTimer = nil
@@ -2802,8 +2807,8 @@ struct PDFInkView: UIViewRepresentable {
             if overlay.rubDrag?.tracking ?? false { return }
             let now = CACurrentMediaTime()
             if rubbed == nil {
-                rubBegin(on: overlay.canvas, at: now)
                 watchRubs = true
+                rubBegin(on: overlay.canvas, at: now)
                 DebugLog.write("eraser: taken up with the pencil already on the page; it rubs from where the pencil is")
                 Diagnostics.shared.step("eraser took over a touch already on the page")
             }
@@ -2816,6 +2821,7 @@ struct PDFInkView: UIViewRepresentable {
         private func rubBegin(on canvas: PageCanvas, at now: CFTimeInterval) {
             let strokes = canvas.ink.strokes
             rubbed = (strokes, strokes.map(\.renderBounds), canvas.ink, .null, strokes.count)
+            DebugLog.write("eraser: down, \(strokes.count) lines on the page, \(watchRubs ? "through a touch already on the page" : "its own drag")")
             rubbedAny = false
             rubTold = (now, now, 0, 0, 0)
         }

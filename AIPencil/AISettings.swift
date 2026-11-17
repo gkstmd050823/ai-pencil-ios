@@ -138,11 +138,16 @@ enum KeyStore {
     }
 }
 
-/// Notes for the build server, which cannot look at the running app: in a debug build they go to a file
-/// the server reads afterwards. A release build writes nothing.
+/// Notes of what the app does. In a debug build they go to a file (the build server read it, when the app
+/// was tried out there). In any build they go into the notes of a test while one is being taken (see
+/// TestRecorder); otherwise a release build writes nothing, and does not even make up the line.
 enum DebugLog {
     static func write(_ line: @autoclosure () -> String) {
+        #if !DEBUG
+        if TestRecorder.shared.isOn { TestRecorder.shared.note(line()) }
+        #endif
         #if DEBUG
+        if TestRecorder.shared.isOn { TestRecorder.shared.note(line()) }
         let folder = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let url = folder.appendingPathComponent("debug.log")
         let data = Data((line() + "\n").utf8)

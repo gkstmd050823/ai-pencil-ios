@@ -14,6 +14,8 @@ struct AIPencilApp: App {
         WindowGroup {
             LibraryView()
                 .environmentObject(library)
+                // (Over everything but sheets: the mark that says a test's notes are being taken.)
+                .overlay(alignment: .top) { RecordingPill() }
                 .preferredColorScheme(theme == "light" ? .light : theme == "dark" ? .dark : nil)
         }
     }

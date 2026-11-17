@@ -67,6 +67,7 @@ final class Diagnostics: NSObject, MXMetricManagerSubscriber {
     /// Something the app just did, in a few words. The last of these are written down when the app is
     /// found stuck, to say what it was in the middle of. Cheap enough to call from anywhere.
     func step(_ what: String) {
+        TestRecorder.shared.note("step: " + what)
         lock.lock()
         steps.append(String(format: "+%.0fs ", Date().timeIntervalSince(launched)) + what)
         if steps.count > 16 { steps.removeFirst(steps.count - 16) }
