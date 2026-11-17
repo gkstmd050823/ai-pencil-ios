@@ -57,10 +57,18 @@ final class ShapeGesture: UILongPressGestureRecognizer {
     /// before the wait to where it was after, which may be nowhere near the line.
     private var trail: [CGPoint] = []
 
+    /// Whether a touch is in the gesture's hands: one that landed while the gesture was at work.
+    private(set) var tracking = false
+
     func takeTrail() -> [CGPoint] {
         let taken = trail
         trail = []
         return taken
+    }
+
+    override func reset() {
+        super.reset()
+        tracking = false
     }
 
     private func note(_ touches: Set<UITouch>, _ event: UIEvent) {
@@ -74,8 +82,14 @@ final class ShapeGesture: UILongPressGestureRecognizer {
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
         trail = []
+        tracking = true
         note(touches, event)
         super.touchesBegan(touches, with: event)
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesCancelled(touches, with: event)
+        tracking = false
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
@@ -86,6 +100,7 @@ final class ShapeGesture: UILongPressGestureRecognizer {
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
         note(touches, event)
         super.touchesEnded(touches, with: event)
+        tracking = false
     }
 }
 
@@ -101,12 +116,18 @@ final class TouchWatcher: UIGestureRecognizer {
     var onSeen: ((TimeInterval) -> Void)?
     /// Called whenever the touch is over.
     var onLift: (() -> Void)?
+    /// Called as the touch moves, with every place it went through since the last call, the place it
+    /// was at then first.
+    var onPath: (([CGPoint]) -> Void)?
+    /// Whether the touch being watched is a pencil's.
+    private(set) var pencil = false
     private weak var followed: UITouch?
     private var last = CGPoint.zero
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
         guard followed == nil, let touch = touches.first else { return }
         followed = touch
+        pencil = touch.type == .pencil
         last = touch.location(in: view)
         onDown?()
         onMove?(last, last)
@@ -117,6 +138,11 @@ final class TouchWatcher: UIGestureRecognizer {
         guard let touch = followed, touches.contains(touch) else { return }
         let point = touch.location(in: view)
         onMove?(last, point)
+        if let onPath {
+            var way = [last]
+            for one in event.coalescedTouches(for: touch) ?? [touch] { way.append(one.location(in: view)) }
+            onPath(way)
+        }
         onSeen?(touch.timestamp)
         last = point
     }
@@ -1183,6 +1209,8 @@ struct PDFInkView: UIViewRepresentable {
         private var rubTold: (began: CFTimeInterval, last: CFTimeInterval, tellings: Int, places: Int, longest: CFTimeInterval) = (0, 0, 0, 0, 0)
         /// When a pencil was last seen held just above a page.
         private var hoverSeen: CFTimeInterval = 0
+        /// The eraser is working through a touch its own drag was never told of (see rubByWatch).
+        private var watchRubs = false
         /// When a double tap or a squeeze of the pencil last changed the tool.
         private var pencilActed: CFTimeInterval = 0
         /// Turns the pages two at a time where two are shown side by side to be turned.
@@ -1654,8 +1682,17 @@ struct PDFInkView: UIViewRepresentable {
                 guard let self, let overlay, overlay.canvas.isUserInteractionEnabled else { return }
                 self.canvasInUse(overlay, true)
             }
-            overlay.watcher.onLift = { [weak overlay] in
+            overlay.watcher.onPath = { [weak self, weak overlay] way in
+                guard let self, let overlay else { return }
+                self.rubByWatch(way, in: overlay)
+            }
+            overlay.watcher.onLift = { [weak self, weak overlay] in
                 overlay?.showEraser(at: nil, radius: 0, fineness: 1)
+                // (An eraser that worked through the watcher's touch is done when that touch is.)
+                if let self, let overlay, self.watchRubs {
+                    self.watchRubs = false
+                    self.rubEnded(in: overlay)
+                }
             }
             overlay.watcher.onUp = { [weak self, weak overlay] in
                 guard let self, let overlay, overlay.inkInUse else { return }
@@ -2716,9 +2753,7 @@ struct PDFInkView: UIViewRepresentable {
         /// undo history.
         @objc private func rub(_ gesture: ShapeGesture) {
             guard let overlay = gesture.view?.superview as? PageOverlay else { return }
-            let canvas = overlay.canvas
             let point = gesture.location(in: overlay)
-            let reach = eraserReach ?? CGFloat(choice.eraserWidth) / 2
             // Every place the touch went through since the last look, and where it is now.
             var way: [CGPoint] = []
             for place in gesture.takeTrail() { way.append(overlay.convert(place, from: gesture.view)) }
@@ -2730,65 +2765,104 @@ struct PDFInkView: UIViewRepresentable {
             let now = CACurrentMediaTime()
             switch gesture.state {
             case .began, .changed, .ended:
+                // (Its own drag has a touch. An eraser that was working through the watcher's touch has
+                // done its part: what it rubbed out is its own step of the undo history.)
+                if watchRubs {
+                    watchRubs = false
+                    rubEnded(in: overlay)
+                }
                 if gesture.state == .began || rubbed == nil {
-                    // The page's lines are listed once, when the eraser comes down, and the room each
-                    // takes with them: as it moves, only the lines whose room it enters are looked at.
-                    let strokes = canvas.ink.strokes
-                    rubbed = (strokes, strokes.map(\.renderBounds), canvas.ink, .null, strokes.count)
+                    rubBegin(on: overlay.canvas, at: now)
                     gesture.start = way.first ?? point
-                    rubbedAny = false
-                    rubTold = (now, now, 0, 0, 0)
                 }
-                guard var work = rubbed else { return }
-                rubTold.tellings += 1
-                rubTold.places += way.count
-                rubTold.longest = max(rubTold.longest, now - rubTold.last)
-                rubTold.last = now
-                let highlighterOnly = choice.eraserHighlighterOnly
-                var gone = Set<Int>()
-                var from = gesture.start
-                for to in way {
-                    let swept = CGRect(x: min(from.x, to.x), y: min(from.y, to.y), width: abs(from.x - to.x), height: abs(from.y - to.y))
-                        .insetBy(dx: -reach - 1, dy: -reach - 1)
-                    for index in work.strokes.indices where work.boxes[index].intersects(swept) && !gone.contains(index) {
-                        let stroke = work.strokes[index]
-                        if highlighterOnly, !InkPaint.isHighlighter(stroke) { continue }
-                        if Self.touches(stroke, from, to, within: reach) { gone.insert(index) }
-                    }
-                    from = to
-                }
-                if !gone.isEmpty {
-                    rubbedAny = true
-                    var dirty = CGRect.null
-                    for index in gone.sorted().reversed() {
-                        dirty = dirty.union(work.boxes[index])
-                        work.strokes.remove(at: index)
-                        work.boxes.remove(at: index)
-                    }
-                    dirty = dirty.insetBy(dx: -2, dy: -2)
-                    work.dirty = work.dirty.union(dirty)
-                    rubbed = work
-                    let drawing = PKDrawing(strokes: work.strokes)
-                    record(drawing, on: canvas, own: true, count: work.strokes.count, dirty: dirty)
-                    hand(drawing, to: canvas)
-                    // A line written a moment ago is still on show as written: rubbed out, it comes
-                    // down at once, without waiting for the picture.
-                    if overlay.keptCount > 0 {
-                        overlay.keepPreviews(ofStrokesMadeAt: Set(work.strokes.map { $0.path.creationDate }))
-                    }
-                    // Seen at once: the picture is brought up to date now, not when the hand rests.
-                    askInk(for: overlay)
-                }
+                rubAlong(way, from: gesture.start, in: overlay, at: now)
                 gesture.start = point
                 if gesture.state == .ended {
                     rubEnded(in: overlay)
                 } else {
                     // A ring shows how much the eraser covers.
-                    overlay.showEraser(at: point, radius: reach, fineness: fineness)
+                    overlay.showEraser(at: point, radius: eraserReach ?? CGFloat(choice.eraserWidth) / 2, fineness: fineness)
                 }
             default:
                 rubEnded(in: overlay)
             }
+        }
+
+        /// The eraser through a touch its own drag is not following: a pencil that was on the page
+        /// already when the eraser was taken up.
+        ///
+        /// The eraser's drag is told only of touches that land while the eraser is in hand. A pencil
+        /// squeezed for the eraser and put to the page in one motion often lands a moment before the
+        /// squeeze is let go, which is when the tool changes: it lands under the pen, the pen lets its
+        /// line go when the tool changes under it, and until 0.13.0 nothing took the touch from there.
+        /// The eraser's ring followed the pencil (the watcher draws it, and sees every touch) and rubbed
+        /// nothing out, until the pencil was lifted and put down again.
+        private func rubByWatch(_ way: [CGPoint], in overlay: PageOverlay) {
+            guard !retired, choice.ownEraser, overlay.watcher.pencil, way.count > 1 else { return }
+            if overlay.rubDrag?.tracking ?? false { return }
+            let now = CACurrentMediaTime()
+            if rubbed == nil {
+                rubBegin(on: overlay.canvas, at: now)
+                watchRubs = true
+                DebugLog.write("eraser: taken up with the pencil already on the page; it rubs from where the pencil is")
+                Diagnostics.shared.step("eraser took over a touch already on the page")
+            }
+            guard watchRubs else { return }
+            rubAlong(Array(way.dropFirst()), from: way[0], in: overlay, at: now)
+        }
+
+        /// The eraser comes down: the page's lines are listed once, and the room each takes with them. As
+        /// it moves, only the lines whose room it enters are looked at.
+        private func rubBegin(on canvas: PageCanvas, at now: CFTimeInterval) {
+            let strokes = canvas.ink.strokes
+            rubbed = (strokes, strokes.map(\.renderBounds), canvas.ink, .null, strokes.count)
+            rubbedAny = false
+            rubTold = (now, now, 0, 0, 0)
+        }
+
+        /// The eraser went from [start] through the places of [way]: every line it touched on the way goes.
+        private func rubAlong(_ way: [CGPoint], from start: CGPoint, in overlay: PageOverlay, at now: CFTimeInterval) {
+            guard var work = rubbed, !way.isEmpty else { return }
+            let canvas = overlay.canvas
+            let reach = eraserReach ?? CGFloat(choice.eraserWidth) / 2
+            rubTold.tellings += 1
+            rubTold.places += way.count
+            rubTold.longest = max(rubTold.longest, now - rubTold.last)
+            rubTold.last = now
+            let highlighterOnly = choice.eraserHighlighterOnly
+            var gone = Set<Int>()
+            var from = start
+            for to in way {
+                let swept = CGRect(x: min(from.x, to.x), y: min(from.y, to.y), width: abs(from.x - to.x), height: abs(from.y - to.y))
+                    .insetBy(dx: -reach - 1, dy: -reach - 1)
+                for index in work.strokes.indices where work.boxes[index].intersects(swept) && !gone.contains(index) {
+                    let stroke = work.strokes[index]
+                    if highlighterOnly, !InkPaint.isHighlighter(stroke) { continue }
+                    if Self.touches(stroke, from, to, within: reach) { gone.insert(index) }
+                }
+                from = to
+            }
+            guard !gone.isEmpty else { return }
+            rubbedAny = true
+            var dirty = CGRect.null
+            for index in gone.sorted().reversed() {
+                dirty = dirty.union(work.boxes[index])
+                work.strokes.remove(at: index)
+                work.boxes.remove(at: index)
+            }
+            dirty = dirty.insetBy(dx: -2, dy: -2)
+            work.dirty = work.dirty.union(dirty)
+            rubbed = work
+            let drawing = PKDrawing(strokes: work.strokes)
+            record(drawing, on: canvas, own: true, count: work.strokes.count, dirty: dirty)
+            hand(drawing, to: canvas)
+            // A line written a moment ago is still on show as written: rubbed out, it comes down at
+            // once, without waiting for the picture.
+            if overlay.keptCount > 0 {
+                overlay.keepPreviews(ofStrokesMadeAt: Set(work.strokes.map { $0.path.creationDate }))
+            }
+            // Seen at once: the picture is brought up to date now, not when the hand rests.
+            askInk(for: overlay)
         }
 
         /// The eraser's drag is over: what it rubbed out becomes one step of the undo history.
