@@ -33,6 +33,12 @@ enum InkPaint {
         stroke.ink.inkType == .monoline && stroke.mask == nil
     }
 
+    /// Whether a point of a stroke is in a gap of a dashed line: it has no opacity and the size PencilKit
+    /// draws nothing for (see PenLine.control). Such a point is a place of no width.
+    static func isGap(_ point: PKStrokePoint) -> Bool {
+        point.opacity < 0.02 && point.size.width <= InkWidth.nothing + 0.02
+    }
+
     /// A stroke as the places it goes through and how wide it is at each, as it is seen on the page.
     struct Line {
         var points: [CGPoint] = []
@@ -49,7 +55,7 @@ enum InkPaint {
         let grown = abs(turn.a * turn.d - turn.b * turn.c).squareRoot()
         var line = Line()
         func add(_ point: PKStrokePoint) {
-            let width = max(0.2, InkWidth.width(ofSize: point.size.width) * grown)
+            let width = isGap(point) ? 0 : max(0.2, InkWidth.width(ofSize: point.size.width) * grown)
             if let first = line.widths.first, abs(width - first) > 0.02 * first { line.even = false }
             line.points.append(turn.isIdentity ? point.location : point.location.applying(turn))
             line.widths.append(width)
@@ -57,17 +63,21 @@ enum InkPaint {
         // The stroke's own points first: a line written by the app's pen has them half a screen pixel
         // apart at the zoom it was written at, and is then drawn through exactly the points it was
         // written through.
+        // (How far apart the points are is told where the line is inked: a dashed line has no points in
+        // its gaps, and is none the coarser for that.)
         var length: CGFloat = 0
+        var steps = 0
         for point in path {
-            if let last = line.points.last {
+            if let last = line.points.last, let wide = line.widths.last, wide > 0, !isGap(point) {
                 let here = turn.isIdentity ? point.location : point.location.applying(turn)
                 length += hypot(here.x - last.x, here.y - last.y)
+                steps += 1
             }
             add(point)
         }
         let count = line.points.count
         guard count > 1 else { return line }
-        let apart = length / CGFloat(count - 1)
+        let apart = length / CGFloat(max(steps, 1))
         if apart <= step * 1.5 { return line }
         // Too far apart for this zoom (a shape's outline, a stroke from PencilKit's own pens, a line
         // written zoomed out and looked at zoomed in): the curve PencilKit runs through them is followed.
@@ -111,6 +121,8 @@ enum InkPaint {
         for index in first..<end {
             let here = points[index]
             let radius = widths[index] / 2
+            // (A place of no width is a gap in a dashed line: nothing there, and nothing to or from it.)
+            guard radius > 0 else { continue }
             let sides = max(10, min(48, Int((2 * CGFloat.pi * radius * fineness / 1.5).rounded(.up))))
             let unit = round(sides: sides)
             path.move(to: CGPoint(x: here.x + unit[0].x * radius, y: here.y + unit[0].y * radius))
@@ -121,6 +133,7 @@ enum InkPaint {
             guard index > first else { continue }
             let before = points[index - 1]
             let radiusBefore = widths[index - 1] / 2
+            guard radiusBefore > 0 else { continue }
             let dx = here.x - before.x, dy = here.y - before.y
             let length = hypot(dx, dy)
             guard length > 0.01 else { continue }

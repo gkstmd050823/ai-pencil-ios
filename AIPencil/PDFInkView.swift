@@ -700,9 +700,9 @@ final class PageOverlay: UIView {
     }
 
     /// The same for a shape just added to the handwriting: the places its outline goes through.
-    func keep(points: [CGPoint], width: CGFloat, color: CGColor, fineness: CGFloat, grid: CGPoint, for version: Int, date: Date?) {
+    func keep(points: [CGPoint], width: CGFloat, widths: [CGFloat]? = nil, color: CGColor, fineness: CGFloat, grid: CGPoint, for version: Int, date: Date?) {
         wetPens.fit(scale: fineness, grid: grid)
-        wetPens.add(points: points, width: width, color: color, version: version, date: date)
+        wetPens.add(points: points, width: width, widths: widths, color: color, version: version, date: date)
     }
 
     /// Takes down the lines the picture now has (those up to [version]; all of them when none is given).
@@ -968,6 +968,11 @@ final class ReaderController: ObservableObject {
     /// For the build server: a line being written, the pen still on the page.
     func demoLive() {
         coordinator?.demoLive()
+    }
+
+    /// For the build server: lines in dashes and dots, and lines of the brush.
+    func demoDashes() {
+        coordinator?.demoDashes()
     }
 
     /// For the build server: shapes drawn by hand and held, made true.
@@ -1833,7 +1838,7 @@ struct PDFInkView: UIViewRepresentable {
                 default:
                     penLine = PenLine(
                         width: choice.penSeenWidth, sense: choice.appPenSense, steady: CGFloat(choice.penSteady), spacing: 0.5 / zoom,
-                        taper: choice.appPenTaper, flow: choice.appPenFlow, zoom: zoom
+                        taper: choice.appPenTaper, flow: choice.appPenFlow, zoom: zoom, curve: choice.appPenCurve, dash: choice.appPenDash
                     )
                 }
             }
@@ -1856,7 +1861,8 @@ struct PDFInkView: UIViewRepresentable {
             if shaped != nil { return }
             for sample in fresh { penLine?.add(sample) }
             if let line = penLine {
-                overlay.drawLive(line, ahead: ahead, color: liveColor(penTool), fineness: fineness, grid: penGrid, under: penTool == .highlighter)
+                // (A dashed line is not drawn ahead of the pen: what is ahead may fall in a gap.)
+                overlay.drawLive(line, ahead: line.dash == nil ? ahead : [], color: liveColor(penTool), fineness: fineness, grid: penGrid, under: penTool == .highlighter)
             }
         }
 
@@ -1964,19 +1970,42 @@ struct PDFInkView: UIViewRepresentable {
             overlay.shapePreview.lineWidth = width
             overlay.shapePreview.contentsScale = fineness
             overlay.shapePreview.strokeColor = (darkPaper ? choice.penUIColor.onDarkPaper : choice.penUIColor).cgColor
+            if let dash = choice.appPenDash {
+                overlay.shapePreview.lineDashPattern = [NSNumber(value: Double(max(dash.on, 0.01))), NSNumber(value: Double(dash.off))]
+            } else {
+                overlay.shapePreview.lineDashPattern = nil
+            }
         }
 
         /// An outline becomes a line of the page's handwriting, of the pen's colour and [width] wide.
-        private func addOutline(_ outline: [CGPoint], width: CGFloat, to overlay: PageOverlay) {
-            guard outline.count > 1 else { return }
-            var points: [PKStrokePoint] = []
-            let size = InkWidth.size(drawing: width)
-            for (index, place) in outline.enumerated() {
-                points.append(PKStrokePoint(
-                    location: place, timeOffset: Double(index) * 0.004, size: CGSize(width: size, height: size),
-                    opacity: 1, force: 1, azimuth: 0, altitude: CGFloat.pi / 2
-                ))
+        private func addOutline(_ drawn: [CGPoint], width: CGFloat, to overlay: PageOverlay) {
+            guard drawn.count > 1 else { return }
+            var outline = drawn
+            var widths = [CGFloat](repeating: width, count: outline.count)
+            if let dash = choice.appPenDash {
+                // In dashes or dots, as the pen writes: the outline is first given places close together,
+                // so that the dashes end where they should whatever the zoom they are looked at in.
+                var fine: [CGPoint] = [drawn[0]]
+                var along: [CGFloat] = [0]
+                for place in drawn.dropFirst() {
+                    guard let last = fine.last, let gone = along.last else { continue }
+                    let length = hypot(place.x - last.x, place.y - last.y)
+                    guard length > 0.0001 else { continue }
+                    let parts = max(1, Int((length / 0.5).rounded(.up)))
+                    for part in 1...parts {
+                        let share = CGFloat(part) / CGFloat(parts)
+                        fine.append(CGPoint(x: last.x + (place.x - last.x) * share, y: last.y + (place.y - last.y) * share))
+                        along.append(gone + length * share)
+                    }
+                }
+                let cut = dash.cut(points: fine, widths: [CGFloat](repeating: width, count: fine.count), along: along)
+                guard cut.points.count > 1 else { return }
+                outline = cut.points
+                widths = cut.widths
             }
+            var times: [TimeInterval] = []
+            for index in outline.indices { times.append(Double(index) * 0.004) }
+            let points = PenLine.control(points: outline, widths: widths, times: times)
             let stroke = PKStroke(ink: PKInk(.monoline, color: choice.penUIColor), path: PKStrokePath(controlPoints: points, creationDate: Date()))
             var drawing = overlay.canvas.ink
             let before = drawing
@@ -1984,7 +2013,7 @@ struct PDFInkView: UIViewRepresentable {
             setDrawing(drawing, on: overlay.canvas, undoingTo: before, dirty: stroke.renderBounds.insetBy(dx: -2, dy: -2), live: true)
             // The shape as it was shown stays on show until the picture of the handwriting has it.
             overlay.keep(
-                points: outline, width: width, color: (darkPaper ? choice.penUIColor.onDarkPaper : choice.penUIColor).cgColor,
+                points: outline, width: width, widths: widths, color: (darkPaper ? choice.penUIColor.onDarkPaper : choice.penUIColor).cgColor,
                 fineness: fineness, grid: Self.pixelGrid(of: overlay.inkPicture, scale: fineness),
                 for: overlay.canvas.inkVersion, date: stroke.path.creationDate
             )
@@ -2007,7 +2036,7 @@ struct PDFInkView: UIViewRepresentable {
             // (A fountain pen's line keeps its pointed ends when it is made straight.)
             var line = PenLine(
                 width: made.width, sense: 0, steady: 0, spacing: 0.5 / zoom,
-                taper: penTool == .pen ? choice.appPenTaper : 0, flow: 0, zoom: zoom
+                taper: penTool == .pen ? choice.appPenTaper : 0, flow: 0, zoom: zoom, dash: penTool == .pen ? choice.appPenDash : nil
             )
             let length = hypot(end.point.x - made.from.x, end.point.y - made.from.y)
             let steps = max(2, min(240, Int(length / 3)))
@@ -2197,6 +2226,134 @@ struct PDFInkView: UIViewRepresentable {
                 }
             }
             write(0)
+        }
+
+        /// For the build server: how PencilKit itself draws a stroke that runs straight across the page at
+        /// [y] (PencilKit draws the handwriting of an exported file, and what the AI is shown): how many
+        /// stretches of ink a row of pixels along the stroke's middle has, and how long they and the gaps
+        /// between them are on the whole, in page points.
+        private func inkRuns(of stroke: PKStroke, y: CGFloat) -> (count: Int, long: CGFloat, apart: CGFloat) {
+            let rect = CGRect(x: 50, y: y - 2, width: 380, height: 4)
+            let scale: CGFloat = 4
+            var made: CGImage?
+            UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
+                made = PKDrawing(strokes: [stroke]).image(from: rect, scale: scale).cgImage
+            }
+            guard let image = made, let space = CGColorSpace(name: CGColorSpace.sRGB) else { return (0, 0, 0) }
+            let width = image.width, height = image.height
+            guard width > 0, height > 0, let context = CGContext(
+                data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4, space: space,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ) else { return (0, 0, 0) }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            guard let data = context.data else { return (0, 0, 0) }
+            let bytes = data.bindMemory(to: UInt8.self, capacity: context.bytesPerRow * height)
+            let row = height / 2
+            var count = 0, ink = 0, gaps = 0, gapCount = 0, gap = 0
+            var inRun = false
+            for x in 0..<width {
+                let alpha = bytes[row * context.bytesPerRow + x * 4 + 3]
+                if alpha > 100 {
+                    if !inRun {
+                        inRun = true
+                        count += 1
+                        if count > 1 {
+                            gaps += gap
+                            gapCount += 1
+                        }
+                    }
+                    ink += 1
+                    gap = 0
+                } else {
+                    inRun = false
+                    gap += 1
+                }
+            }
+            return (count, CGFloat(ink) / CGFloat(max(count, 1)) / scale, CGFloat(gaps) / CGFloat(max(gapCount, 1)) / scale)
+        }
+
+        /// For the build server: lines in dashes and in dots, straight and waved, with the ballpoint and
+        /// with the fountain pen pressed harder in the middle; and two lines of the brush. What became of
+        /// each is read back from the page's handwriting and told in the app's notes.
+        func demoDashes() {
+            guard let view = pdfView, let page = view.currentPage, let overlay = overlays[page] else { return }
+            let saved = choice
+            func write(_ y: CGFloat, _ kind: PenKind, _ stroke: PenStroke, wave: CGFloat, pressed: Bool) {
+                choice.tool = .pen
+                choice.penKind = kind
+                choice.penStroke = stroke
+                var chunk: [PenSample] = []
+                var x: CGFloat = 60
+                while x <= 420 {
+                    let along = (x - 60) / 360
+                    let force: CGFloat = pressed ? 0.3 + 3.2 * sin(CGFloat.pi * along) : 1
+                    chunk.append(PenSample(point: CGPoint(x: x, y: y + wave * sin(x / 22)), force: force, time: Double(x) / 300, most: PenLine.fullForce))
+                    x += 2
+                    if chunk.count == 4 {
+                        penDrew(chunk, ahead: [], in: overlay)
+                        chunk = []
+                    }
+                }
+                if !chunk.isEmpty { penDrew(chunk, ahead: [], in: overlay) }
+                penDone(kept: true, in: overlay)
+            }
+            let before = overlay.canvas.ink.strokes.count
+            write(130, .ball, .dashed, wave: 0, pressed: false)
+            write(165, .ball, .dotted, wave: 0, pressed: false)
+            write(215, .ball, .dashed, wave: 14, pressed: false)
+            write(275, .ball, .dotted, wave: 14, pressed: false)
+            write(335, .fountain, .dashed, wave: 10, pressed: true)
+            write(395, .brush, .solid, wave: 10, pressed: true)
+            write(445, .brush, .solid, wave: 0, pressed: true)
+            choice = saved
+            // What the page's handwriting has of them: how many dashes each line is, and how long they
+            // and the gaps between them are along the line.
+            for (number, stroke) in overlay.canvas.ink.strokes.dropFirst(before).enumerated() {
+                let line = InkPaint.line(of: stroke, step: 0.3)
+                var dashes = 0, longest: CGFloat = 0, shortest = CGFloat.infinity, gaps: CGFloat = 0, gapCount = 0
+                var run: CGFloat = 0
+                var inRun = false
+                var thin = CGFloat.infinity, wide: CGFloat = 0
+                for index in line.points.indices {
+                    let inked = line.widths[index] > 0
+                    if inked {
+                        thin = min(thin, line.widths[index])
+                        wide = max(wide, line.widths[index])
+                    }
+                    if inked, inRun, index > 0 {
+                        run += hypot(line.points[index].x - line.points[index - 1].x, line.points[index].y - line.points[index - 1].y)
+                    } else if inked {
+                        if index > 0, dashes > 0 {
+                            gaps += hypot(line.points[index].x - line.points[index - 1].x, line.points[index].y - line.points[index - 1].y)
+                            gapCount += 1
+                        }
+                        inRun = true
+                        run = 0
+                    } else if inRun {
+                        inRun = false
+                        dashes += 1
+                        longest = max(longest, run)
+                        shortest = min(shortest, run)
+                    }
+                }
+                if inRun {
+                    dashes += 1
+                    longest = max(longest, run)
+                }
+                DebugLog.write(String(
+                    format: "dashes: line %d is %d dashes, %.2f to %.2f points long, %.2f apart on the whole; %.2f to %.2f wide; %d points",
+                    number + 1, dashes, Double(shortest.isFinite ? shortest : longest), Double(longest),
+                    Double(gapCount > 0 ? gaps / CGFloat(gapCount) : 0), Double(thin.isFinite ? thin : 0), Double(wide), line.points.count
+                ))
+                // (The first two lines run straight across, at these heights.)
+                if number < 2 {
+                    let seen = inkRuns(of: stroke, y: number == 0 ? 130 : 165)
+                    DebugLog.write(String(
+                        format: "dashes: PencilKit draws line %d as %d stretches of ink, %.2f points long and %.2f apart on the whole",
+                        number + 1, seen.count, Double(seen.long), Double(seen.apart)
+                    ))
+                }
+            }
         }
 
         /// For the build server: forty lines of highlighter written one after another the way a pen

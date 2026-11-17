@@ -295,9 +295,9 @@ final class WetInk: UIView {
 
     /// Any other line that is part of the handwriting from [version] on (a shape, say): the places it
     /// goes through and how wide it is.
-    func add(points: [CGPoint], width: CGFloat, color: CGColor, version: Int, date: Date?) {
+    func add(points: [CGPoint], width: CGFloat, widths: [CGFloat]? = nil, color: CGColor, version: Int, date: Date?) {
         guard points.count > 1 else { return }
-        let path = InkPaint.shape(points: points, widths: [CGFloat](repeating: width, count: points.count), from: 0, fineness: scale)
+        let path = InkPaint.shape(points: points, widths: widths ?? [CGFloat](repeating: width, count: points.count), from: 0, fineness: scale)
         let line = Line(color: color)
         line.pieces = [Piece(path: path, box: path.boundingBoxOfPath)]
         line.box = line.pieces[0].box

@@ -18,6 +18,8 @@ import UIKit.UIGestureRecognizerSubclass
 enum InkWidth {
     private static let rise: CGFloat = 2
     private static let floor: CGFloat = 2
+    /// The size PencilKit draws nothing for: what the points in the gaps of a dashed line are given.
+    static let nothing: CGFloat = 2
 
     /// The size to give a stroke's points for the line to come out [width] points wide.
     static func size(drawing width: CGFloat) -> CGFloat {
@@ -76,6 +78,89 @@ struct PressureCurve: Equatable {
     }
 }
 
+/// A line written in dashes or in dots: so much of it inked, so much left out, over and over, measured
+/// along the line in page points. (A dash has round ends half the line's width long, so it is seen that
+/// much longer than [on] at each end and the gap that much shorter.)
+///
+/// The lengths are the page's, as the line's width is: zoomed in, dashes and gaps grow with the line and
+/// keep their proportions.
+struct DashPattern: Equatable {
+    /// How long a dash is along the middle of the line (nought: a dot), and how long the gap after it.
+    var on: CGFloat
+    var off: CGFloat
+
+    /// Dashes twice as long as the gaps between them, as they are seen.
+    static func dashed(width: CGFloat) -> DashPattern {
+        DashPattern(on: width * 3, off: width * 3)
+    }
+
+    /// Dots a little more than their own width apart. (A dot is a dash of next to no length: one of no
+    /// length at all would be a stroke that goes nowhere, which PencilKit may not draw in an exported file.)
+    static func dotted(width: CGFloat) -> DashPattern {
+        DashPattern(on: width * 0.05, off: width * 2.2)
+    }
+
+    /// A line cut to the pattern: the places of its dashes, a width for each, and where along the line
+    /// each lies (the number of the line's point before it, and the share of the way to the next). A
+    /// dash ends in a place of no width, which says: nothing from here to the next place.
+    struct Cut {
+        var points: [CGPoint] = []
+        var widths: [CGFloat] = []
+        var places: [CGFloat] = []
+    }
+
+    /// The points [from] up to (not including) [to] of a line cut to the pattern. [along] says how far
+    /// along the line each point is; the pattern is laid from the line's beginning, so that a part of
+    /// the line cut by itself has its dashes where the whole line has them.
+    func cut(points: [CGPoint], widths: [CGFloat], along: [CGFloat], from: Int = 0, to: Int? = nil) -> Cut {
+        var out = Cut()
+        let end = min(to ?? points.count, points.count, widths.count, along.count)
+        let period = on + off
+        guard end > 0, period > 0.001 else { return out }
+        let first = max(0, min(from, end - 1))
+        func put(_ index: Int, _ share: CGFloat) {
+            let next = min(index + 1, end - 1)
+            let a = points[index], b = points[next]
+            out.points.append(CGPoint(x: a.x + (b.x - a.x) * share, y: a.y + (b.y - a.y) * share))
+            out.widths.append(widths[index] + (widths[next] - widths[index]) * share)
+            out.places.append(CGFloat(index) + share)
+        }
+        func gap() {
+            guard let last = out.points.last, let wide = out.widths.last, let place = out.places.last, wide > 0 else { return }
+            out.points.append(last)
+            out.widths.append(0)
+            out.places.append(place)
+        }
+        if end - first == 1 {
+            // (One point by itself: inked if a dash lies there.)
+            if along[first].truncatingRemainder(dividingBy: period) <= on { put(first, 0) }
+            return out
+        }
+        for index in first..<(end - 1) {
+            let a0 = along[index], a1 = along[index + 1]
+            let length = a1 - a0
+            guard length > 0.000001 else { continue }
+            var dash = (a0 / period).rounded(.down)
+            while dash * period <= a1 {
+                let lo = max(a0, dash * period), hi = min(a1, dash * period + on)
+                if lo <= hi {
+                    // (A dash that came in from the stretch before goes on from the place it left.)
+                    var goesOn = false
+                    if lo == a0, let wide = out.widths.last, let place = out.places.last, wide > 0, place == CGFloat(index) { goesOn = true }
+                    if !goesOn {
+                        gap()
+                        put(index, (lo - a0) / length)
+                    }
+                    if hi > lo { put(index, (hi - a0) / length) }
+                    if hi < a1 { gap() }
+                }
+                dash += 1
+            }
+        }
+        return out
+    }
+}
+
 /// A line being written: the places the pen went through, steadied, and a width for each.
 ///
 /// A pen is heard from 240 times a second, a finger 60 or 120. Written at an ordinary speed that is a
@@ -107,10 +192,15 @@ struct PenLine {
     let curve: PressureCurve
     /// Whether the steadying eases off as the pen speeds up (it does; the other way is kept to check against).
     let adaptive: Bool
+    /// Set for a line written in dashes or dots. The points, widths and times are those of the whole
+    /// line all the same; it is cut to the pattern where it is shown and where it is handed over.
+    let dash: DashPattern?
 
     private(set) var points: [CGPoint] = []
     private(set) var widths: [CGFloat] = []
     private(set) var times: [TimeInterval] = []
+    /// How far along the line each point is, in page points.
+    private(set) var along: [CGFloat] = []
     /// How many of the points are as they will stay.
     private(set) var settled = 0
 
@@ -173,10 +263,11 @@ struct PenLine {
 
     init(
         width: CGFloat, sense: CGFloat, steady: CGFloat, spacing: CGFloat = 0.6, taper: CGFloat = 0, flow: CGFloat = 0, zoom: CGFloat = 1,
-        curve: PressureCurve = .fountain, adaptive: Bool = true
+        curve: PressureCurve = .fountain, adaptive: Bool = true, dash: DashPattern? = nil
     ) {
         self.curve = curve
         self.adaptive = adaptive
+        self.dash = dash
         self.width = width
         self.sense = min(max(sense, 0), 1)
         self.steady = min(max(steady, 0), 1)
@@ -322,10 +413,16 @@ struct PenLine {
             let t = CGFloat(piece) / CGFloat(pieces)
             let t2 = t * t, t3 = t2 * t
             let h1 = 2 * t3 - 3 * t2 + 1, h2 = t3 - 2 * t2 + t, h3 = -2 * t3 + 3 * t2, h4 = t3 - t2
-            points.append(CGPoint(
+            let place = CGPoint(
                 x: h1 * b.point.x + h2 * out.x + h3 * c.point.x + h4 * into.x,
                 y: h1 * b.point.y + h2 * out.y + h3 * c.point.y + h4 * into.y
-            ))
+            )
+            if let before = points.last, let gone = along.last {
+                along.append(gone + hypot(place.x - before.x, place.y - before.y))
+            } else {
+                along.append(0)
+            }
+            points.append(place)
             widths.append(b.width + (c.width - b.width) * t)
             times.append(b.time + (c.time - b.time) * Double(t))
         }
@@ -339,10 +436,12 @@ struct PenLine {
         points.removeSubrange(settled...)
         widths.removeSubrange(settled...)
         times.removeSubrange(settled...)
+        along.removeSubrange(settled...)
         if settled == 0 {
             points.append(knots[0].point)
             widths.append(knots[0].width)
             times.append(knots[0].time)
+            along.append(0)
             settled = 1
         }
         while stretches < count - 1, toTheEnd || stretches + 2 <= count - 1 {
@@ -398,21 +497,68 @@ struct PenLine {
     func stroke(color: UIColor, ink: PKInkingTool.InkType = .monoline) -> PKStroke? {
         guard points.count > 1 else { return nil }
         var control: [PKStrokePoint] = []
-        control.reserveCapacity(points.count)
-        for index in points.indices {
-            let size = InkWidth.size(drawing: widths[index])
-            control.append(PKStrokePoint(
-                location: points[index], timeOffset: times[index], size: CGSize(width: size, height: size),
-                opacity: 1, force: 1, azimuth: 0, altitude: CGFloat.pi / 2
-            ))
+        if let dash {
+            let cut = dash.cut(points: points, widths: widths, along: along)
+            var when: [TimeInterval] = []
+            when.reserveCapacity(cut.places.count)
+            for place in cut.places {
+                let index = min(Int(place), times.count - 1), next = min(index + 1, times.count - 1)
+                when.append(times[index] + (times[next] - times[index]) * Double(place - CGFloat(index)))
+            }
+            control = Self.control(points: cut.points, widths: cut.widths, times: when)
+        } else {
+            control = Self.control(points: points, widths: widths, times: times)
         }
+        guard control.count > 1 else { return nil }
         return PKStroke(ink: PKInk(ink, color: color), path: PKStrokePath(controlPoints: control, creationDate: Date()))
+    }
+
+    /// The points of a stroke for a line through [points], as wide as [widths] say. A width of nought
+    /// ends a dash (see DashPattern): the gap from there to the next place is marked at both its ends,
+    /// twice over, by points of the size PencilKit draws nothing for and of no opacity. (Twice over,
+    /// because PencilKit runs a smooth curve through a stroke's points: a single one would let the
+    /// line's width leak a little way into the gap where PencilKit draws the stroke, in an exported file.
+    /// For the same reason the first and the last place of a dash are given twice: the dash is then as
+    /// wide as it should be right up to its ends.)
+    static func control(points: [CGPoint], widths: [CGFloat], times: [TimeInterval]) -> [PKStrokePoint] {
+        var control: [PKStrokePoint] = []
+        control.reserveCapacity(points.count)
+        func mark(_ index: Int) {
+            for _ in 0..<2 {
+                control.append(PKStrokePoint(
+                    location: points[index], timeOffset: times[index], size: CGSize(width: InkWidth.nothing, height: InkWidth.nothing),
+                    opacity: 0, force: 0, azimuth: 0, altitude: CGFloat.pi / 2
+                ))
+            }
+        }
+        for index in points.indices {
+            if widths[index] <= 0 {
+                mark(index)
+                continue
+            }
+            let begins = index > 0 && widths[index - 1] <= 0
+            let ends = index + 1 < points.count && widths[index + 1] <= 0
+            if begins { mark(index) }
+            let size = InkWidth.size(drawing: widths[index])
+            let copies = (begins ? 2 : 1) + (ends ? 1 : 0)
+            for _ in 0..<copies {
+                control.append(PKStrokePoint(
+                    location: points[index], timeOffset: times[index], size: CGSize(width: size, height: size),
+                    opacity: 1, force: 1, azimuth: 0, altitude: CGFloat.pi / 2
+                ))
+            }
+        }
+        return control
     }
 
     /// The line from point [from] up to (not including) point [to] as a shape to fill, fine enough for a
     /// screen that shows [fineness] pixels to a page point.
     func shape(from: Int, to: Int? = nil, fineness: CGFloat) -> CGPath {
-        InkPaint.shape(points: points, widths: widths, from: from, to: to ?? points.count, fineness: fineness)
+        guard let dash else {
+            return InkPaint.shape(points: points, widths: widths, from: from, to: to ?? points.count, fineness: fineness)
+        }
+        let cut = dash.cut(points: points, widths: widths, along: along, from: from, to: to)
+        return InkPaint.shape(points: cut.points, widths: cut.widths, from: 0, fineness: fineness)
     }
 }
 

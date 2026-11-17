@@ -721,6 +721,9 @@ struct ReaderView: View {
         if arguments.contains("-demoLiveLine") {
             later(3) { controller.demoLive() }
         }
+        if arguments.contains("-demoDashes") {
+            later(3) { controller.demoDashes() }
+        }
         if arguments.contains("-demoHeldShapes") {
             later(3) { controller.demoHeldShapes() }
         }
@@ -776,6 +779,7 @@ struct ReaderView: View {
         if defaults.object(forKey: "demoHighlighterAuto") != nil { choice.highlighterAuto = defaults.bool(forKey: "demoHighlighterAuto") }
         // The pen's, too: its kind, and the width in millimetres of the one in use.
         if let kind = PenKind(rawValue: defaults.string(forKey: "demoPenKind") ?? "") { choice.penKind = kind }
+        if let stroke = PenStroke(rawValue: defaults.string(forKey: "demoPenStroke") ?? "") { choice.penStroke = stroke }
         if defaults.double(forKey: "demoPenSize") > 0 {
             choice.penSize = InkChoice.tidy(defaults.double(forKey: "demoPenSize"), in: InkChoice.penSizeRange)
         }
@@ -1124,6 +1128,8 @@ private struct StrokeSample: View {
     var color: Color
     var width: CGFloat
     var tint = false
+    /// A dash and the gap after it, for a pen that writes in dashes or dots.
+    var dash: [CGFloat] = []
     var darkPaper: Bool
 
     var body: some View {
@@ -1138,7 +1144,7 @@ private struct StrokeSample: View {
             }
             context.stroke(
                 path, with: .color(color.opacity(tint ? Double(InkChoice.highlighterStrength) : 1)),
-                style: StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round)
+                style: StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round, dash: dash)
             )
         }
         .frame(height: 58)
@@ -1188,11 +1194,29 @@ private struct ToolOptions: View {
     /// About how many points of the screen a point of the page takes when a page fills the screen's width.
     private static let shownAt: CGFloat = 2
 
+    /// The pen's dash and gap as the sample line shows them; empty for a whole line.
+    private var penDashShown: [CGFloat] {
+        guard let dash = choice.appPenDash else { return [] }
+        return [max(dash.on, 0.01) * Self.shownAt, dash.off * Self.shownAt]
+    }
+
+    /// What the sliders of the pen in hand do.
+    private var penHint: String {
+        switch choice.penKind {
+        case .fountain:
+            return "필압 감도는 누르는 힘이, 속도 반응은 펜의 빠르기가 굵기를 얼마나 바꿀지예요(천천히 쓰면 굵게, 빨리 쓰면 가늘게). 펜끝 선명도는 획의 처음과 끝이 얼마나 뾰족할지, 획 안정화는 손떨림을 얼마나 펴 줄지예요."
+        case .brush:
+            return "붓은 획의 처음과 끝이 늘 뾰족하고, 천천히 쓰면 굵게 빨리 쓰면 가늘게 나와요. 필압 감도는 누르는 힘이 굵기를 얼마나 바꿀지, 획 안정화는 손떨림을 얼마나 펴 줄지예요."
+        default:
+            return "획 안정화는 손떨림을 얼마나 펴 줄지예요. 높이면 선이 펜을 조금 늦게 따라와요."
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 15) {
             switch choice.tool {
             case .pen:
-                StrokeSample(color: shown(choice.penColor), width: choice.penSeenWidth * Self.shownAt, darkPaper: darkPaper)
+                StrokeSample(color: shown(choice.penColor), width: choice.penSeenWidth * Self.shownAt, dash: penDashShown, darkPaper: darkPaper)
                 Picker("펜 종류", selection: $choice.penKind) {
                     ForEach(PenKind.allCases) { kind in
                         Text(kind.label).tag(kind)
@@ -1231,17 +1255,21 @@ private struct ToolOptions: View {
                 }
                 if choice.penKind != .pencil {
                     // These two are worked into the line while it is being written.
+                    Picker("선 모양", selection: $choice.penStroke) {
+                        ForEach(PenStroke.allCases) { stroke in
+                            Text(stroke.label).tag(stroke)
+                        }
+                    }
+                    .pickerStyle(.segmented)
                     SliderRow(title: "필압 감도", value: $choice.penSense, range: 0...1, shown: "\(Int((choice.penSense * 100).rounded()))%")
-                        .disabled(choice.penKind != .fountain)
-                        .opacity(choice.penKind != .fountain ? 0.4 : 1)
+                        .disabled(choice.penKind != .fountain && choice.penKind != .brush)
+                        .opacity(choice.penKind != .fountain && choice.penKind != .brush ? 0.4 : 1)
                     if choice.penKind == .fountain {
                         SliderRow(title: "펜끝 선명도", value: $choice.penTaper, range: 0...1, shown: "\(Int((choice.penTaper * 100).rounded()))%")
                         SliderRow(title: "속도 반응", value: $choice.penFlow, range: 0...1, shown: "\(Int((choice.penFlow * 100).rounded()))%")
                     }
                     SliderRow(title: "획 안정화", value: $choice.penSteady, range: 0...1, shown: "\(Int((choice.penSteady * 100).rounded()))%")
-                    Text(choice.penKind == .fountain
-                        ? "필압 감도는 누르는 힘이, 속도 반응은 펜의 빠르기가 굵기를 얼마나 바꿀지예요(천천히 쓰면 굵게, 빨리 쓰면 가늘게). 펜끝 선명도는 획의 처음과 끝이 얼마나 뾰족할지, 획 안정화는 손떨림을 얼마나 펴 줄지예요."
-                        : "획 안정화는 손떨림을 얼마나 펴 줄지예요. 높이면 선이 펜을 조금 늦게 따라와요.")
+                    Text(penHint)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

@@ -34,7 +34,7 @@ enum InkTool: String, CaseIterable, Identifiable, Codable {
 
 /// The kinds of pen. They differ in how the line answers to the hand.
 enum PenKind: String, CaseIterable, Identifiable, Codable {
-    case fountain, pen, ball, pencil
+    case fountain, pen, ball, brush, pencil
 
     var id: String { rawValue }
 
@@ -43,6 +43,7 @@ enum PenKind: String, CaseIterable, Identifiable, Codable {
         case .fountain: return "만년필"
         case .pen: return "펜"
         case .ball: return "볼펜"
+        case .brush: return "붓"
         case .pencil: return "연필"
         }
     }
@@ -52,16 +53,32 @@ enum PenKind: String, CaseIterable, Identifiable, Codable {
         case .fountain: return "누르는 힘에 따라 쓰는 동안 굵기가 달라져요"
         case .pen: return "힘을 주면 조금 굵어져요"
         case .ball: return "힘을 주어도 굵기가 늘 같아요"
+        case .brush: return "힘을 빼면 실처럼 가늘고, 누르면 세 배 가까이 굵어져요"
         case .pencil: return "누르면 진해지고, 기울이면 넓게 칠해져요"
         }
     }
 
     var ink: PKInkingTool.InkType {
         switch self {
-        case .fountain: return .fountainPen
+        case .fountain, .brush: return .fountainPen
         case .pen: return .pen
         case .ball: return .monoline
         case .pencil: return .pencil
+        }
+    }
+}
+
+/// How the pen's line is laid: whole, in dashes or in dots.
+enum PenStroke: String, CaseIterable, Identifiable, Codable {
+    case solid, dashed, dotted
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .solid: return "실선"
+        case .dashed: return "파선"
+        case .dotted: return "점선"
         }
     }
 }
@@ -123,6 +140,8 @@ struct InkChoice: Equatable, Codable {
     /// much the pen's pace changes the width, from 0 (not at all) to 1.
     var penTaper = 0.3
     var penFlow = 0.35
+    /// Whether the pen's line is whole, dashed or dotted.
+    var penStroke = PenStroke.solid
     var highlighterColor: UInt32 = 0xFFD60A
     /// The highlighter's width in millimetres on the paper.
     var highlighterSize = 5.0
@@ -158,6 +177,7 @@ struct InkChoice: Equatable, Codable {
         penSteady = read(.penSteady, penSteady)
         penTaper = read(.penTaper, penTaper)
         penFlow = read(.penFlow, penFlow)
+        penStroke = read(.penStroke, penStroke)
         highlighterColor = read(.highlighterColor, highlighterColor)
         highlighterSize = read(.highlighterSize, highlighterSize)
         eraserKind = read(.eraserKind, eraserKind)
@@ -281,13 +301,43 @@ struct InkChoice: Equatable, Codable {
         switch penKind {
         case .fountain: return CGFloat(penSense)
         case .pen: return CGFloat(penSense) * 0.4
+        // (A brush that did not answer to pressure would be no brush: at least half.)
+        case .brush: return 0.5 + 0.5 * CGFloat(penSense)
         case .ball, .pencil: return 0
         }
     }
 
-    /// Pointed ends and a width that follows the pen's pace are the fountain pen's alone.
-    var appPenTaper: CGFloat { penKind == .fountain ? CGFloat(penTaper) : 0 }
-    var appPenFlow: CGFloat { penKind == .fountain ? CGFloat(penFlow) : 0 }
+    /// Pointed ends and a width that follows the pen's pace are the fountain pen's, as they are set, and
+    /// the brush's, whose ends always come to a point.
+    var appPenTaper: CGFloat {
+        switch penKind {
+        case .fountain: return CGFloat(penTaper)
+        case .brush: return 0.9
+        default: return 0
+        }
+    }
+
+    var appPenFlow: CGFloat {
+        switch penKind {
+        case .fountain: return CGFloat(penFlow)
+        case .brush: return 0.5
+        default: return 0
+        }
+    }
+
+    /// How the width answers to pressure, by the kind of pen.
+    var appPenCurve: PressureCurve { penKind == .brush ? .brush : .fountain }
+
+    /// The pattern the pen's line is written in; nil for a whole line. (The pencil's line is PencilKit's
+    /// to draw, and is always whole.)
+    var appPenDash: DashPattern? {
+        guard penKind != .pencil else { return nil }
+        switch penStroke {
+        case .solid: return nil
+        case .dashed: return .dashed(width: penSeenWidth)
+        case .dotted: return .dotted(width: penSeenWidth)
+        }
+    }
 
     /// Whether the tool in hand is put down by itself once it has been used.
     var putsDownAfterUse: Bool {

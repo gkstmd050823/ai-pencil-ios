@@ -254,6 +254,11 @@ jobs:
           # Draw and hold: a rectangle, a triangle, a circle and an oval drawn by a shaky hand and held,
           # a wave that is no shape, and a straight line that ends on the end of another.
           shot 59-held-shapes 20 -demoNote -demoHeldShapes
+          # Lines in dashes and in dots, and the brush: fitting the screen and zoomed in three times,
+          # where dashes and gaps have to be three times as large and in the same proportion.
+          shot 60-dashes 10 -demoNote -demoDashes
+          shot 60-dashes-zoomed 12 -demoNote -demoZoom 3 -demoDashes
+          shot 60-dashes-canvas 10 -demoNote -demoDashes -demoCanvasInk
           shot 55-highlighter-many-old 60 -demoNote -demoHighlightMany -demoOldHighlighter
           shot 16-settings 8 -demoSettings
           xcrun simctl ui "$UDID" appearance dark
@@ -283,6 +288,8 @@ jobs:
             if ! grep -q "^pen: held still, a line of .* made $made" app-debug.log; then echo "a line drawn as $made and held was not made one"; exit 1; fi
           done
           if ! grep -q "its end put on the end of another line" app-debug.log; then echo "a straight line ending near the end of another was not put on it"; exit 1; fi
+          echo "---- dashes ----"
+          grep "^dashes: " app-debug.log || true
           xcrun simctl shutdown "$UDID" || true
 
       - name: Build for the iPad (unsigned)

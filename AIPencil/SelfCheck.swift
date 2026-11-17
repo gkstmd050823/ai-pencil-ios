@@ -1,5 +1,7 @@
 import CoreGraphics
 import Foundation
+import PencilKit
+import UIKit
 
 /// Checks of the app's own reckoning that need no screen: run on the build server ("-selfCheck"), each
 /// leaving a line in the app's notes that says "ok" or "FAILED". The build fails on a line that says FAILED.
@@ -15,7 +17,150 @@ enum SelfCheck {
         pressure()
         steadying()
         shapes()
+        dashes()
         DebugLog.write("check: done")
+    }
+
+    // MARK: dashes, dots and the brush
+
+    /// The dashes of a cut line: where each begins and ends, told by its first and last place's x. (The
+    /// lines checked here run straight across.)
+    private static func runs(_ points: [CGPoint], _ widths: [CGFloat]) -> [(from: CGFloat, to: CGFloat)] {
+        var found: [(from: CGFloat, to: CGFloat)] = []
+        var began: CGFloat?
+        var last: CGFloat = 0
+        for index in points.indices {
+            if widths[index] > 0 {
+                if began == nil { began = points[index].x }
+                last = points[index].x
+            } else if let start = began {
+                found.append((start, last))
+                began = nil
+            }
+        }
+        if let start = began { found.append((start, last)) }
+        return found
+    }
+
+    private static func dashes() {
+        // A line straight across, 62 points long, written in dashes of 3 with gaps of 3.
+        func written(spacing: CGFloat, dash: DashPattern?) -> PenLine {
+            var line = PenLine(width: 1, sense: 0, steady: 0, spacing: spacing, dash: dash)
+            for step in 0...31 {
+                line.add(PenSample(point: CGPoint(x: 100 + 2 * CGFloat(step), y: 300), force: 0, time: Double(step) * 0.004))
+            }
+            line.finish()
+            return line
+        }
+        let pattern = DashPattern(on: 3, off: 3)
+        let line = written(spacing: 0.3, dash: pattern)
+        let cut = pattern.cut(points: line.points, widths: line.widths, along: line.along)
+        let found = runs(cut.points, cut.widths)
+        var worst: CGFloat = 0
+        for (number, run) in found.enumerated() where number < found.count - 1 {
+            worst = max(worst, abs(run.from - (100 + 6 * CGFloat(number))))
+            worst = max(worst, abs(run.to - (103 + 6 * CGFloat(number))))
+        }
+        note("a line of 62 points in dashes of 3 and gaps of 3 is eleven dashes", found.count == 11, "\(found.count)")
+        note("each dash begins and ends where the pattern says", found.count == 11 && worst < 0.01, String(format: "off by %.4f points at most", Double(worst)))
+
+        // The same line with its points four times as far apart (as written zoomed out): the same dashes.
+        let coarse = written(spacing: 1, dash: pattern)
+        let coarseCut = pattern.cut(points: coarse.points, widths: coarse.widths, along: coarse.along)
+        let coarseFound = runs(coarseCut.points, coarseCut.widths)
+        var apart: CGFloat = 0
+        if coarseFound.count == found.count {
+            for number in found.indices {
+                apart = max(apart, abs(coarseFound[number].from - found[number].from))
+                apart = max(apart, abs(coarseFound[number].to - found[number].to))
+            }
+        }
+        note("the dashes are the same however fine the line's points are", coarseFound.count == found.count && apart < 0.01, String(format: "%.4f apart at most", Double(apart)))
+
+        // Cut in parts, as it is while it is being written, the parts have the dashes of the whole.
+        let middle = line.points.count / 2
+        let head = pattern.cut(points: line.points, widths: line.widths, along: line.along, from: 0, to: middle + 1)
+        let tail = pattern.cut(points: line.points, widths: line.widths, along: line.along, from: middle)
+        let headRuns = runs(head.points, head.widths), tailRuns = runs(tail.points, tail.widths)
+        var joined = headRuns
+        if let last = joined.last, let next = tailRuns.first, abs(next.from - last.to) < 0.001 {
+            // (The dash the cut went through is in both parts.)
+            joined[joined.count - 1] = (last.from, next.to)
+            joined += tailRuns.dropFirst()
+        } else {
+            joined += tailRuns
+        }
+        var parted: CGFloat = joined.count == found.count ? 0 : 99
+        if joined.count == found.count {
+            for number in found.indices {
+                parted = max(parted, abs(joined[number].from - found[number].from))
+                parted = max(parted, abs(joined[number].to - found[number].to))
+            }
+        }
+        note("a line cut in two parts has the dashes of the whole", parted < 0.01, String(format: "%d and %d dashes, %.4f apart at most", headRuns.count, tailRuns.count, Double(parted)))
+
+        // Dots: next to no length each, and as far apart as the pattern says.
+        let dots = DashPattern.dotted(width: 1)
+        let dotted = written(spacing: 0.3, dash: dots)
+        let dotCut = dots.cut(points: dotted.points, widths: dotted.widths, along: dotted.along)
+        let dotRuns = runs(dotCut.points, dotCut.widths)
+        var longest: CGFloat = 0, uneven: CGFloat = 0
+        for (number, run) in dotRuns.enumerated() {
+            longest = max(longest, run.to - run.from)
+            if number > 0 { uneven = max(uneven, abs(run.from - dotRuns[number - 1].from - 2.25)) }
+        }
+        note("a dotted line is dots evenly apart", dotRuns.count == 28 && longest < 0.06 && uneven < 0.01, String(format: "%d dots, %.3f long at most", dotRuns.count, Double(longest)))
+
+        // A whole line has no gaps, and is the shape it always was.
+        let whole = written(spacing: 0.3, dash: nil)
+        let asBefore = InkPaint.shape(points: whole.points, widths: whole.widths, from: 0, fineness: 4)
+        note("a whole line is drawn as it was", whole.shape(from: 0, fineness: 4).boundingBoxOfPath == asBefore.boundingBoxOfPath && whole.along.count == whole.points.count)
+
+        // The dashed line as a stroke, kept as a file's handwriting is kept and read back: the app's
+        // drawing of it has the same dashes, and uses the stroke's own places.
+        if let stroke = line.stroke(color: .black) {
+            var back = InkPaint.line(of: stroke, step: 0.6)
+            var kept = "as made"
+            if let again = try? PKDrawing(data: PKDrawing(strokes: [stroke]).dataRepresentation()), let read = again.strokes.first {
+                back = InkPaint.line(of: read, step: 0.6)
+                kept = "read back from its data"
+            } else {
+                kept = "NOT read back"
+            }
+            let backRuns = runs(back.points, back.widths)
+            var moved: CGFloat = backRuns.count == found.count ? 0 : 99
+            if backRuns.count == found.count {
+                for number in found.indices {
+                    moved = max(moved, abs(backRuns[number].from - found[number].from))
+                    moved = max(moved, abs(backRuns[number].to - found[number].to))
+                }
+            }
+            note(
+                "a dashed stroke read back from the handwriting has its dashes", kept == "read back from its data" && moved < 0.05,
+                String(format: "%d dashes %@, %.4f points off at most", backRuns.count, kept, Double(moved))
+            )
+            // (A stroke with gaps is not taken for one of a single width: it is filled as a shape.)
+            note("a dashed stroke is not drawn as one unbroken line", !back.even)
+        } else {
+            note("a dashed line makes a stroke", false)
+        }
+
+        // The brush: a line pressed lightly is a hair, pressed hard it is much wider, and it grows evenly between.
+        func brushed(_ force: CGFloat) -> CGFloat {
+            var line = PenLine(width: 2, sense: 1, steady: 0, spacing: 0.3, curve: .brush)
+            for step in 0...40 {
+                line.add(PenSample(point: CGPoint(x: 100 + 2 * CGFloat(step), y: 300), force: force, time: Double(step) * 0.004, most: PenLine.fullForce))
+            }
+            return line.widths[line.widths.count / 2]
+        }
+        let light = brushed(0.1), medium = brushed(1.5), heavy = brushed(3.2)
+        let hair: Bool = light < 0.5
+        let broad: Bool = heavy > 5
+        let between: Bool = medium > light && medium < heavy
+        note(
+            "the brush writes a hair under a light hand and a broad line under a heavy one", hair && broad && between,
+            String(format: "%.2f, %.2f and %.2f points wide for a pen of 2", Double(light), Double(medium), Double(heavy))
+        )
     }
 
     // MARK: shapes
