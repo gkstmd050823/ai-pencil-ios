@@ -30,12 +30,18 @@ enum SelfCheck {
             let sides = [far(corners[0], corners[1]), far(corners[1], corners[2])].sorted()
             let wide = sides[1], tall = sides[0]
             // (Every side runs straight across or straight up.)
-            let level = (0..<4).allSatisfy { index in
+            var level = true
+            for index in 0..<4 {
                 let a = corners[index], b = corners[(index + 1) % 4]
-                return abs(a.x - b.x) < 0.01 || abs(a.y - b.y) < 0.01
+                let upright: Bool = abs(a.x - b.x) < 0.01
+                let across: Bool = abs(a.y - b.y) < 0.01
+                if !upright, !across { level = false }
             }
+            let asWide: Bool = abs(wide - 197.5) < 8
+            let asTall: Bool = abs(tall - 118) < 6
+            let named: Bool = ShapeFinder.name(.polygon(corners)) == "a rectangle"
             note(
-                "a shaky rectangle is a rectangle that lies level", level && abs(wide - 197.5) < 8 && abs(tall - 118) < 6 && ShapeFinder.name(.polygon(corners)) == "a rectangle",
+                "a shaky rectangle is a rectangle that lies level", level && asWide && asTall && named,
                 String(format: "%.1f by %.1f", Double(wide), Double(tall))
             )
         } else {
@@ -48,8 +54,12 @@ enum SelfCheck {
             let sides = [far(corners[0], corners[1]), far(corners[1], corners[2])].sorted()
             var lies = atan2(corners[1].y - corners[0].y, corners[1].x - corners[0].x) * 180 / .pi
             lies = lies - (lies / 90).rounded(.down) * 90
+            let asTurned: Bool = abs(lies - 30) < 2.5
+            let asTall: Bool = abs(sides[0] - 120) < 6
+            let asWide: Bool = abs(sides[1] - 200) < 8
+            let named: Bool = ShapeFinder.name(.polygon(corners)) == "a rectangle"
             note(
-                "a rectangle turned thirty degrees stays turned", abs(lies - 30) < 2.5 && abs(sides[0] - 120) < 6 && abs(sides[1] - 200) < 8 && ShapeFinder.name(.polygon(corners)) == "a rectangle",
+                "a rectangle turned thirty degrees stays turned", asTurned && asTall && asWide && named,
                 String(format: "%.1f by %.1f at %.1f degrees", Double(sides[1]), Double(sides[0]), Double(lies))
             )
         } else {
@@ -60,7 +70,12 @@ enum SelfCheck {
         let meant = [point(100, 300), point(260, 304), point(180, 170)]
         let three = ShapeFinder.find(HandDrawn.walk(meant, short: 0.05))
         if case .polygon(let corners)? = three, corners.count == 3 {
-            let off = meant.map { corner in corners.map { far($0, corner) }.min() ?? 99 }.max() ?? 99
+            var off: CGFloat = 0
+            for corner in meant {
+                var nearest: CGFloat = 99
+                for found in corners { nearest = min(nearest, far(found, corner)) }
+                off = max(off, nearest)
+            }
             note("a shaky triangle is a triangle", off < 6, String(format: "corners off by %.1f points at most", Double(off)))
         } else {
             note("a shaky triangle is a triangle", false, "\(String(describing: three))")
@@ -77,9 +92,12 @@ enum SelfCheck {
         // A circle a little wider than tall, gone a little past where it began: a circle.
         let ring = ShapeFinder.find(HandDrawn.oval(center: point(200, 200), a: 60, b: 57, over: 0.04))
         if case .ellipse(let center, let a, let b, _)? = ring {
+            let away: CGFloat = far(center, point(200, 200))
+            let asLarge: Bool = abs(a - 58.5) < 2.5
+            let inPlace: Bool = away < 5
             note(
-                "a shaky circle is a circle", a == b && abs(a - 58.5) < 2.5 && far(center, point(200, 200)) < 5,
-                String(format: "%.1f across, its middle off by %.1f", Double(a * 2), Double(far(center, point(200, 200))))
+                "a shaky circle is a circle", a == b && asLarge && inPlace,
+                String(format: "%.1f across, its middle off by %.1f", Double(a * 2), Double(away))
             )
         } else {
             note("a shaky circle is a circle", false, "\(String(describing: ring))")
@@ -90,8 +108,11 @@ enum SelfCheck {
         if case .ellipse(_, let a, let b, let turn)? = egg {
             var lies = turn * 180 / .pi
             lies = lies - (lies / 180).rounded(.down) * 180
+            let asLong: Bool = abs(a - 90) < 3.6
+            let asWide: Bool = abs(b - 40) < 2.4
+            let asTurned: Bool = abs(lies - 30) < 3
             note(
-                "an oval turned thirty degrees is that oval", abs(a - 90) < 3.6 && abs(b - 40) < 2.4 && abs(lies - 30) < 3,
+                "an oval turned thirty degrees is that oval", asLong && asWide && asTurned,
                 String(format: "%.1f by %.1f at %.1f degrees", Double(a), Double(b), Double(lies))
             )
         } else {
@@ -101,13 +122,20 @@ enum SelfCheck {
         // One lying nearly level is made to lie level.
         let flat = ShapeFinder.find(HandDrawn.oval(center: point(200, 200), a: 90, b: 40, degrees: 5))
         if case .ellipse(_, let a, let b, let turn)? = flat {
-            note("an oval nearly level lies level", abs(sin(turn)) < 0.0001 && abs(a - 90) < 3.6 && abs(b - 40) < 2.4)
+            let level: Bool = abs(sin(turn)) < 0.0001
+            let asLong: Bool = abs(a - 90) < 3.6
+            let asWide: Bool = abs(b - 40) < 2.4
+            note("an oval nearly level lies level", level && asLong && asWide)
         } else {
             note("an oval nearly level lies level", false, "\(String(describing: flat))")
         }
 
         // What is not a shape stays as it was drawn: a wave, a star, a ring left open.
-        let wave = (0..<60).map { point(100 + 3 * CGFloat($0), 200 + 40 * sin(CGFloat($0) / 8)) }
+        var wave: [CGPoint] = []
+        for step in 0..<60 {
+            let along = CGFloat(step)
+            wave.append(point(100 + 3 * along, 200 + 40 * sin(along / 8)))
+        }
         note("a wave is no shape", ShapeFinder.find(wave) == nil)
         let star = HandDrawn.walk([
             point(200, 100), point(230, 190), point(320, 190), point(250, 240), point(280, 330),
@@ -119,7 +147,8 @@ enum SelfCheck {
 
         // The end of a straight line is put on the nearest end of another within reach, and on none beyond it.
         let ends = [point(100, 100), point(300, 100), point(306, 108)]
-        note("an end near another line's end is put on it", Straighten.joined(point(304, 104), to: ends, reach: 12) == point(306, 108))
+        let put: CGPoint? = Straighten.joined(point(304, 104), to: ends, reach: 12)
+        note("an end near another line's end is put on it", put == point(306, 108))
         note("an end far from any other stays", Straighten.joined(point(330, 140), to: ends, reach: 12) == nil)
     }
 
@@ -224,14 +253,19 @@ enum SelfCheck {
         }
         note("a shaky line is a line", Straighten.isLine(line), "bend \(Straighten.bend(line))")
         // A corner, an arc and a line gone over twice are not.
-        let corner = (0...30).map { CGPoint(x: 50 + 5 * Double($0), y: 200) } + (1...30).map { CGPoint(x: 200, y: 200 + 5 * Double($0)) }
+        var corner: [CGPoint] = []
+        for step in 0...30 { corner.append(CGPoint(x: 50 + 5 * Double(step), y: 200)) }
+        for step in 1...30 { corner.append(CGPoint(x: 200, y: 200 + 5 * Double(step))) }
         note("a corner is not a line", !Straighten.isLine(corner))
         let arc = (0...40).map { step -> CGPoint in
             let angle = Double.pi * Double(step) / 40
             return CGPoint(x: 200 - 100 * cos(angle), y: 300 - 100 * sin(angle))
         }
         note("an arc is not a line", !Straighten.isLine(arc))
-        let twice = (0...40).map { CGPoint(x: 50 + 6 * Double($0), y: 200) } + (0...39).map { CGPoint(x: 290 - 6 * Double($0), y: 201) } + [CGPoint(x: 300, y: 200)]
+        var twice: [CGPoint] = []
+        for step in 0...40 { twice.append(CGPoint(x: 50 + 6 * Double(step), y: 200)) }
+        for step in 0...39 { twice.append(CGPoint(x: 290 - 6 * Double(step), y: 201)) }
+        twice.append(CGPoint(x: 300, y: 200))
         note("a line gone over twice is not a line", !Straighten.isLine(twice))
 
         // Ends are drawn to level, upright and the two directions between, within five degrees.

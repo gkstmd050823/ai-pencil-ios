@@ -1941,7 +1941,8 @@ struct PDFInkView: UIViewRepresentable {
                 let path = stroke.path
                 guard path.count > 1 else { continue }
                 let last = CGFloat(path.count - 1)
-                let along = (0...8).map { path.interpolatedLocation(at: last * CGFloat($0) / 8) }
+                var along: [CGPoint] = []
+                for part in 0...8 { along.append(path.interpolatedLocation(at: last * CGFloat(part) / 8)) }
                 guard let a = along.first, let b = along.last, hypot(b.x - a.x, b.y - a.y) >= long, Straighten.isLine(along) else { continue }
                 ends.append(a.applying(stroke.transform))
                 ends.append(b.applying(stroke.transform))
@@ -2153,17 +2154,24 @@ struct PDFInkView: UIViewRepresentable {
             guard let view = pdfView, let page = view.currentPage, let overlay = overlays[page] else { return }
             func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: x, y: y) }
             func line(from a: CGPoint, to b: CGPoint) -> [CGPoint] {
-                (0...40).map { step in
+                var places: [CGPoint] = []
+                for step in 0...40 {
                     let along = CGFloat(step) / 40
-                    return point(a.x + (b.x - a.x) * along, a.y + (b.y - a.y) * along + 1.5 * sin(along * 17))
+                    places.append(point(a.x + (b.x - a.x) * along, a.y + (b.y - a.y) * along + 1.5 * sin(along * 17)))
                 }
+                return places
+            }
+            var wave: [CGPoint] = []
+            for step in 0..<70 {
+                let along = CGFloat(step)
+                wave.append(point(70 + 3 * along, 450 + 22 * sin(along / 6)))
             }
             let drawings: [[CGPoint]] = [
                 HandDrawn.walk([point(70, 130), point(250, 136), point(246, 236), point(73, 230)], short: 0.08),
                 HandDrawn.walk([point(320, 240), point(500, 236), point(405, 120)], short: 0.05),
                 HandDrawn.oval(center: point(150, 340), a: 62, b: 58, over: 0.04),
                 HandDrawn.oval(center: point(400, 340), a: 100, b: 42, degrees: 25),
-                (0..<70).map { point(70 + 3 * CGFloat($0), 450 + 22 * sin(CGFloat($0) / 6)) },
+                wave,
                 line(from: point(80, 520), to: point(300, 560)),
                 line(from: point(420, 680), to: point(302, 561)),
             ]

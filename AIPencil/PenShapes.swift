@@ -350,8 +350,11 @@ enum ShapeFinder {
                 // (Sides that meet at right angles: the corner across is as far whichever way round.)
                 let one = hypot(corners[2].x - corners[0].x, corners[2].y - corners[0].y)
                 let other = hypot(corners[3].x - corners[1].x, corners[3].y - corners[1].y)
-                let level = abs((corners[1].x - corners[0].x) * (corners[3].x - corners[0].x) + (corners[1].y - corners[0].y) * (corners[3].y - corners[0].y))
-                return abs(one - other) < 0.01 && level < 0.01 * one ? "a rectangle" : "a shape of four corners"
+                let side = CGPoint(x: corners[1].x - corners[0].x, y: corners[1].y - corners[0].y)
+                let next = CGPoint(x: corners[3].x - corners[0].x, y: corners[3].y - corners[0].y)
+                let level: CGFloat = abs(side.x * next.x + side.y * next.y)
+                let square: Bool = abs(one - other) < 0.01 && level < 0.01 * one
+                return square ? "a rectangle" : "a shape of four corners"
             }
             return "a shape of \(corners.count) corners"
         case .ellipse(_, let a, let b, _):
@@ -367,11 +370,13 @@ enum ShapeFinder {
             return ShapeOutline.polyline(corners + [first])
         case .ellipse(let center, let a, let b, let turn):
             let steps = max(36, Int((a + b) * 0.6))
-            return (0...steps).map { step in
-                let angle = CGFloat(step) / CGFloat(steps) * 2 * .pi
-                let u = a * cos(angle), v = b * sin(angle)
-                return CGPoint(x: center.x + u * cos(turn) - v * sin(turn), y: center.y + u * sin(turn) + v * cos(turn))
+            var places: [CGPoint] = []
+            for step in 0...steps {
+                let angle: CGFloat = CGFloat(step) / CGFloat(steps) * 2 * CGFloat.pi
+                let u: CGFloat = a * cos(angle), v: CGFloat = b * sin(angle)
+                places.append(CGPoint(x: center.x + u * cos(turn) - v * sin(turn), y: center.y + u * sin(turn) + v * cos(turn)))
             }
+            return places
         }
     }
 }
@@ -389,10 +394,9 @@ enum HandDrawn {
             let last = index < corners.count - 1 ? count : Int(CGFloat(count) * (1 - short))
             for part in 0..<last {
                 let along = CGFloat(part) / CGFloat(count)
-                places.append(CGPoint(
-                    x: a.x + (b.x - a.x) * along + shake * sin(CGFloat(step) * 0.9),
-                    y: a.y + (b.y - a.y) * along + shake * cos(CGFloat(step) * 1.3)
-                ))
+                let x: CGFloat = a.x + (b.x - a.x) * along + shake * sin(CGFloat(step) * 0.9)
+                let y: CGFloat = a.y + (b.y - a.y) * along + shake * cos(CGFloat(step) * 1.3)
+                places.append(CGPoint(x: x, y: y))
                 step += 1
             }
         }
@@ -404,10 +408,13 @@ enum HandDrawn {
     static func oval(center: CGPoint, a: CGFloat, b: CGFloat, degrees: CGFloat = 0, shake: CGFloat = 2, over: CGFloat = 0) -> [CGPoint] {
         let turn = degrees * .pi / 180
         let count = 90
-        return (0...Int(CGFloat(count) * (1 + over))).map { step in
-            let angle = 2 * CGFloat.pi * CGFloat(step) / CGFloat(count)
-            let u = a * cos(angle) + shake * sin(CGFloat(step) * 0.8), v = b * sin(angle) + shake * cos(CGFloat(step) * 1.1)
-            return CGPoint(x: center.x + u * cos(turn) - v * sin(turn), y: center.y + u * sin(turn) + v * cos(turn))
+        var places: [CGPoint] = []
+        for step in 0...Int(CGFloat(count) * (1 + over)) {
+            let angle: CGFloat = 2 * CGFloat.pi * CGFloat(step) / CGFloat(count)
+            let u: CGFloat = a * cos(angle) + shake * sin(CGFloat(step) * 0.8)
+            let v: CGFloat = b * sin(angle) + shake * cos(CGFloat(step) * 1.1)
+            places.append(CGPoint(x: center.x + u * cos(turn) - v * sin(turn), y: center.y + u * sin(turn) + v * cos(turn)))
         }
+        return places
     }
 }
