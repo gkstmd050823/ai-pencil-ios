@@ -155,13 +155,18 @@ final class TextPicker: NSObject, UIEditMenuInteractionDelegate, UIGestureRecogn
     /// the letters on the finger's line, those numbered together with few others are passed over when
     /// letters numbered together with many are within a few letters' reach.
     private func letter(near point: CGPoint) -> Int? {
-        // The line: where the letter nearest the finger, up or down, has its middle.
+        // The line: where the letter nearest the finger has its middle. Up and down counts four times as
+        // much as along, and no more than that. (Until 0.13.5 it counted for everything: on a page of two
+        // columns whose lines do not stand at the same heights, a finger passing between two lines of
+        // its own column was nearer, up and down, to a line of the other column, and the words picked
+        // leapt across the page and back at every line. A test's notes have the finger at 238 across
+        // and the letter it was taken to mean at 315, the other column's first, again and again.)
         var bestScore = CGFloat.greatestFiniteMagnitude
         var middle: CGFloat?
         for box in letters where !box.isNull {
             let dx = max(box.minX - point.x, point.x - box.maxX, 0)
             let dy = max(box.minY - point.y, point.y - box.maxY, 0)
-            let score = dy * 10000 + dx
+            let score = dy * 4 + dx
             if score < bestScore {
                 bestScore = score
                 middle = box.midY
