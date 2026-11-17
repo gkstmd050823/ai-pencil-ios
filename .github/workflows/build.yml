@@ -246,7 +246,7 @@ jobs:
           # The same with the pen, forty lines one over another as in a scribble: as it is now, and with
           # the canvas handed every line as it was until 0.12.2. Zoomed in, where the canvas is finest.
           shot 55-pen-many 30 -demoNote -demoZoom 3 -demoHighlightMany -demoManyTool pen
-          shot 55-pen-many-eager 60 -demoNote -demoZoom 3 -demoHighlightMany -demoManyTool pen -demoEagerCanvas
+          shot 55-pen-many-old-waiting 45 -demoNote -demoZoom 3 -demoHighlightMany -demoManyTool pen -demoOldWaiting
           # The app's own reckoning, checked without a screen; a check that fails fails the build (below).
           shot 58-self-check 6 -selfCheck
           # A line that is waiting for the picture and a line being written, the pen still on the page.

@@ -1129,6 +1129,8 @@ struct PDFInkView: UIViewRepresentable {
         /// "-demoEagerCanvas" hands the canvas every change at once, as was done until 0.12.2, for the
         /// build server to set the time that takes beside the time it takes now.
         private static let eagerCanvas = ProcessInfo.processInfo.arguments.contains("-demoEagerCanvas")
+        /// "-demoOldWaiting": see WetInk. Told of in the timing of many lines.
+        private static let oldWaiting = ProcessInfo.processInfo.arguments.contains("-demoOldWaiting")
         /// The zoom as last measured off the screen, and when.
         private var zoomMeasured: (zoom: CGFloat, at: CFTimeInterval) = (1, 0)
         /// Until when a change the canvas tells of may be PencilKit's own though no tool of PencilKit's
@@ -2408,7 +2410,7 @@ struct PDFInkView: UIViewRepresentable {
                 if (row + 1) % 5 == 0 {
                     DebugLog.write(String(
                         format: "many lines: %d written so far %@ at %.2f pixels a point; the main thread took %.0f ms, the last one %.0f ms (%.0f ms of it when the pen lifted)",
-                        row + 1, scribble ? (Self.eagerCanvas ? "with the pen, the canvas handed every line" : "with the pen") : "with the highlighter",
+                        row + 1, scribble ? (Self.eagerCanvas ? "with the pen, the canvas handed every line" : Self.oldWaiting ? "with the pen, the waiting tiles drawing themselves" : "with the pen") : "with the highlighter",
                         Double(fineness), total, took, (CACurrentMediaTime() - written) * 1000
                     ))
                 }
@@ -2416,7 +2418,7 @@ struct PDFInkView: UIViewRepresentable {
             choice = saved
             DebugLog.write(String(
                 format: "highlighter: %d lines written %@ at %.2f pixels a point, %d points in all; the main thread took %.0f ms, %.1f ms a line, %.1f ms the slowest; %d lines waiting as shapes",
-                lines, scribble ? (Self.eagerCanvas ? "with the pen, the canvas handed every line" : "with the pen") : (InkPaint.oldHighlighter ? "the old way" : "the new way"),
+                lines, scribble ? (Self.eagerCanvas ? "with the pen, the canvas handed every line" : Self.oldWaiting ? "with the pen, the waiting tiles drawing themselves" : "with the pen") : (InkPaint.oldHighlighter ? "the old way" : "the new way"),
                 Double(fineness), points, total, total / Double(lines), worst, overlay.keptCount
             ))
             DebugLog.write(String(

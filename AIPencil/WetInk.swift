@@ -43,6 +43,9 @@ final class WetInk: UIView {
     private final class Tile: CALayer {
         weak var ink: WetInk?
         var ofLive = false
+        /// A waiting tile's own pixels, which what it shows is made of (see WetInk.show). Nil for a tile
+        /// of the line being written, which draws itself when asked.
+        var bitmap: CGContext?
 
         override func draw(in context: CGContext) {
             guard let ink else { return }
@@ -77,6 +80,11 @@ final class WetInk: UIView {
     private let liveHost = UIView()
     private var waitingLayer: CALayer { waitingHost.layer }
     private var liveLayer: CALayer { liveHost.layer }
+    /// Parts of the waiting tiles that have to be drawn again from nothing, by tile.
+    private var stale: [Int64: CGRect] = [:]
+    /// "-demoOldWaiting" has the waiting lines' tiles draw themselves, as they did until 0.13.0, for the
+    /// build server to set the time that takes beside the time it takes now.
+    private static let oldWaiting = ProcessInfo.processInfo.arguments.contains("-demoOldWaiting")
     /// Pixels to a page point, and where a pixel of the screen begins (see the page view's pixelGrid).
     private(set) var scale: CGFloat = 2
     private var grid = CGPoint.zero
@@ -118,39 +126,102 @@ final class WetInk: UIView {
         tiles = [:]
         liveTiles.values.forEach { $0.removeFromSuperlayer() }
         liveTiles = [:]
+        stale = [:]
         for line in lines { invalidate(line.box, live: false) }
+        freshen()
         if let live { invalidate(live.box, live: true) }
     }
 
     // MARK: drawing
 
+    /// Draws what of a line (and of [extra], a piece of it not yet among its pieces) reaches [clip].
+    private func fill(_ line: Line, _ extra: Piece?, in context: CGContext, clip: CGRect) {
+        var any = false
+        for piece in line.pieces where piece.box.intersects(clip) {
+            context.addPath(piece.path)
+            any = true
+        }
+        if let extra, extra.box.intersects(clip) {
+            context.addPath(extra.path)
+            any = true
+        }
+        if any, line.width > 0 {
+            context.setStrokeColor(line.color)
+            context.setLineWidth(line.width)
+            context.setLineCap(.round)
+            context.setLineJoin(.round)
+            context.strokePath()
+        } else if any {
+            context.setFillColor(line.color)
+            context.fillPath()
+        }
+    }
+
     fileprivate func paint(in context: CGContext, clip: CGRect, live ofLive: Bool) {
-        func fill(_ line: Line, _ extra: Piece?) {
-            var any = false
-            for piece in line.pieces where piece.box.intersects(clip) {
-                context.addPath(piece.path)
-                any = true
-            }
-            if let extra, extra.box.intersects(clip) {
-                context.addPath(extra.path)
-                any = true
-            }
-            if any, line.width > 0 {
-                context.setStrokeColor(line.color)
-                context.setLineWidth(line.width)
-                context.setLineCap(.round)
-                context.setLineJoin(.round)
-                context.strokePath()
-            } else if any {
-                context.setFillColor(line.color)
-                context.fillPath()
-            }
-        }
         if ofLive {
-            if let live { fill(live, open) }
+            if let live { fill(live, open, in: context, clip: clip) }
         } else {
-            for line in lines where line.box.intersects(clip) { fill(line, nil) }
+            for line in lines where line.box.intersects(clip) { fill(line, nil, in: context, clip: clip) }
         }
+    }
+
+    /// Pixels of its own for a waiting tile at [frame], set up so that a point of the page is drawn where
+    /// the tile shows it.
+    private func pixels(for frame: CGRect) -> CGContext? {
+        let side = Int(Self.side)
+        guard !Self.oldWaiting, let space = CGColorSpace(name: CGColorSpace.sRGB), let context = CGContext(
+            data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return nil }
+        context.translateBy(x: 0, y: CGFloat(side))
+        context.scaleBy(x: scale, y: -scale)
+        context.translateBy(x: -frame.minX, y: -frame.minY)
+        return context
+    }
+
+    /// Draws the stale parts of the waiting tiles again from nothing: every waiting line that passes there.
+    private func freshen() {
+        guard !stale.isEmpty else { return }
+        let parts = stale
+        stale = [:]
+        for (at, part) in parts {
+            guard let tile = tiles[at], !part.isNull, !part.isEmpty else { continue }
+            guard let context = tile.bitmap else {
+                // (A tile without pixels of its own draws itself, as every tile did until 0.13.0.)
+                tile.setNeedsDisplay(part.offsetBy(dx: -tile.frame.minX, dy: -tile.frame.minY))
+                continue
+            }
+            context.saveGState()
+            context.clip(to: part)
+            context.clear(part)
+            for line in lines where line.box.intersects(part) { fill(line, nil, in: context, clip: part) }
+            context.restoreGState()
+            tile.contents = context.makeImage()
+        }
+    }
+
+    /// Puts one more waiting line on show: it is drawn over what its tiles show already, and nothing
+    /// that was there is drawn again.
+    ///
+    /// Until 0.13.0 the tiles of the waiting lines drew themselves the way those of the line being
+    /// written do, and a layer that draws itself first clears the part it is asked to draw: every time
+    /// a line was finished, every waiting line that passed where it lay was drawn again with it. Lines
+    /// scribbled one over another without a pause, zoomed in, took longer to finish with each one (on
+    /// the build server 0.6 seconds for the fifth, 1.7 for the fifteenth).
+    private func show(_ line: Line) {
+        reach(line.box, live: false) { at, tile, part, made in
+            // (A tile just made, one with a part to draw again, or one that draws itself: drawn the full way.)
+            guard !made, self.stale[at] == nil, let context = tile.bitmap else {
+                self.stale[at] = (self.stale[at] ?? .null).union(made ? tile.frame : part)
+                return
+            }
+            context.saveGState()
+            context.clip(to: part)
+            self.fill(line, nil, in: context, clip: part)
+            context.restoreGState()
+            tile.contents = context.makeImage()
+        }
+        freshen()
     }
 
     private func key(_ column: Int, _ row: Int) -> Int64 {
@@ -158,8 +229,22 @@ final class WetInk: UIView {
     }
 
     /// Has the part of the tiles that covers [rect] drawn again, making tiles where there are none: the
-    /// tiles of the line being written ([live]), or those of the lines that are waiting.
+    /// tiles of the line being written ([live]) at the screen's next turn, or those of the lines that
+    /// are waiting when freshen() is next called.
     private func invalidate(_ rect: CGRect, live ofLive: Bool) {
+        reach(rect, live: ofLive) { at, tile, part, _ in
+            if ofLive {
+                tile.setNeedsDisplay(part.offsetBy(dx: -tile.frame.minX, dy: -tile.frame.minY))
+            } else {
+                self.stale[at] = (self.stale[at] ?? .null).union(part)
+            }
+        }
+    }
+
+    /// The tiles of one of the two sets that [rect] reaches, made where there are none. [each] is given
+    /// the tile's place, the tile, the part of the page it shares with [rect] (grown to whole pixels),
+    /// and whether the tile was made just now.
+    private func reach(_ rect: CGRect, live ofLive: Bool, _ each: (Int64, Tile, CGRect, Bool) -> Void) {
         guard !rect.isNull, !rect.isEmpty, rect.width.isFinite, rect.height.isFinite else { return }
         let step = Self.side / scale
         let dirty = rect.insetBy(dx: -1.5 / scale, dy: -1.5 / scale).intersection(bounds.insetBy(dx: -step, dy: -step))
@@ -171,7 +256,9 @@ final class WetInk: UIView {
             for column in firstColumn...lastColumn {
                 let at = key(column, row)
                 var tile = ofLive ? liveTiles[at] : tiles[at]
+                var fresh = false
                 if tile == nil {
+                    fresh = true
                     let made = Tile()
                     made.ink = self
                     made.ofLive = ofLive
@@ -187,14 +274,15 @@ final class WetInk: UIView {
                         liveLayer.addSublayer(made)
                         liveTiles[at] = made
                     } else {
+                        made.bitmap = pixels(for: made.frame)
                         waitingLayer.addSublayer(made)
                         tiles[at] = made
                     }
                     tile = made
                 }
                 if let tile {
-                    let inside = dirty.offsetBy(dx: -tile.frame.minX, dy: -tile.frame.minY).intersection(tile.bounds)
-                    if !inside.isNull, !inside.isEmpty { tile.setNeedsDisplay(inside) }
+                    let part = InkPaint.whole(dirty, scale: scale, origin: grid).intersection(tile.frame)
+                    if !part.isNull, !part.isEmpty { each(at, tile, part, fresh) }
                 }
             }
         }
@@ -206,6 +294,7 @@ final class WetInk: UIView {
         if lines.isEmpty {
             tiles.values.forEach { $0.removeFromSuperlayer() }
             tiles = [:]
+            stale = [:]
             return
         }
         for (at, tile) in tiles {
@@ -213,6 +302,7 @@ final class WetInk: UIView {
             if !reached {
                 tile.removeFromSuperlayer()
                 tiles[at] = nil
+                stale[at] = nil
             }
         }
     }
@@ -308,7 +398,7 @@ final class WetInk: UIView {
         live = nil
         open = nil
         openFrom = 0
-        invalidate(done.box, live: false)
+        show(done)
         wipeLive(done.box)
     }
 
@@ -323,7 +413,7 @@ final class WetInk: UIView {
         line.version = version
         line.date = date
         lines.append(line)
-        invalidate(line.box, live: false)
+        show(line)
     }
 
     /// Takes down the lines that [gone] says are no longer wanted.
@@ -335,7 +425,10 @@ final class WetInk: UIView {
             changed = true
             return true
         }
-        if changed { prune() }
+        if changed {
+            prune()
+            freshen()
+        }
     }
 
     /// The picture has every line up to [version]: those are taken down.
