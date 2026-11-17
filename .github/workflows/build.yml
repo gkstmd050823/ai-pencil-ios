@@ -229,6 +229,13 @@ jobs:
           shot 53-pages-added-outline 10 -demoImport tricky.pdf -demoNavigator outline
           shot 53-pages-added-export 14 -demoImport tricky.pdf -demoExport
           exported export-added
+          # Two pages side by side, turned two at a time: as opened, and turned once.
+          shot 54-spreads 10 -sample -pageLayout twoUpPaged
+          shot 54-spreads-turned 12 -sample -pageLayout twoUpPaged -demoTurn
+          # Forty lines of highlighter written one after another, as the highlighter is now and as it
+          # was: the app notes how long the main thread took over each, and how long the pictures took.
+          shot 55-highlighter-many 20 -demoNote -demoHighlightMany
+          shot 55-highlighter-many-old 20 -demoNote -demoHighlightMany -demoOldHighlighter
           shot 16-settings 8 -demoSettings
           xcrun simctl ui "$UDID" appearance dark
           shot 17-dark 12 -sample -demoOpenQuestion

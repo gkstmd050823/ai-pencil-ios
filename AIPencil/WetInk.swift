@@ -18,6 +18,8 @@ final class WetInk: UIView {
 
     private final class Line {
         var pieces: [Piece] = []
+        /// Not zero: the pieces are lines of this width run through the line's points, and not shapes to fill.
+        var width: CGFloat = 0
         var color: CGColor
         /// The number the handwriting had once this line was part of it; the largest there is while it is being written.
         var version = Int.max
@@ -42,6 +44,11 @@ final class WetInk: UIView {
         }
     }
 
+    /// Lines written from here on are of one width all along (a highlighter's), and are drawn as a line
+    /// of that width through some of their points, the way the picture of the handwriting draws them.
+    /// Filled as a shape, a disc at every point, such a line cost many times as much to draw each time
+    /// the pen moved, and more with every line still on show beside it.
+    var asLines = false
     private var lines: [Line] = []
     private var live: Line?
     /// The piece of the line being written that is still growing, and the first of the line's points in it.
@@ -94,7 +101,13 @@ final class WetInk: UIView {
                 context.addPath(extra.path)
                 any = true
             }
-            if any {
+            if any, line.width > 0 {
+                context.setStrokeColor(line.color)
+                context.setLineWidth(line.width)
+                context.setLineCap(.round)
+                context.setLineJoin(.round)
+                context.strokePath()
+            } else if any {
                 context.setFillColor(line.color)
                 context.fillPath()
             }
@@ -170,19 +183,35 @@ final class WetInk: UIView {
             open = nil
             openFrom = 0
         }
+        if asLines { current.width = line.width }
+        // The points from [from] up to [to] as a piece: a shape to fill or, for a line of one width, the
+        // line itself, to be drawn that wide.
+        func cut(_ from: Int, _ to: Int?) -> Piece {
+            guard asLines else {
+                let path = line.shape(from: from, to: to, fineness: scale)
+                return Piece(path: path, box: path.boundingBoxOfPath)
+            }
+            let end = min(to ?? line.points.count, line.points.count)
+            let path = CGMutablePath()
+            guard end > 0 else { return Piece(path: path, box: .null) }
+            let run = InkPaint.thinned(Array(line.points[max(0, min(from, end - 1))..<end]), gap: line.width * InkPaint.wideGap)
+            path.move(to: run[0])
+            if run.count == 1 { path.addLine(to: run[0]) }
+            for point in run.dropFirst() { path.addLine(to: point) }
+            let reach = line.width / 2 + 1 / scale
+            return Piece(path: path, box: path.boundingBoxOfPath.insetBy(dx: -reach, dy: -reach))
+        }
         var dirty = open?.box ?? .null
         // A long line is cut into pieces, so that only its last piece is worked out again as it grows. A
         // piece is closed where the line is settled: what comes after that may still change.
         while line.settled - openFrom > 64 {
-            let path = line.shape(from: openFrom, to: line.settled, fineness: scale)
-            let piece = Piece(path: path, box: path.boundingBoxOfPath)
+            let piece = cut(openFrom, line.settled)
             current.pieces.append(piece)
             current.box = current.box.union(piece.box)
             dirty = dirty.union(piece.box)
             openFrom = max(0, line.settled - 1)
         }
-        let path = line.shape(from: openFrom, fineness: scale)
-        let piece = Piece(path: path, box: path.boundingBoxOfPath)
+        let piece = cut(openFrom, nil)
         open = piece
         current.box = current.box.union(piece.box)
         invalidate(dirty.union(piece.box))

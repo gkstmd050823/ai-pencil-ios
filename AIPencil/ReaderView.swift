@@ -697,6 +697,12 @@ struct ReaderView: View {
             let file = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(name)
             later(2) { addPages(from: [file], atEnd: false) }
         }
+        if arguments.contains("-demoHighlightMany") {
+            later(3) { controller.demoHighlightMany() }
+        }
+        if arguments.contains("-demoTurn") {
+            later(3) { controller.demoTurn() }
+        }
         if arguments.contains("-demoAddPage") {
             later(2) { addPage(PaperKind(rawValue: defaults.string(forKey: "demoPaper") ?? "") ?? .blank) }
         }

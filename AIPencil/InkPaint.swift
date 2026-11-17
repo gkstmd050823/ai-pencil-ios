@@ -144,18 +144,44 @@ enum InkPaint {
         return path
     }
 
-    /// Draws a line in a colour.
-    static func draw(_ line: Line, color: CGColor, in context: CGContext, fineness: CGFloat = 4) {
+    /// "-demoOldHighlighter" has the highlighter drawn the way it was until 0.12.0, for the build server
+    /// to set the time it takes beside the time it takes now.
+    static let oldHighlighter = ProcessInfo.processInfo.arguments.contains("-demoOldHighlighter")
+
+    /// How far apart, as a share of its width, the points of a wide line need to be. A highlighter's line
+    /// is some fourteen points wide and written through points a fifth of a point apart: a line run
+    /// through every seventh of them is the same line to the eye (on a bend as tight as a small letter it
+    /// is off by less than a hundredth of a point) and is drawn in a seventh of the time.
+    static let wideGap: CGFloat = 0.07
+
+    /// [points] with those left out that are nearer than [gap] to the one kept before them. The first and
+    /// the last always stay.
+    static func thinned(_ points: [CGPoint], gap: CGFloat) -> [CGPoint] {
+        guard points.count > 2, gap > 0 else { return points }
+        var kept: [CGPoint] = [points[0]]
+        kept.reserveCapacity(points.count / 2)
+        var last = points[0]
+        for point in points[1..<(points.count - 1)] where hypot(point.x - last.x, point.y - last.y) >= gap {
+            kept.append(point)
+            last = point
+        }
+        kept.append(points[points.count - 1])
+        return kept
+    }
+
+    /// Draws a line in a colour. [wide] says it is a highlighter's, which needs only some of its points.
+    static func draw(_ line: Line, color: CGColor, in context: CGContext, fineness: CGFloat = 4, wide: Bool = false) {
         guard let first = line.points.first else { return }
         if line.even {
+            let run = wide && !oldHighlighter ? thinned(line.points, gap: line.widths[0] * wideGap) : line.points
             context.setStrokeColor(color)
             context.setLineWidth(line.widths[0])
             context.setLineCap(.round)
             context.setLineJoin(.round)
             context.beginPath()
             context.move(to: first)
-            if line.points.count == 1 { context.addLine(to: first) }
-            for point in line.points.dropFirst() { context.addLine(to: point) }
+            if run.count == 1 { context.addLine(to: first) }
+            for point in run.dropFirst() { context.addLine(to: point) }
             context.strokePath()
         } else {
             context.setFillColor(color)
@@ -203,7 +229,8 @@ enum InkPaint {
         _ strokes: [PKStroke], where wanted: (PKStroke) -> Bool, in context: CGContext, picture: CGRect,
         region: CGRect, scale: CGFloat, dark: Bool, solid: Bool
     ) {
-        let step = max(0.02, 1.2 / scale)
+        // (A highlighter's line is wide: its own points do, a good half point apart, without working out more.)
+        let step = solid && !oldHighlighter ? max(0.6, 1.2 / scale) : max(0.02, 1.2 / scale)
         var others: [PKStroke] = []
         var othersBox = CGRect.null
         func flush() {
@@ -231,7 +258,7 @@ enum InkPaint {
             guard box.intersects(region) else { continue }
             if isPlain(stroke) {
                 flush()
-                draw(line(of: stroke, step: step), color: color(of: stroke, dark: dark, solid: solid), in: context, fineness: scale)
+                draw(line(of: stroke, step: step), color: color(of: stroke, dark: dark, solid: solid), in: context, fineness: scale, wide: solid)
             } else {
                 others.append(stroke)
                 othersBox = othersBox.union(box)
@@ -241,8 +268,11 @@ enum InkPaint {
     }
 
     /// What is made of a page's handwriting: the picture of everything but highlighter, covering the
-    /// part asked for, and the picture of the highlighter, covering the room the highlighter takes
-    /// within that part (none where there is no highlighter).
+    /// part asked for, and the picture of the highlighter (none where there is no highlighter). The
+    /// highlighter's covers the same part, so that it too can be brought up to date just where the
+    /// handwriting changed. (Until 0.12.0 it covered the room the highlighter took and was drawn whole
+    /// every time, every line of it: on a page with much highlighter that took longer with each line, and
+    /// while lines were being written one after another the picture never caught up with them.)
     struct Made {
         var pens: CGImage
         var high: CGImage?
@@ -256,7 +286,8 @@ enum InkPaint {
     /// the page where the handwriting has changed since), only that part is drawn again and the rest is
     /// copied: a line added or rubbed out on a full page costs what its neighbourhood costs.
     static func pictures(
-        of drawing: PKDrawing, rect: CGRect, scale: CGFloat, dark: Bool, over base: CGImage?, redoing dirty: CGRect?
+        of drawing: PKDrawing, rect: CGRect, scale: CGFloat, dark: Bool, over base: CGImage?, redoing dirty: CGRect?,
+        highOver highBase: CGImage? = nil
     ) -> Made? {
         let strokes = drawing.strokes
         guard let context = canvas(rect, scale: scale) else { return nil }
@@ -279,18 +310,39 @@ enum InkPaint {
         }
         guard let pens = context.makeImage() else { return nil }
         var made = Made(pens: pens, strokes: strokes.count)
-        // The highlighter is few lines, and is drawn afresh each time.
-        var room = CGRect.null
-        for stroke in strokes where isHighlighter(stroke) { room = room.union(stroke.renderBounds) }
-        let inside = room.isNull ? CGRect.null : room.insetBy(dx: -1, dy: -1).intersection(rect)
-        guard !inside.isNull, !inside.isEmpty else { return made }
-        let highRect = whole(inside, scale: scale, origin: rect.origin)
-        if let high = canvas(highRect, scale: scale) {
-            aim(high, at: highRect, scale: scale)
-            paint(strokes, where: isHighlighter, in: high, picture: highRect, region: highRect, scale: scale, dark: dark, solid: true)
-            made.high = high.makeImage()
-            made.highRect = highRect
+        if oldHighlighter {
+            var room = CGRect.null
+            for stroke in strokes where isHighlighter(stroke) { room = room.union(stroke.renderBounds) }
+            let inside = room.isNull ? CGRect.null : room.insetBy(dx: -1, dy: -1).intersection(rect)
+            guard !inside.isNull, !inside.isEmpty else { return made }
+            let highRect = whole(inside, scale: scale, origin: rect.origin)
+            if let high = canvas(highRect, scale: scale) {
+                aim(high, at: highRect, scale: scale)
+                paint(strokes, where: isHighlighter, in: high, picture: highRect, region: highRect, scale: scale, dark: dark, solid: true)
+                made.high = high.makeImage()
+                made.highRect = highRect
+            }
+            return made
         }
+        guard strokes.contains(where: isHighlighter), let high = canvas(rect, scale: scale) else { return made }
+        var highRegion = rect
+        if let highBase, let dirty, highBase.width == high.width, highBase.height == high.height {
+            high.setBlendMode(.copy)
+            high.draw(highBase, in: CGRect(x: 0, y: 0, width: high.width, height: high.height))
+            high.setBlendMode(.normal)
+            let cut = dirty.intersection(rect)
+            highRegion = cut.isNull || cut.isEmpty ? .null : whole(cut, scale: scale, origin: rect.origin)
+        }
+        aim(high, at: rect, scale: scale)
+        if !highRegion.isNull {
+            if highRegion != rect {
+                high.clip(to: highRegion)
+                high.clear(highRegion)
+            }
+            paint(strokes, where: isHighlighter, in: high, picture: rect, region: highRegion, scale: scale, dark: dark, solid: true)
+        }
+        made.high = high.makeImage()
+        made.highRect = rect
         return made
     }
 }

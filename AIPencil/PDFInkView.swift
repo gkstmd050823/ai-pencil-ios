@@ -278,6 +278,92 @@ final class MarkBadge: UIButton {
     }
 }
 
+/// Turns the pages two at a time, where two are shown side by side and do not scroll on to the next two:
+/// a finger swept to the left brings the next two, to the right the two before, sliding in from that side.
+///
+/// A pen never turns pages (it writes), and neither does a finger on a page while fingers write. Zoomed
+/// in, a sweep moves across the pages as ever, and turns them only from the edge it cannot move past.
+final class SpreadTurner: NSObject, UIGestureRecognizerDelegate {
+    private weak var view: PDFView?
+    private let forward = UISwipeGestureRecognizer()
+    private let back = UISwipeGestureRecognizer()
+    var scrollOf: (PDFView) -> UIScrollView? = { _ in nil }
+    var fingerWrites: () -> Bool = { false }
+    /// Something is being written or rubbed out this moment.
+    var busy: () -> Bool = { false }
+
+    var isOn = false {
+        didSet {
+            forward.isEnabled = isOn
+            back.isEnabled = isOn
+        }
+    }
+
+    func attach(to view: PDFView) {
+        guard self.view !== view else { return }
+        self.view = view
+        forward.direction = .left
+        back.direction = .right
+        for swipe in [forward, back] {
+            swipe.addTarget(self, action: #selector(swept(_:)))
+            swipe.delegate = self
+            swipe.cancelsTouchesInView = false
+            swipe.isEnabled = isOn
+            view.addGestureRecognizer(swipe)
+        }
+    }
+
+    @objc private func swept(_ swipe: UISwipeGestureRecognizer) {
+        turn(forward: swipe === forward)
+    }
+
+    /// Shows the next two pages, or the two before. False at either end of the document.
+    @discardableResult
+    func turn(forward ahead: Bool) -> Bool {
+        guard isOn, let view, let document = view.document, let page = view.currentPage else { return false }
+        let index = document.index(for: page)
+        guard index != NSNotFound else { return false }
+        // (The page PDFKit calls the current one may be either of the two on show.)
+        let first = index - index % 2
+        let target = ahead ? first + 2 : first - 2
+        guard target >= 0, target < document.pageCount, let next = document.page(at: target) else { return false }
+        let slide = CATransition()
+        slide.type = .push
+        slide.subtype = ahead ? .fromRight : .fromLeft
+        slide.duration = 0.24
+        slide.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        view.layer.add(slide, forKey: "turn")
+        view.go(to: next)
+        Diagnostics.shared.step(ahead ? "turned to the next two pages" : "turned to the two pages before")
+        return true
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        true
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        if touch.type == .pencil { return false }
+        guard fingerWrites() else { return true }
+        var above = touch.view
+        while let here = above {
+            if here is PageOverlay { return false }
+            above = here.superview
+        }
+        return true
+    }
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard isOn, !busy() else { return false }
+        guard let view, let scroll = scrollOf(view) else { return true }
+        let slack: CGFloat = 6
+        if gestureRecognizer === forward {
+            return scroll.contentOffset.x >= scroll.contentSize.width + scroll.adjustedContentInset.right - scroll.bounds.width - slack
+        }
+        return scroll.contentOffset.x <= -scroll.adjustedContentInset.left + slack
+    }
+}
+
 /// What PDFKit lays over a page: the page's formulas and the marks of the AI pen, above them the canvas
 /// that takes the handwriting, and on top the buttons of the marks.
 /// PDFKit sizes this view to the page and zooms it with the page, so a point in it is a point of the page,
@@ -313,6 +399,8 @@ final class PageOverlay: UIView {
     /// Pictures are being made; and whether more has changed meanwhile.
     var inkBusy = false
     var inkAgain = false
+    /// Pictures that were ready while a line was being written, waiting for the pen to be off the page.
+    var inkLanding: (() -> Void)?
     /// A pen or finger is on the canvas at this moment.
     var inkInUse = false
     /// When the canvas was last touched, and when the handwriting last changed.
@@ -376,6 +464,7 @@ final class PageOverlay: UIView {
         highPicture.isHidden = true
         addSubview(highPicture)
         highMarks.isUserInteractionEnabled = false
+        wetHigh.asLines = !InkPaint.oldHighlighter
         highMarks.addSubview(wetHigh)
         addSubview(highMarks)
         canvas.backgroundColor = .clear
@@ -788,6 +877,16 @@ final class ReaderController: ObservableObject {
         coordinator?.demoPen()
     }
 
+    /// For the build server: many lines of highlighter, written the way a pen writes them, and timed.
+    func demoHighlightMany() {
+        coordinator?.demoHighlightMany()
+    }
+
+    /// For the build server: turns to the next two pages, as a swipe would.
+    func demoTurn() {
+        coordinator?.turner.turn(forward: true)
+    }
+
     /// The file the page view shows.
     var pdfURL: URL? { coordinator?.url }
 
@@ -907,6 +1006,8 @@ struct PDFInkView: UIViewRepresentable {
         /// The line being written with the app's own pen, the tool it is written with, and where the
         /// screen's pixels fall on its page.
         private var penLine: PenLine?
+        /// Turns the pages two at a time where two are shown side by side to be turned.
+        let turner = SpreadTurner()
         private var penTool = InkTool.pen
         private var penGrid = CGPoint.zero
         /// The zoom range last given to the page view.
@@ -978,12 +1079,20 @@ struct PDFInkView: UIViewRepresentable {
             guard layout != self.layout, let view = pdfView else { return }
             let page = view.currentPage
             self.layout = layout
-            // Turning pages one at a time is PDFKit's page view controller; the other two scroll.
+            // Turning pages one at a time is PDFKit's page view controller; two side by side that scroll
+            // on downward are PDFKit's too. Two side by side that are turned two at a time are PDFKit's
+            // two pages on their own, with the turning done here: its page view controller shows one page.
             let paged = layout == .paged
-            view.displayMode = layout == .twoUp ? .twoUpContinuous : (paged ? .singlePage : .singlePageContinuous)
+            let spreads = layout == .twoUpPaged
+            view.displayMode = layout == .twoUp ? .twoUpContinuous : spreads ? .twoUp : (paged ? .singlePage : .singlePageContinuous)
             view.displayDirection = paged ? .horizontal : .vertical
             view.displaysAsBook = false
             view.usePageViewController(paged, withViewOptions: nil)
+            turner.attach(to: view)
+            turner.scrollOf = { Self.scrollView(in: $0) }
+            turner.fingerWrites = { [weak self] in self?.fingerDraws ?? false }
+            turner.busy = { [weak self] in self?.penLine != nil || self?.rubbed != nil }
+            turner.isOn = spreads
             // (The scroll view the pages are in is another one now; it is looked for again, and the zoom
             // range is given to the page view afresh.)
             scrollWatch?.invalidate()
@@ -1534,7 +1643,10 @@ struct PDFInkView: UIViewRepresentable {
                 penGrid = Self.pixelGrid(of: overlay.inkPicture, scale: fineness)
                 switch penTool {
                 case .highlighter:
-                    penLine = PenLine(width: choice.highlighterSeenWidth, sense: 0, steady: CGFloat(choice.penSteady), spacing: 0.5 / zoom)
+                    // (A wide line needs its points no nearer than a twentieth of its width: the line is
+                    // the same to the eye, and has a third or less of the points to keep, draw and store.)
+                    let apart = InkPaint.oldHighlighter ? 0.5 / zoom : max(0.5 / zoom, min(1, choice.highlighterSeenWidth * 0.05))
+                    penLine = PenLine(width: choice.highlighterSeenWidth, sense: 0, steady: CGFloat(choice.penSteady), spacing: apart)
                 case .ai:
                     penLine = PenLine(width: 2.4, sense: 0, steady: 0, spacing: 0.5 / zoom)
                 default:
@@ -1605,6 +1717,45 @@ struct PDFInkView: UIViewRepresentable {
             overlay.keepLive(for: canvas.inkVersion, date: stroke.path.creationDate)
             // (Written without a pause for a long while: the picture catches up now and then all the same.)
             if overlay.keptCount > 24 { askInk(for: overlay) }
+        }
+
+        /// For the build server: forty lines of highlighter written one after another the way a pen
+        /// writes them (a few places at a time, the screen brought up to date after each), and how long
+        /// the main thread took over them. Run once as the highlighter is now and once as it was
+        /// ("-demoOldHighlighter"), the two times stand side by side in the app's notes.
+        func demoHighlightMany() {
+            guard let view = pdfView, let page = view.currentPage, let overlay = overlays[page] else { return }
+            let saved = choice
+            let lines = 40
+            var total = 0.0, worst = 0.0, points = 0
+            for row in 0..<lines {
+                choice.tool = .highlighter
+                let y = 150 + CGFloat(row % 20) * 28 + CGFloat(row / 20) * 9
+                var time = Double(row)
+                var x: CGFloat = 60
+                let began = CACurrentMediaTime()
+                while x < 520 {
+                    var chunk: [PenSample] = []
+                    for _ in 0..<4 {
+                        chunk.append(PenSample(point: CGPoint(x: x, y: y + sin(x / 30) * 3), force: 1, time: time))
+                        x += 1.5
+                        time += 0.004
+                    }
+                    penDrew(chunk, ahead: [], in: overlay)
+                    CATransaction.flush()
+                }
+                points += penLine?.points.count ?? 0
+                penDone(kept: true, in: overlay)
+                CATransaction.flush()
+                let took = (CACurrentMediaTime() - began) * 1000
+                total += took
+                worst = max(worst, took)
+            }
+            choice = saved
+            DebugLog.write(String(
+                format: "highlighter: %d lines written %@ at %.2f pixels a point, %d points in all; the main thread took %.0f ms, %.1f ms a line, %.1f ms the slowest; %d lines waiting as shapes",
+                lines, InkPaint.oldHighlighter ? "the old way" : "the new way", Double(fineness), points, total, total / Double(lines), worst, overlay.keptCount
+            ))
         }
 
         /// For the build server: a line of highlighter; the same shaky line twice, pressed harder in the
@@ -1916,6 +2067,13 @@ struct PDFInkView: UIViewRepresentable {
             // meanwhile. (A touch that was never seen to end counts for twenty seconds and no longer.)
             let now = CACurrentMediaTime()
             if penLine != nil || rubbed != nil || overlays.values.contains(where: { $0.inkInUse && now - $0.canvasUsed < 20 }) { return }
+            // The pen is off the page: pictures that were ready while it was on go up now.
+            for overlay in overlays.values {
+                if let land = overlay.inkLanding {
+                    overlay.inkLanding = nil
+                    land()
+                }
+            }
             if scrollWatch == nil, let scroll = Self.scrollView(in: view) {
                 scrollWatch = scroll.observe(\.contentOffset) { [weak self] _, _ in self?.scrolled() }
             }
@@ -2092,11 +2250,36 @@ struct PDFInkView: UIViewRepresentable {
             let dark = darkPaper
             let index = canvas.pageIndex
             let began = CACurrentMediaTime()
+            // The highlighter's picture is brought up to date the same way, where there is one of the same part.
+            let highBase: CGImage? = base != nil && overlay.highPicture.shown == extent ? overlay.highPicture.picture : nil
             inkQueue.async { [weak self, weak overlay] in
-                let made = InkPaint.pictures(of: drawing, rect: extent.rect, scale: extent.scale, dark: dark, over: base, redoing: dirty)
+                let made = InkPaint.pictures(of: drawing, rect: extent.rect, scale: extent.scale, dark: dark, over: base, redoing: dirty, highOver: highBase)
                 let took = (CACurrentMediaTime() - began) * 1000
                 DispatchQueue.main.async {
                     guard let self, let overlay else { return }
+                    if self.penLine != nil, !InkPaint.oldHighlighter {
+                        // A line is being written this moment. Putting a picture of this size on screen
+                        // takes the main thread a few milliseconds, which are the pen's: the picture waits
+                        // until the pen is off the page, and goes up then. (Until 0.12.0 it was let go and
+                        // made again when the hand rested. A hand that did not rest, writing line after
+                        // line, had every picture made for nothing, and the lines waiting for one piled up.)
+                        overlay.inkLanding = { [weak self, weak overlay] in
+                            guard let self, let overlay else { return }
+                            self.land(made, on: overlay, extent: extent, version: version, ticket: ticket, number: number, breaks: breaks, dirty: dirty, index: index, took: took)
+                        }
+                        return
+                    }
+                    self.land(made, on: overlay, extent: extent, version: version, ticket: ticket, number: number, breaks: breaks, dirty: dirty, index: index, took: took)
+                }
+            }
+        }
+
+        /// Puts pictures of a page's handwriting, made at [version] of it, on show.
+        private func land(
+            _ made: InkPaint.Made?, on overlay: PageOverlay, extent: PagePicture.Extent, version: Int, ticket: Ticket, number: Int,
+            breaks: Int, dirty: CGRect?, index: Int, took: Double
+        ) {
+                do {
                     overlay.inkBusy = false
                     guard ticket.current == number else {
                         // Let go while it was being made (the page left the screen, say).
@@ -2104,9 +2287,7 @@ struct PDFInkView: UIViewRepresentable {
                         return
                     }
                     if self.penLine != nil {
-                        // A line is being written this moment. Putting a picture of this size on screen
-                        // takes the main thread a few milliseconds, which are the pen's: the picture is
-                        // let go, what it was for stays owed, and it is made again when the hand rests.
+                        // (Only the old way comes here with a line being written: the picture is let go.)
                         if let dirty {
                             overlay.inkDirty = overlay.inkDirty.union(dirty)
                         } else {
@@ -2142,7 +2323,6 @@ struct PDFInkView: UIViewRepresentable {
                         self.askInk(for: overlay)
                     }
                 }
-            }
         }
 
         private func refreshPicture(in overlay: PageOverlay, scale: CGFloat, view: PDFView) {
@@ -2408,7 +2588,7 @@ struct PDFInkView: UIViewRepresentable {
         func reveal(_ rect: CGRect, onPage index: Int) {
             guard let view = pdfView, let page = view.document?.page(at: index) else { return }
             // (Turning pages one at a time, each page fills the view; going to it is all there is to do.)
-            guard let overlay = overlays[page], layout != .paged else {
+            guard let overlay = overlays[page], layout != .paged, layout != .twoUpPaged else {
                 view.go(to: page)
                 return
             }

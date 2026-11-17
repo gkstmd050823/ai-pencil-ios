@@ -348,7 +348,7 @@ struct InkChoice: Equatable, Codable {
 
 /// How the pages are laid out.
 enum PageLayoutMode: String, CaseIterable, Identifiable {
-    case vertical, paged, twoUp
+    case vertical, paged, twoUp, twoUpPaged
 
     var id: String { rawValue }
 
@@ -356,7 +356,8 @@ enum PageLayoutMode: String, CaseIterable, Identifiable {
         switch self {
         case .vertical: return "세로로 이어 보기"
         case .paged: return "가로로 한 쪽씩 넘기기"
-        case .twoUp: return "두 쪽씩 보기"
+        case .twoUp: return "두 쪽씩 세로로 이어 보기"
+        case .twoUpPaged: return "두 쪽씩 가로로 넘기기"
         }
     }
 
@@ -365,6 +366,7 @@ enum PageLayoutMode: String, CaseIterable, Identifiable {
         case .vertical: return "arrow.up.and.down"
         case .paged: return "arrow.left.and.right"
         case .twoUp: return "book"
+        case .twoUpPaged: return "rectangle.split.2x1"
         }
     }
 }

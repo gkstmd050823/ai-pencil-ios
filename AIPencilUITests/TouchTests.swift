@@ -301,6 +301,17 @@ final class TouchTests: XCTestCase {
         sleep(1)
         shot("50-bare-paper-held")
 
+        // Two pages side by side, turned two at a time: a finger swept to the left brings the next two,
+        // to the right the two before.
+        start(["-demoTool", "pen", "-pageLayout", "twoUpPaged"], fingersWrite: false)
+        shot("54-spreads-first")
+        app.swipeLeft()
+        sleep(2)
+        shot("54-spreads-swept-left")
+        app.swipeRight()
+        sleep(2)
+        shot("54-spreads-swept-right")
+
         // Reading only: a finger does not write, whatever tool is in hand and whatever the setting for
         // writing with fingers; it scrolls the page.
         start(["-demoTool", "pen", "-readOnly", "YES"])
