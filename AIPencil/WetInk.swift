@@ -9,18 +9,28 @@ import UIKit
 /// came out less smooth than in the picture, and far zoomed in they were coarse.)
 ///
 /// The view is as large as the page and holds small square tiles, made only where there is something to
-/// draw. A line that grows redraws just the part of the tiles it grew into.
+/// draw. There are two sets of them.
 ///
-/// There are two sets of tiles: one for the lines that are waiting, and above it one for the line being
-/// written. (Until 0.12.2 there was one set for both. Each time the pen moved, the part of a tile the
-/// line grew into was drawn again with everything in it, which is every waiting line that passes there:
-/// a scribble, line over line over line and no pause for a picture to take them, cost more with each
-/// line, and the pen fell behind.) Now a pen that moves has only its own line drawn again, and a line
-/// that is finished is drawn once more, into the other set, when the pen lifts.
+/// The lower set holds everything that will not change any more: the lines that are waiting for the
+/// picture, and of the line being written the part that is settled. Each of these tiles has pixels of
+/// its own, and what is added is drawn over what is there: a piece of line is drawn once, when it is
+/// settled, and never again for as long as it is on show. (Until 0.13.0 these tiles drew themselves, and
+/// a layer that draws itself first clears what it is asked to draw: every waiting line that passed where
+/// a new one lay was drawn again with it. Until 0.13.2 the whole of the line being written was in the
+/// upper set, drawn again wherever the pen passed: a pencil moved fast to and fro, zoomed in far, wrote a
+/// line of twenty-four thousand points in a few seconds, each move drew again every part of it that
+/// crossed there, and lifting the pen made the whole of it anew. A test's notes had the app eight
+/// seconds behind the pencil.)
+///
+/// The upper set holds the end of the line being written, which is not settled yet and changes with
+/// every move of the pen. It is all that is drawn again as the pen moves.
 final class WetInk: UIView {
     private struct Piece {
         var path: CGPath
         var box: CGRect
+        /// The first of the line's points in the piece, and the one after its last.
+        var from = 0
+        var to = 0
     }
 
     private final class Line {
@@ -39,12 +49,12 @@ final class WetInk: UIView {
         }
     }
 
-    /// A tile: a square of the screen's pixels, of the lines that are waiting or of the line being written.
+    /// A tile: a square of the screen's pixels.
     private final class Tile: CALayer {
         weak var ink: WetInk?
         var ofLive = false
-        /// A waiting tile's own pixels, which what it shows is made of (see WetInk.show). Nil for a tile
-        /// of the line being written, which draws itself when asked.
+        /// A lower tile's own pixels, which what it shows is made of. Nil for an upper tile, which draws
+        /// itself when asked (and for a lower one whose pixels could not be had, which does the same).
         var bitmap: CGContext?
 
         override func draw(in context: CGContext) {
@@ -61,29 +71,28 @@ final class WetInk: UIView {
     /// the pen moved, and more with every line still on show beside it.
     var asLines = false
     private var lines: [Line] = []
+    /// The line being written: its settled pieces (which are in the lower tiles already) and, apart
+    /// from them, the piece that is still growing, with the first of the line's points in it.
     private var live: Line?
-    /// The piece of the line being written that is still growing, and the first of the line's points in it.
     private var open: Piece?
     private var openFrom = 0
-    /// The tiles of the lines that are waiting, and those of the line being written.
+    /// The lower tiles and the upper ones.
     private var tiles: [Int64: Tile] = [:]
     private var liveTiles: [Int64: Tile] = [:]
     /// What the two sets of tiles are put in: two views, without a size of their own, at this view's corner.
     ///
     /// They have to be views. In 0.12.3 they were plain layers, and every line blinked as the pen
     /// lifted: a layer that is not a view's animates what is done to it, the coming and going of its
-    /// sublayers too, as a fade of a quarter of a second. A finished line goes from one set of tiles to
-    /// the other; it was wiped from the first at once and faded into the second. (The tiles themselves
-    /// were told to animate nothing, which does not cover the layer they are put in. Until 0.12.2 they
-    /// were put in this view's own layer, and a view's layer animates nothing by itself.)
+    /// sublayers too, as a fade of a quarter of a second. (The tiles themselves were told to animate
+    /// nothing, which does not cover the layer they are put in.)
     private let waitingHost = UIView()
     private let liveHost = UIView()
     private var waitingLayer: CALayer { waitingHost.layer }
     private var liveLayer: CALayer { liveHost.layer }
-    /// Parts of the waiting tiles that have to be drawn again from nothing, by tile.
+    /// Parts of the lower tiles that have to be drawn again from nothing, by tile.
     private var stale: [Int64: CGRect] = [:]
-    /// "-demoOldWaiting" has the waiting lines' tiles draw themselves, as they did until 0.13.0, for the
-    /// build server to set the time that takes beside the time it takes now.
+    /// "-demoOldWaiting" has the lower tiles draw themselves, as they did until 0.13.0, for the build
+    /// server to set the time that takes beside the time it takes now.
     private static let oldWaiting = ProcessInfo.processInfo.arguments.contains("-demoOldWaiting")
     /// Pixels to a page point, and where a pixel of the screen begins (see the page view's pixelGrid).
     private(set) var scale: CGFloat = 2
@@ -128,44 +137,52 @@ final class WetInk: UIView {
         liveTiles = [:]
         stale = [:]
         for line in lines { invalidate(line.box, live: false) }
+        if let live {
+            for piece in live.pieces { invalidate(piece.box, live: false) }
+        }
         freshen()
-        if let live { invalidate(live.box, live: true) }
+        if let open { invalidate(open.box, live: true) }
     }
 
     // MARK: drawing
 
-    /// Draws what of a line (and of [extra], a piece of it not yet among its pieces) reaches [clip].
-    private func fill(_ line: Line, _ extra: Piece?, in context: CGContext, clip: CGRect) {
+    /// Draws those of [pieces] that reach [clip], as the line they are pieces of is drawn.
+    private func fill(_ pieces: [Piece], of line: Line, in context: CGContext, clip: CGRect) {
         var any = false
-        for piece in line.pieces where piece.box.intersects(clip) {
+        for piece in pieces where piece.box.intersects(clip) {
             context.addPath(piece.path)
             any = true
         }
-        if let extra, extra.box.intersects(clip) {
-            context.addPath(extra.path)
-            any = true
-        }
-        if any, line.width > 0 {
+        guard any else { return }
+        if line.width > 0 {
             context.setStrokeColor(line.color)
             context.setLineWidth(line.width)
             context.setLineCap(.round)
             context.setLineJoin(.round)
             context.strokePath()
-        } else if any {
+        } else {
             context.setFillColor(line.color)
             context.fillPath()
         }
     }
 
+    /// Everything the lower tiles show that reaches [clip]: the waiting lines, then the settled pieces
+    /// of the line being written.
+    private func settledInk(in context: CGContext, clip: CGRect) {
+        for line in lines where line.box.intersects(clip) { fill(line.pieces, of: line, in: context, clip: clip) }
+        if let live { fill(live.pieces, of: live, in: context, clip: clip) }
+    }
+
+    /// What a tile that draws itself shows.
     fileprivate func paint(in context: CGContext, clip: CGRect, live ofLive: Bool) {
         if ofLive {
-            if let live { fill(live, open, in: context, clip: clip) }
+            if let live, let open { fill([open], of: live, in: context, clip: clip) }
         } else {
-            for line in lines where line.box.intersects(clip) { fill(line, nil, in: context, clip: clip) }
+            settledInk(in: context, clip: clip)
         }
     }
 
-    /// Pixels of its own for a waiting tile at [frame], set up so that a point of the page is drawn where
+    /// Pixels of its own for a lower tile at [frame], set up so that a point of the page is drawn where
     /// the tile shows it.
     private func pixels(for frame: CGRect) -> CGContext? {
         let side = Int(Self.side)
@@ -179,7 +196,7 @@ final class WetInk: UIView {
         return context
     }
 
-    /// Draws the stale parts of the waiting tiles again from nothing: every waiting line that passes there.
+    /// Draws the stale parts of the lower tiles again from nothing.
     private func freshen() {
         guard !stale.isEmpty else { return }
         let parts = stale
@@ -194,34 +211,30 @@ final class WetInk: UIView {
             context.saveGState()
             context.clip(to: part)
             context.clear(part)
-            for line in lines where line.box.intersects(part) { fill(line, nil, in: context, clip: part) }
+            settledInk(in: context, clip: part)
             context.restoreGState()
             tile.contents = context.makeImage()
         }
     }
 
-    /// Puts one more waiting line on show: it is drawn over what its tiles show already, and nothing
-    /// that was there is drawn again.
-    ///
-    /// Until 0.13.0 the tiles of the waiting lines drew themselves the way those of the line being
-    /// written do, and a layer that draws itself first clears the part it is asked to draw: every time
-    /// a line was finished, every waiting line that passed where it lay was drawn again with it. Lines
-    /// scribbled one over another without a pause, zoomed in, took longer to finish with each one (on
-    /// the build server 0.6 seconds for the fifth, 1.7 for the fifteenth).
-    private func show(_ line: Line) {
-        reach(line.box, live: false) { at, tile, part, made in
-            // (A tile just made, one with a part to draw again, or one that draws itself: drawn the full way.)
-            guard !made, self.stale[at] == nil, let context = tile.bitmap else {
-                self.stale[at] = (self.stale[at] ?? .null).union(made ? tile.frame : part)
-                return
+    /// Puts pieces of a line on show in the lower tiles: drawn over what the tiles show already, and
+    /// nothing that was there is drawn again. (The line has to be among the waiting lines, or be the
+    /// line being written with these among its pieces, by the time freshen() is next called.)
+    private func put(_ pieces: [Piece], of line: Line) {
+        for piece in pieces {
+            reach(piece.box, live: false) { at, tile, part, made in
+                // (A tile just made, one with a part to draw again, or one that draws itself: drawn the full way.)
+                guard !made, self.stale[at] == nil, let context = tile.bitmap else {
+                    self.stale[at] = (self.stale[at] ?? .null).union(made ? tile.frame : part)
+                    return
+                }
+                context.saveGState()
+                context.clip(to: part)
+                self.fill([piece], of: line, in: context, clip: part)
+                context.restoreGState()
+                tile.contents = context.makeImage()
             }
-            context.saveGState()
-            context.clip(to: part)
-            self.fill(line, nil, in: context, clip: part)
-            context.restoreGState()
-            tile.contents = context.makeImage()
         }
-        freshen()
     }
 
     private func key(_ column: Int, _ row: Int) -> Int64 {
@@ -229,8 +242,7 @@ final class WetInk: UIView {
     }
 
     /// Has the part of the tiles that covers [rect] drawn again, making tiles where there are none: the
-    /// tiles of the line being written ([live]) at the screen's next turn, or those of the lines that
-    /// are waiting when freshen() is next called.
+    /// upper tiles at the screen's next turn, or the lower ones when freshen() is next called.
     private func invalidate(_ rect: CGRect, live ofLive: Bool) {
         reach(rect, live: ofLive) { at, tile, part, _ in
             if ofLive {
@@ -249,6 +261,7 @@ final class WetInk: UIView {
         let step = Self.side / scale
         let dirty = rect.insetBy(dx: -1.5 / scale, dy: -1.5 / scale).intersection(bounds.insetBy(dx: -step, dy: -step))
         guard !dirty.isNull, !dirty.isEmpty else { return }
+        let whole = InkPaint.whole(dirty, scale: scale, origin: grid)
         let firstColumn = Int(((dirty.minX - grid.x) / step).rounded(.down)), lastColumn = Int(((dirty.maxX - grid.x) / step).rounded(.down))
         let firstRow = Int(((dirty.minY - grid.y) / step).rounded(.down)), lastRow = Int(((dirty.maxY - grid.y) / step).rounded(.down))
         guard lastColumn - firstColumn < 64, lastRow - firstRow < 64 else { return }
@@ -281,24 +294,25 @@ final class WetInk: UIView {
                     tile = made
                 }
                 if let tile {
-                    let part = InkPaint.whole(dirty, scale: scale, origin: grid).intersection(tile.frame)
+                    let part = whole.intersection(tile.frame)
                     if !part.isNull, !part.isEmpty { each(at, tile, part, fresh) }
                 }
             }
         }
     }
 
-    /// Takes away the tiles that no waiting line reaches any more.
+    /// Takes away the lower tiles that nothing settled reaches any more.
     private func prune() {
         guard !tiles.isEmpty else { return }
-        if lines.isEmpty {
+        let settled = live?.pieces ?? []
+        if lines.isEmpty, settled.isEmpty {
             tiles.values.forEach { $0.removeFromSuperlayer() }
             tiles = [:]
             stale = [:]
             return
         }
         for (at, tile) in tiles {
-            let reached = lines.contains { $0.box.intersects(tile.frame) }
+            let reached = lines.contains { $0.box.intersects(tile.frame) } || settled.contains { $0.box.intersects(tile.frame) }
             if !reached {
                 tile.removeFromSuperlayer()
                 tiles[at] = nil
@@ -307,9 +321,9 @@ final class WetInk: UIView {
         }
     }
 
-    /// The line that was being written is no longer: where it was, its tiles are drawn again, empty. (The
-    /// tiles themselves stay for the next line, which as a rule begins close by; only when there are many
-    /// are they let go.)
+    /// The end of the line that was being written is no longer in the upper tiles: where it was, they
+    /// are drawn again, empty. (The tiles themselves stay for the next line, which as a rule begins
+    /// close by; only when there are many are they let go.)
     private func wipeLive(_ box: CGRect) {
         if liveTiles.count > 32 {
             liveTiles.values.forEach { $0.removeFromSuperlayer() }
@@ -320,6 +334,24 @@ final class WetInk: UIView {
     }
 
     // MARK: the line being written
+
+    /// The points of [line] from [from] up to [to] as a piece: a shape to fill or, for a line of one
+    /// width, the line itself, to be drawn that wide.
+    private func cut(_ line: PenLine, _ from: Int, _ to: Int?) -> Piece {
+        let end = min(to ?? line.points.count, line.points.count)
+        guard asLines else {
+            let path = line.shape(from: from, to: to, fineness: scale)
+            return Piece(path: path, box: path.boundingBoxOfPath, from: from, to: end)
+        }
+        let path = CGMutablePath()
+        guard end > 0 else { return Piece(path: path, box: .null, from: from, to: end) }
+        let run = InkPaint.thinned(Array(line.points[max(0, min(from, end - 1))..<end]), gap: line.width * InkPaint.wideGap)
+        path.move(to: run[0])
+        if run.count == 1 { path.addLine(to: run[0]) }
+        for point in run.dropFirst() { path.addLine(to: point) }
+        let reach = line.width / 2 + 1 / scale
+        return Piece(path: path, box: path.boundingBoxOfPath.insetBy(dx: -reach, dy: -reach), from: from, to: end)
+    }
 
     /// Shows the line being written as it stands now.
     func write(_ line: PenLine, color: CGColor) {
@@ -333,73 +365,75 @@ final class WetInk: UIView {
             openFrom = 0
         }
         if asLines { current.width = line.width }
-        // The points from [from] up to [to] as a piece: a shape to fill or, for a line of one width, the
-        // line itself, to be drawn that wide.
-        func cut(_ from: Int, _ to: Int?) -> Piece {
-            guard asLines else {
-                let path = line.shape(from: from, to: to, fineness: scale)
-                return Piece(path: path, box: path.boundingBoxOfPath)
-            }
-            let end = min(to ?? line.points.count, line.points.count)
-            let path = CGMutablePath()
-            guard end > 0 else { return Piece(path: path, box: .null) }
-            let run = InkPaint.thinned(Array(line.points[max(0, min(from, end - 1))..<end]), gap: line.width * InkPaint.wideGap)
-            path.move(to: run[0])
-            if run.count == 1 { path.addLine(to: run[0]) }
-            for point in run.dropFirst() { path.addLine(to: point) }
-            let reach = line.width / 2 + 1 / scale
-            return Piece(path: path, box: path.boundingBoxOfPath.insetBy(dx: -reach, dy: -reach))
-        }
-        var dirty = open?.box ?? .null
-        // A long line is cut into pieces, so that only its last piece is worked out again as it grows. A
-        // piece is closed where the line is settled: what comes after that may still change.
+        let before = open?.box ?? .null
+        // A long line is cut into pieces. A piece is closed where the line is settled (what comes after
+        // that may still change), and goes into the lower tiles there and then, for good.
+        var closed: [Piece] = []
         while line.settled - openFrom > 64 {
-            let piece = cut(openFrom, line.settled)
+            let piece = cut(line, openFrom, line.settled)
             current.pieces.append(piece)
             current.box = current.box.union(piece.box)
-            dirty = dirty.union(piece.box)
+            closed.append(piece)
             openFrom = max(0, line.settled - 1)
         }
-        let piece = cut(openFrom, nil)
+        if !closed.isEmpty {
+            put(closed, of: current)
+            freshen()
+        }
+        // What is left is the end that is still growing: the upper tiles show it, and only it.
+        let piece = cut(line, openFrom, nil)
         open = piece
         current.box = current.box.union(piece.box)
-        invalidate(dirty.union(piece.box), live: true)
+        invalidate(before.union(piece.box), live: true)
     }
 
-    /// The line being written has changed along its whole length (its ends were shaped as the pen
-    /// lifted): what was made of it so far is let go, and the next writing of it makes it anew.
-    func restart() {
+    /// The line being written has changed from point [from] on (its end was shaped as the pen lifted, or
+    /// it was made a straight line): what was made of it from there on is let go, and the next writing
+    /// of it makes that anew. What was made of it before that point stays as it is.
+    func restart(from: Int = 0) {
         guard let live else { return }
-        invalidate(live.box, live: true)
-        live.pieces = []
-        live.box = .null
+        if let open { invalidate(open.box, live: true) }
         open = nil
-        openFrom = 0
+        guard let first = live.pieces.firstIndex(where: { $0.to > from }) else { return }
+        for piece in live.pieces[first...] { invalidate(piece.box, live: false) }
+        openFrom = live.pieces[first].from
+        live.pieces.removeSubrange(first...)
+        freshen()
     }
 
     /// The line being written came to nothing.
     func drop() {
         guard let gone = live else { return }
         live = nil
+        for piece in gone.pieces { invalidate(piece.box, live: false) }
+        let end = open
         open = nil
         openFrom = 0
-        wipeLive(gone.box)
+        if !gone.pieces.isEmpty {
+            prune()
+            freshen()
+        }
+        wipeLive(end?.box ?? gone.box)
     }
 
     /// The line being written is part of the handwriting from [version] on, as the stroke made at [date].
-    /// It stays on show until the picture has it: it goes over from the tiles of the line being written
-    /// to those of the lines that are waiting, where it is drawn this once.
+    /// It stays on show until the picture has it. Its settled pieces are in the lower tiles already; its
+    /// end joins them now.
     func keep(version: Int, date: Date?) {
         guard let done = live else { return }
-        if let open { done.pieces.append(open) }
+        let end = open
+        if let end {
+            done.pieces.append(end)
+            put([end], of: done)
+        }
         done.version = version
         done.date = date
         lines.append(done)
         live = nil
         open = nil
         openFrom = 0
-        show(done)
-        wipeLive(done.box)
+        freshen()
+        wipeLive(end?.box ?? done.box)
     }
 
     /// Any other line that is part of the handwriting from [version] on (a shape, say): the places it
@@ -408,12 +442,13 @@ final class WetInk: UIView {
         guard points.count > 1 else { return }
         let path = InkPaint.shape(points: points, widths: widths ?? [CGFloat](repeating: width, count: points.count), from: 0, fineness: scale)
         let line = Line(color: color)
-        line.pieces = [Piece(path: path, box: path.boundingBoxOfPath)]
+        line.pieces = [Piece(path: path, box: path.boundingBoxOfPath, from: 0, to: points.count)]
         line.box = line.pieces[0].box
         line.version = version
         line.date = date
         lines.append(line)
-        show(line)
+        put(line.pieces, of: line)
+        freshen()
     }
 
     /// Takes down the lines that [gone] says are no longer wanted.

@@ -707,10 +707,14 @@ final class PageOverlay: UIView {
     /// Shows the line being written with the app's own pen, and where the pen is expected to go next.
     /// [under] puts it where highlighter goes: under the canvas, as a tint. [fineness] is how many pixels
     /// of the screen a page point takes and [grid] where a pixel begins.
-    func drawLive(_ line: PenLine, ahead: [PenSample], color: CGColor, fineness: CGFloat, grid: CGPoint, under: Bool = false, afresh: Bool = false) {
+    func drawLive(
+        _ line: PenLine, ahead: [PenSample], color: CGColor, fineness: CGFloat, grid: CGPoint, under: Bool = false, afresh: Bool = false,
+        from changed: Int = 0
+    ) {
         let wet = under ? wetHigh : wetPens
         wet.fit(scale: fineness, grid: grid)
-        if afresh { wet.restart() }
+        // ([afresh]: the line has changed from point [changed] on, and is made anew from there.)
+        if afresh { wet.restart(from: changed) }
         wet.write(line, color: color)
         // A steadied line trails the pen on purpose; only a line that keeps up with it is drawn ahead.
         if !under, line.steady < 0.05, let end = line.points.last, let width = line.widths.last, !ahead.isEmpty {
@@ -2261,7 +2265,7 @@ struct PDFInkView: UIViewRepresentable {
             // (A line with pointed ends was given its end just now, as the pen lifted: it is shown anew.)
             overlay.drawLive(
                 line, ahead: [], color: liveColor(tool), fineness: fineness, grid: Self.pixelGrid(of: overlay.inkPicture, scale: fineness),
-                under: high, afresh: line.taper > 0
+                under: high, afresh: line.taper > 0, from: line.reshapedFrom
             )
             let canvas = overlay.canvas
             var drawing = canvas.ink

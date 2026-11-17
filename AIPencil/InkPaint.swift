@@ -105,8 +105,17 @@ enum InkPaint {
         return made
     }
 
-    /// A line as a shape to fill: a disc at every point and a band between each two. Every piece turns
-    /// the same way round, so that where pieces overlap the filling does not cancel.
+    /// A line as a shape to fill: a band between each two points, and at each point what closes the gap
+    /// between the band before it and the band after. Every piece turns the same way round, so that
+    /// where pieces overlap the filling does not cancel.
+    ///
+    /// At the line's ends, at the ends of a dash and where the line turns sharply, what closes the gap is
+    /// a disc. Everywhere else the two bands meet at a slight angle and the gap is a sliver on either
+    /// side, from the point out to the two bands' corners: that sliver is all that is added. (Until
+    /// 0.13.2 there was a disc at every point. Zoomed in far, a line has a point every pixel or so and a
+    /// disc of forty sides at each: nearly all of every disc lay under the bands, and making and filling
+    /// them was most of what a long line cost.) A sliver's straight edge is within three hundredths of
+    /// a pixel of the disc's round one, or the disc is drawn.
     ///
     /// The discs are many-sided shapes with straight sides, as many as it takes for a side to be about a
     /// pixel and a half long at [fineness] pixels to a page point. A true circle would be left to whoever
@@ -118,18 +127,56 @@ enum InkPaint {
         let end = min(to ?? points.count, points.count)
         guard end > 0 else { return path }
         let first = max(0, min(from, end - 1))
+        /// Three or four corners, turned the way every piece is turned; nothing for corners that enclose nothing.
+        func add(_ corners: [CGPoint]) {
+            var area: CGFloat = 0
+            for corner in corners.indices {
+                let a = corners[corner], b = corners[(corner + 1) % corners.count]
+                area += a.x * b.y - b.x * a.y
+            }
+            guard abs(area) > 1e-9 else { return }
+            // (The discs go round the way that makes this sum positive.)
+            path.addLines(between: area < 0 ? corners.reversed() : corners)
+            path.closeSubpath()
+        }
         for index in first..<end {
             let here = points[index]
             let radius = widths[index] / 2
             // (A place of no width is a gap in a dashed line: nothing there, and nothing to or from it.)
             guard radius > 0 else { continue }
-            let sides = max(10, min(48, Int((2 * CGFloat.pi * radius * fineness / 1.5).rounded(.up))))
-            let unit = round(sides: sides)
-            path.move(to: CGPoint(x: here.x + unit[0].x * radius, y: here.y + unit[0].y * radius))
-            for side in 1..<sides {
-                path.addLine(to: CGPoint(x: here.x + unit[side].x * radius, y: here.y + unit[side].y * radius))
+            let joinsBefore = index > first && widths[index - 1] > 0
+            let joinsAfter = index + 1 < end && widths[index + 1] > 0
+            var round = true
+            if joinsBefore, joinsAfter {
+                let before = points[index - 1], after = points[index + 1]
+                let ax = here.x - before.x, ay = here.y - before.y
+                let bx = after.x - here.x, by = after.y - here.y
+                let la = hypot(ax, ay), lb = hypot(bx, by)
+                if la > 0.01, lb > 0.01 {
+                    let turn = (ax * bx + ay * by) / (la * lb)
+                    // (How far the sliver's straight edge is inside the disc's round one, in pixels.)
+                    let flat = radius * fineness * (1 - ((1 + max(turn, -1)) / 2).squareRoot())
+                    if turn > 0, flat < 0.03 {
+                        round = false
+                        for side in [CGFloat(1), CGFloat(-1)] {
+                            add([
+                                here,
+                                CGPoint(x: here.x - ay / la * radius * side, y: here.y + ax / la * radius * side),
+                                CGPoint(x: here.x - by / lb * radius * side, y: here.y + bx / lb * radius * side),
+                            ])
+                        }
+                    }
+                }
             }
-            path.closeSubpath()
+            if round {
+                let sides = max(10, min(48, Int((2 * CGFloat.pi * radius * fineness / 1.5).rounded(.up))))
+                let unit = self.round(sides: sides)
+                path.move(to: CGPoint(x: here.x + unit[0].x * radius, y: here.y + unit[0].y * radius))
+                for side in 1..<sides {
+                    path.addLine(to: CGPoint(x: here.x + unit[side].x * radius, y: here.y + unit[side].y * radius))
+                }
+                path.closeSubpath()
+            }
             guard index > first else { continue }
             let before = points[index - 1]
             let radiusBefore = widths[index - 1] / 2
@@ -138,21 +185,12 @@ enum InkPaint {
             let length = hypot(dx, dy)
             guard length > 0.01 else { continue }
             let nx = -dy / length, ny = dx / length
-            var corners = [
+            add([
                 CGPoint(x: before.x + nx * radiusBefore, y: before.y + ny * radiusBefore),
                 CGPoint(x: here.x + nx * radius, y: here.y + ny * radius),
                 CGPoint(x: here.x - nx * radius, y: here.y - ny * radius),
                 CGPoint(x: before.x - nx * radiusBefore, y: before.y - ny * radiusBefore),
-            ]
-            var area: CGFloat = 0
-            for corner in 0..<4 {
-                let a = corners[corner], b = corners[(corner + 1) % 4]
-                area += a.x * b.y - b.x * a.y
-            }
-            // (The discs go round the way that makes this sum positive.)
-            if area < 0 { corners.reverse() }
-            path.addLines(between: corners)
-            path.closeSubpath()
+            ])
         }
         return path
     }

@@ -203,6 +203,9 @@ struct PenLine {
     private(set) var along: [CGFloat] = []
     /// How many of the points are as they will stay.
     private(set) var settled = 0
+    /// Set when the pen lifts: the first point that finishing the line changed. Those before it are as
+    /// they were shown while the line was written.
+    private(set) var reshapedFrom = 0
 
     private struct Knot {
         var point: CGPoint
@@ -459,6 +462,7 @@ struct PenLine {
     /// The pen lifted. A steadied line is still on its way to where the pen left the page; this takes it
     /// there, so that the line ends where the hand ended it, and settles the whole of it.
     mutating func finish() {
+        reshapedFrom = settled
         guard let last, let held else { return }
         let gap = hypot(last.point.x - held.x, last.point.y - held.y)
         if gap > 0.2 {
@@ -479,6 +483,7 @@ struct PenLine {
         if run < tipReach {
             // Too short to have ends (a dot, the stroke of a comma): as wide as it is, all of it.
             for index in widths.indices { widths[index] = max(widths[index], heldWidth) }
+            reshapedFrom = 0
             return
         }
         // Where the line ends it goes down to a point as it came up from one.
@@ -489,6 +494,7 @@ struct PenLine {
             if index > 0 { along += hypot(points[index].x - points[index - 1].x, points[index].y - points[index - 1].y) }
             index -= 1
         }
+        reshapedFrom = min(reshapedFrom, max(index + 1, 0))
     }
 
     /// The line as a PencilKit stroke. The ink is PencilKit's "monoline", which draws every point as wide
