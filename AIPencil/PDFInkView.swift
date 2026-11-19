@@ -2939,6 +2939,8 @@ struct PDFInkView: UIViewRepresentable {
 
         /// Since when the pictures of the page in view have stood at another fineness than the zoom, with
         /// the zoom at rest; whether that has been noted; and the zoom it was measured against.
+        /// When the pictures were last looked at (see lookAtPictures), for the diagnostics.
+        private var looked: CFTimeInterval = 0
         private var lateSince: CFTimeInterval = 0
         private var lateTold = false
         private var lateScale: CGFloat = 0
@@ -3032,6 +3034,7 @@ struct PDFInkView: UIViewRepresentable {
             // find to do can wait until the line is written, and the main thread is the pen's alone
             // meanwhile. (A touch that was never seen to end counts for twenty seconds and no longer.)
             let now = CACurrentMediaTime()
+            looked = now
             noteLate(in: view, now: now)
             if penLine != nil || rubbed != nil || overlays.values.contains(where: { $0.inkInUse && now - $0.canvasUsed < 20 }) { return }
             // The pen is off the page: pictures that were ready while it was on go up now.
@@ -3402,6 +3405,17 @@ struct PDFInkView: UIViewRepresentable {
             lines.append("tool \(choice.tool.rawValue); eraser takes \(choice.eraserHighlighterOnly ? "highlighter only" : choice.eraserKind.rawValue), \(Int(choice.eraserWidth)) wide; put down after use: eraser \(choice.eraserAuto), highlighter \(choice.highlighterAuto), shape \(choice.shapeAuto); pen \(choice.penKind.rawValue)")
             lines.append("zoom \(view.scaleFactor), seen \(zoomSeen), fits at \(view.scaleFactorForSizeToFit), up to \(view.maxScaleFactor); display scale \(view.traitCollection.displayScale); view \(Int(view.bounds.width)) x \(Int(view.bounds.height))")
             let shown = overlay.convert(overlay.bounds, to: nil)
+            // (What can keep the pictures from being drawn again, as it stands this moment.)
+            var keeping: [String] = []
+            keeping.append(String(format: "last looked at %.1f s ago", CACurrentMediaTime() - looked))
+            keeping.append(pictureTimer == nil ? "no timer" : (pictureTimer?.isValid ?? false) ? "timer running" : "timer stopped")
+            keeping.append(penLine == nil ? "no line being written" : "a line being written")
+            keeping.append(rubbed == nil ? "eraser up" : "eraser down")
+            keeping.append("\(overlays.values.filter { $0.inkInUse }.count) canvases in use")
+            keeping.append("given up: page \(overlay.pagePicture.gaveUp), handwriting \(overlay.inkPicture.gaveUp)")
+            keeping.append("handwriting's picture being made: \(overlay.inkBusy), waiting to go up: \(overlay.inkLanding != nil)")
+            keeping.append("retired \(retired), window \(view.window != nil)")
+            lines.append("pictures: " + keeping.joined(separator: "; "))
             lines.append("page \(canvas.pageIndex): \(Int(overlay.bounds.width)) x \(Int(overlay.bounds.height)) points, on screen \(Int(shown.width)) x \(Int(shown.height)); \(overlays.count) pages laid out; canvases \(inkScale) times the page")
             lines.append("canvas: \(Int(canvas.bounds.width)) x \(Int(canvas.bounds.height)), zoom \(canvas.zoomScale), content scale \(canvas.contentScaleFactor), \(canvas.strokeCount) lines")
             var ink = "handwriting shown as \(overlay.showsInkPicture ? "the app's pictures" : "the canvas"), trusted \(overlay.inkTrusted), empty \(overlay.inkEmpty), \(overlay.keptCount) lines waiting as shapes"
