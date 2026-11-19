@@ -2937,6 +2937,92 @@ struct PDFInkView: UIViewRepresentable {
             pictureTimer = timer
         }
 
+        /// Since when the pictures of the page in view have stood at another fineness than the zoom, with
+        /// the zoom at rest; whether that has been noted; and the zoom it was measured against.
+        private var lateSince: CFTimeInterval = 0
+        private var lateTold = false
+        private var lateScale: CGFloat = 0
+
+        /// Notes, for the diagnostics and a test's notes, when the page in view has gone a second and a
+        /// half with the zoom at rest and a picture that is not as fine as the zoom, and everything that
+        /// could be holding the new picture back. (Reported from an iPad in 0.13.7: now and then the
+        /// page is not drawn again after zooming. The diagnostics sent with the report were both taken
+        /// with the pictures as fine as the zoom, and say nothing of why.)
+        private func noteLate(in view: PDFView, now: CFTimeInterval) {
+            guard let page = view.currentPage, let overlay = overlays[page], overlay.window != nil else {
+                lateSince = 0
+                lateTold = false
+                return
+            }
+            let scale = zoomSeen * view.traitCollection.displayScale
+            guard scale > 0 else { return }
+            var late: [String] = []
+            if abs(scale - lateScale) <= 0.0005 * scale {
+                if Self.drawsPages {
+                    let picture = overlay.pagePicture
+                    if picture.gaveUp {
+                        late.append("the page's picture was given up")
+                    } else if let shown = picture.shown {
+                        if abs(shown.scale - scale) > 0.002 * scale {
+                            late.append(String(format: "the page's picture is at %.3f", Double(shown.scale)))
+                        }
+                    } else {
+                        late.append("the page has no picture")
+                    }
+                }
+                if overlay.canvas.strokeCount > 0 {
+                    if !overlay.showsInkPicture {
+                        if !choice.needsCanvas {
+                            late.append(String(format: "the canvas shows the handwriting, %.3f times the page", Double(overlay.inkScale)))
+                        }
+                    } else if let shown = overlay.inkPicture.shown {
+                        if abs(shown.scale - scale) > 0.002 * scale {
+                            late.append(String(format: "the handwriting's picture is at %.3f", Double(shown.scale)))
+                        }
+                    } else {
+                        late.append("the handwriting has no picture")
+                    }
+                }
+            }
+            lateScale = scale
+            guard !late.isEmpty else {
+                if lateTold {
+                    let text = String(format: "pictures as fine as the zoom again, %.1f s after they fell behind", now - lateSince)
+                    DebugLog.write(text)
+                    Diagnostics.shared.step(text)
+                }
+                lateSince = 0
+                lateTold = false
+                return
+            }
+            if lateSince == 0 {
+                lateSince = now
+                return
+            }
+            guard !lateTold, now - lateSince > 1.5 else { return }
+            lateTold = true
+            var why: [String] = []
+            if penLine != nil { why.append("a line is being written") }
+            if rubbed != nil { why.append(watchRubs ? "the eraser is down, through a touch it took over" : "the eraser is down") }
+            let inUse = overlays.values.filter { $0.inkInUse }.count
+            if inUse > 0 {
+                why.append(String(format: "%d canvases in use, this one touched %.0f s ago", inUse, now - overlay.canvasUsed))
+            }
+            if overlay.inkBusy { why.append(String(format: "a picture of the handwriting is being made at %.3f", Double(overlay.inkAsking))) }
+            if overlay.inkLanding != nil { why.append("a picture of the handwriting waits to go up") }
+            if overlay.inkPicture.gaveUp { why.append("the handwriting's picture was given up") }
+            if !overlay.inkTrusted { why.append("the handwriting's picture is not trusted") }
+            if let asked = overlay.pagePicture.asked {
+                why.append(String(format: "the page's picture is asked for at %.3f", Double(asked.scale)))
+            }
+            if choice.needsCanvas { why.append("a tool of the canvas is in hand") }
+            why.append(String(format: "the handwriting last changed %.1f s ago", now - overlay.inkTouched))
+            why.append("\(overlay.keptCount) lines on show as written")
+            let what = late.joined(separator: "; ") + " | " + why.joined(separator: "; ")
+            DebugLog.write(String(format: "pictures: behind the zoom (%.3f pixels a point) for %.1f s: ", Double(scale), now - lateSince) + what)
+            Diagnostics.shared.step(String(format: "pictures behind the zoom %.3f: ", Double(scale)) + what)
+        }
+
         /// Several times a second: has every page in or near view a picture as fine as the zoom, of the
         /// part that is in view, and pictures of its handwriting as it stands? Where not, they are asked for.
         private func lookAtPictures() {
@@ -2946,6 +3032,7 @@ struct PDFInkView: UIViewRepresentable {
             // find to do can wait until the line is written, and the main thread is the pen's alone
             // meanwhile. (A touch that was never seen to end counts for twenty seconds and no longer.)
             let now = CACurrentMediaTime()
+            noteLate(in: view, now: now)
             if penLine != nil || rubbed != nil || overlays.values.contains(where: { $0.inkInUse && now - $0.canvasUsed < 20 }) { return }
             // The pen is off the page: pictures that were ready while it was on go up now.
             for overlay in overlays.values {
