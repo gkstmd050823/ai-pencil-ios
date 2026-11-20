@@ -2294,7 +2294,7 @@ struct PDFInkView: UIViewRepresentable {
             // (A line with pointed ends was given its end just now, as the pen lifted: it is shown anew.)
             overlay.drawLive(
                 line, ahead: [], color: liveColor(tool), fineness: fineness, grid: Self.pixelGrid(of: overlay.inkPicture, scale: fineness),
-                under: high, afresh: line.taper > 0, from: line.reshapedFrom
+                under: high, afresh: false, from: line.reshapedFrom
             )
             let canvas = overlay.canvas
             var drawing = canvas.ink
