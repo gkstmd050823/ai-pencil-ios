@@ -207,12 +207,6 @@ struct PenLine {
     /// they were shown while the line was written.
     private(set) var reshapedFrom = 0
 
-    /// How many of the points are as they will stay on show. (0.14.1 and 0.14.2 showed the end of a line
-    /// pointed while it was written and filled it out again as the pen went on, and those points were
-    /// not firm until the pen had left them behind. A line's ends are the pressure's doing now, and
-    /// nothing that is settled is touched again.)
-    var firm: Int { settled }
-
     private struct Knot {
         var point: CGPoint
         var width: CGFloat
@@ -256,23 +250,15 @@ struct PenLine {
     /// An Apple Pencil's full force, as UIKit tells it.
     static let fullForce: CGFloat = 25.0 / 6.0
 
-    /// The share of its width a line comes down to under the lightest touch, by how pointed its ends
-    /// are set to be.
-    private var tip: CGFloat { 1 - min(0.85, 0.3 + 0.6 * taper) }
-    /// The pressure, as a share of the pencil's full force, under which a line begins to thin toward
-    /// that: about half of an ordinary touch.
-    private static let lightTouch: CGFloat = 0.12
+    /// The share of its width a pointed end comes down to, and how far from the end it is back to full width.
+    private var tip: CGFloat { 1 - 0.75 * taper }
+    private var tipReach: CGFloat { max(0.6, width * (1.2 + 2.8 * taper)) }
 
-    /// How much of its width the line has under this pressure. A pencil that is landing or lifting
-    /// presses lightly for a moment, and that is what points a line's ends: the line is as wide at
-    /// every place as the pen pressed there, when it was there. (Until 0.14.0 the ends were shaped
-    /// when the pen lifted, by how far from the end each point lay; in 0.14.1 and 0.14.2 while the
-    /// line was written, the end being pointed and filled out again as the pen went on. Either way
-    /// ink that was on show already changed its width, at the lift or all the time, and was seen to.)
-    private func pointed(under share: CGFloat?) -> CGFloat {
-        guard taper > 0, let share else { return 1 }
-        let light = min(1, max(0, share / Self.lightTouch))
-        return tip + (1 - tip) * light * light * (3 - 2 * light)
+    /// How much of its width the line has at [distance] from one of its ends.
+    private func pointed(_ distance: CGFloat) -> CGFloat {
+        guard taper > 0 else { return 1 }
+        let along = min(1, max(0, distance / tipReach))
+        return tip + (1 - tip) * along * (2 - along)
     }
 
     /// The longest the line trails the pen at full steadying, in seconds.
@@ -312,14 +298,8 @@ struct PenLine {
         // Slow, the line is a little wider than it is set; fast, narrower.
         var quick: CGFloat = 1
         if flow > 0, let even = pace {
-            // (Measured on a screen of GoodNotes' fountain pen beside this one's, both at a quarter of
-            // the way to their sharpest tip and the least answer to pressure: a line flicked across
-            // went from 9.3 pixels wide to 5.8 as the pen gathered pace, and letters were between 10
-            // and 13 wide; this pen's were 16 wide everywhere. The pace at which a hand writes, a few
-            // hundred points a second, hardly told here: it took 1500 to thin a line by a sixth.)
-            let fast = min(1, max(0, (even - 100) / 1100))
-            let most = min(0.8, (0.25 + 0.5 * taper) * min(1.4, flow / 0.35))
-            quick = 1.04 - most * fast * fast * (3 - 2 * fast)
+            let fast = min(1, max(0, (even - 150) / 1350))
+            quick = 1 + flow * (0.14 - 0.5 * fast * fast * (3 - 2 * fast))
         }
         last = sample
         // The line goes a share of the way to the pen at each sample, the share shrinking with steadying:
@@ -351,12 +331,6 @@ struct PenLine {
         if knots.count > before {
             record.knot = knots.count - 1
             record.run = run
-        } else if knots.count == 1, stretches == 0, heldWidth > knots[0].width {
-            // A pen that has landed and not moved yet: the dot under it grows as the pen settles its
-            // weight, while it is there. (The first word of a pencil's force is slight; a dot left at
-            // that would be a speck, and was made good when the pen lifted until 0.14.2.)
-            knots[0].width = heldWidth
-            if !widths.isEmpty { widths[0] = heldWidth }
         }
         heard.append(record)
         if heard.count > 48 { heard.removeFirst(heard.count - 48) }
@@ -373,7 +347,7 @@ struct PenLine {
             press = even
             squeeze = curve.swell(even)
         }
-        let wanted = max(0.25, width * (1 + sense * (squeeze - 1)) * place.quick * pointed(under: press))
+        let wanted = max(0.25, width * (1 + sense * (squeeze - 1)) * place.quick)
         return place.first ? wanted : held + (wanted - held) * 0.35
     }
 
@@ -395,7 +369,7 @@ struct PenLine {
             let place = heard[index]
             held = widened(place, press: &pressure, held: held)
             guard let knot = place.knot, knot < knots.count else { continue }
-            let wide = max(0.2, held)
+            let wide = max(0.2, held * pointed(place.run))
             if knot == 0, stretches == 0 {
                 knots[0].width = wide
                 if !widths.isEmpty { widths[0] = wide }
@@ -414,7 +388,8 @@ struct PenLine {
     private mutating func knot(_ place: CGPoint, _ size: CGFloat, time: TimeInterval, always: Bool = false) {
         if let end = knots.last, !always, hypot(place.x - end.point.x, place.y - end.point.y) < spacing { return }
         if let end = knots.last { run += hypot(place.x - end.point.x, place.y - end.point.y) }
-        knots.append(Knot(point: place, width: max(0.2, size), time: max(0, time - began)))
+        // (Where the line begins it comes up from a point, if it is a line with pointed ends.)
+        knots.append(Knot(point: place, width: max(0.2, size * pointed(run)), time: max(0, time - began)))
         work(toTheEnd: false)
     }
 
@@ -504,6 +479,22 @@ struct PenLine {
             knot(CGPoint(x: knots[0].point.x + 0.1, y: knots[0].point.y), knots[0].width, time: last.time, always: true)
         }
         work(toTheEnd: true)
+        guard taper > 0, points.count > 1 else { return }
+        if run < tipReach {
+            // Too short to have ends (a dot, the stroke of a comma): as wide as it is, all of it.
+            for index in widths.indices { widths[index] = max(widths[index], heldWidth) }
+            reshapedFrom = 0
+            return
+        }
+        // Where the line ends it goes down to a point as it came up from one.
+        var along: CGFloat = 0
+        var index = points.count - 1
+        while index >= 0, along < tipReach {
+            widths[index] = max(0.2, widths[index] * pointed(along))
+            if index > 0 { along += hypot(points[index].x - points[index - 1].x, points[index].y - points[index - 1].y) }
+            index -= 1
+        }
+        reshapedFrom = min(reshapedFrom, max(index + 1, 0))
     }
 
     /// The line as a PencilKit stroke. The ink is PencilKit's "monoline", which draws every point as wide
