@@ -27,7 +27,8 @@ final class Translator: ObservableObject {
             "thinking": ["type": "disabled"],
             "output_config": ["effort": "low"],
             "system": Prompts.translation(language: language),
-            "messages": [["role": "user", "content": text]],
+            // (In a tag, and said to be for translating: bare, a word or two was answered as if spoken to.)
+            "messages": [["role": "user", "content": "<고른_글>\n\(text)\n</고른_글>\n\n위 글을 번역한 결과만 출력하세요."]],
         ]
     }
 

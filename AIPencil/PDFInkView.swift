@@ -1897,17 +1897,36 @@ struct PDFInkView: UIViewRepresentable {
             if now - zoomMeasured.at < 0.05 { return zoomMeasured.zoom }
             var zoom = pdfView?.scaleFactor ?? 1
             if let view = pdfView {
-                for overlay in overlays.values where overlay.window != nil && overlay.bounds.width > 1 {
-                    let a = overlay.convert(CGPoint.zero, to: view), b = overlay.convert(CGPoint(x: 100, y: 0), to: view)
-                    let length = hypot(b.x - a.x, b.y - a.y)
-                    if length > 0.01, length.isFinite {
-                        zoom = length / 100
-                        break
+                // Of the page that takes most of the view. (Until 0.13.10 it was of whichever page came
+                // first. Turning pages one at a time, PDFKit keeps the page beside the one in view laid
+                // out too, in a scroll view of its own that stands at the zoom at which a page fits. When
+                // that page came first, a page zoomed to ten times its size was taken to stand at one and
+                // a half: it and its handwriting were drawn for that and stretched, soft, and stayed so
+                // until the document was opened again. A test's notes: "zoom 1.4995" with the page 7200
+                // wide on screen, and two pages laid out.)
+                var most: CGFloat = -1
+                for overlay in overlays.values {
+                    guard let own = self.zoom(of: overlay) else { continue }
+                    let seen = overlay.convert(overlay.bounds, to: view).intersection(view.bounds)
+                    let area: CGFloat = seen.isNull ? 0 : seen.width * seen.height
+                    if area > most {
+                        most = area
+                        zoom = own
                     }
                 }
             }
             zoomMeasured = (zoom, now)
             return zoom
+        }
+
+        /// How large one page stands in the page view: the view's points to a point of the page. Nil for
+        /// a page that is not in the window.
+        private func zoom(of overlay: PageOverlay) -> CGFloat? {
+            guard let view = pdfView, overlay.window != nil, overlay.bounds.width > 1 else { return nil }
+            let a = overlay.convert(CGPoint.zero, to: view), b = overlay.convert(CGPoint(x: 100, y: 0), to: view)
+            let length = hypot(b.x - a.x, b.y - a.y)
+            guard length > 0.01, length.isFinite else { return nil }
+            return length / 100
         }
 
         /// The canvas is told of a change the app made to a page's handwriting. Where the canvas is what
@@ -2237,6 +2256,8 @@ struct PDFInkView: UIViewRepresentable {
                 }
                 if let end = whole.points.last, let last = points.last, end != last { points.append(end) }
                 marked(points, on: overlay.canvas)
+                // (A touch that left no ring to speak of is not a use.)
+                if points.count > 3 { toolUsed() }
             case .highlighter:
                 commit(line, in: overlay, tool: .highlighter)
                 toolUsed()
@@ -2956,7 +2977,7 @@ struct PDFInkView: UIViewRepresentable {
                 lateTold = false
                 return
             }
-            let scale = zoomSeen * view.traitCollection.displayScale
+            let scale = (zoom(of: overlay) ?? zoomSeen) * view.traitCollection.displayScale
             guard scale > 0 else { return }
             var late: [String] = []
             if abs(scale - lateScale) <= 0.0005 * scale {
@@ -3087,7 +3108,9 @@ struct PDFInkView: UIViewRepresentable {
             }
             let around = view.bounds.insetBy(dx: -view.bounds.width * 0.5, dy: -view.bounds.height * 0.6)
             for overlay in overlays.values where overlay.window != nil {
-                if pages { refreshPicture(in: overlay, scale: scale, view: view) }
+                // (Each page at its own zoom: the page beside the one in view may stand at another.)
+                let own = (self.zoom(of: overlay) ?? zoom) * view.traitCollection.displayScale
+                if pages { refreshPicture(in: overlay, scale: own, view: view) }
                 if !overlay.convert(around, from: view).intersection(overlay.bounds).isEmpty {
                     // (Once the hand has rested a moment: lines written one after another are on show
                     // as their own shapes, and go into the picture together.)
@@ -3184,7 +3207,7 @@ struct PDFInkView: UIViewRepresentable {
                 // Pictures being made for a zoom the page has left would be stretched when they came, and
                 // the ones for this zoom could not begin until they had: they are told to stop. (A test's
                 // notes had a picture six seconds in the making land four zooms late, and none after it.)
-                let wanted = zoomSeen * view.traitCollection.displayScale
+                let wanted = (zoom(of: overlay) ?? zoomSeen) * view.traitCollection.displayScale
                 if overlay.inkAsking > 0, abs(wanted - overlay.inkAsking) > 0.002 * wanted {
                     overlay.inkAsking = 0
                     overlay.inkPicture.ticket.next()
@@ -3195,7 +3218,7 @@ struct PDFInkView: UIViewRepresentable {
             let picture = overlay.inkPicture
             let version = canvas.inkVersion
             let whole = overlay.bounds
-            let scale = zoomSeen * view.traitCollection.displayScale
+            let scale = (zoom(of: overlay) ?? zoomSeen) * view.traitCollection.displayScale
             guard scale > 0, whole.width > 1, whole.height > 1, !picture.gaveUp else { return }
             if canvas.strokeCount == 0 {
                 // Nothing written: no pictures, and nothing to draw.
@@ -3314,7 +3337,7 @@ struct PDFInkView: UIViewRepresentable {
                             // The lines just written are on show as they were written, sharp. A picture
                             // made for another zoom than the page stands at now is not as sharp as they
                             // are: they stay until one made for this zoom has them.
-                            let now = self.zoomSeen * (self.pdfView?.traitCollection.displayScale ?? 2)
+                            let now = (self.zoom(of: overlay) ?? self.zoomSeen) * (self.pdfView?.traitCollection.displayScale ?? 2)
                             if abs(extent.scale - now) < 0.002 * now {
                                 overlay.dropPreviews(upTo: version)
                             } else {
@@ -3402,7 +3425,7 @@ struct PDFInkView: UIViewRepresentable {
             guard let view = pdfView, let page = view.currentPage, let overlay = overlays[page] else { return "no page in view" }
             let canvas = overlay.canvas
             var lines: [String] = []
-            lines.append("tool \(choice.tool.rawValue); eraser takes \(choice.eraserHighlighterOnly ? "highlighter only" : choice.eraserKind.rawValue), \(Int(choice.eraserWidth)) wide; put down after use: eraser \(choice.eraserAuto), highlighter \(choice.highlighterAuto), shape \(choice.shapeAuto); pen \(choice.penKind.rawValue)")
+            lines.append("tool \(choice.tool.rawValue); eraser takes \(choice.eraserHighlighterOnly ? "highlighter only" : choice.eraserKind.rawValue), \(Int(choice.eraserWidth)) wide; put down after use: eraser \(choice.eraserAuto), highlighter \(choice.highlighterAuto), shape \(choice.shapeAuto), AI pen \(choice.aiAuto); pen \(choice.penKind.rawValue)")
             lines.append("zoom \(view.scaleFactor), seen \(zoomSeen), fits at \(view.scaleFactorForSizeToFit), up to \(view.maxScaleFactor); display scale \(view.traitCollection.displayScale); view \(Int(view.bounds.width)) x \(Int(view.bounds.height))")
             let shown = overlay.convert(overlay.bounds, to: nil)
             // (What can keep the pictures from being drawn again, as it stands this moment.)
@@ -3416,6 +3439,13 @@ struct PDFInkView: UIViewRepresentable {
             keeping.append("handwriting's picture being made: \(overlay.inkBusy), waiting to go up: \(overlay.inkLanding != nil)")
             keeping.append("retired \(retired), window \(view.window != nil)")
             lines.append("pictures: " + keeping.joined(separator: "; "))
+            var zooms: [String] = []
+            for (other, laid) in overlays {
+                let index = view.document?.index(for: other) ?? -1
+                let own = self.zoom(of: laid).map { String(format: "%.3f", Double($0)) } ?? "not in the window"
+                zooms.append("page \(index) at \(own)")
+            }
+            lines.append("zoom of each page laid out: " + zooms.sorted().joined(separator: ", "))
             lines.append("page \(canvas.pageIndex): \(Int(overlay.bounds.width)) x \(Int(overlay.bounds.height)) points, on screen \(Int(shown.width)) x \(Int(shown.height)); \(overlays.count) pages laid out; canvases \(inkScale) times the page")
             lines.append("canvas: \(Int(canvas.bounds.width)) x \(Int(canvas.bounds.height)), zoom \(canvas.zoomScale), content scale \(canvas.contentScaleFactor), \(canvas.strokeCount) lines")
             var ink = "handwriting shown as \(overlay.showsInkPicture ? "the app's pictures" : "the canvas"), trusted \(overlay.inkTrusted), empty \(overlay.inkEmpty), \(overlay.keptCount) lines waiting as shapes"

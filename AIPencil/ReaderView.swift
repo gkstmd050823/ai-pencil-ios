@@ -1008,7 +1008,8 @@ private struct ToolBar: View {
                     .background(tint(.ai).opacity(0.14), in: Capsule())
                 }
                 .accessibilityLabel("질문 목록, \(questions)개")
-                .padding(.trailing, 4)
+                Spacer(minLength: 0)
+                more(current: nil)
             }
         case .lasso:
             hint("둘러서 고른 뒤 끌어 옮겨요")
@@ -1359,6 +1360,8 @@ private struct ToolOptions: View {
                     Label("이 쪽 필기 모두 지우기", systemImage: "trash")
                         .font(.subheadline)
                 }
+            case .ai:
+                putDown("한 번 묻고 나면 이전 도구로 돌아가기", $choice.aiAuto)
             default:
                 EmptyView()
             }
