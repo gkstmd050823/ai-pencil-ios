@@ -258,10 +258,10 @@ struct PenLine {
 
     /// The share of its width a line comes down to under the lightest touch, by how pointed its ends
     /// are set to be.
-    private var tip: CGFloat { 1 - 0.75 * taper }
+    private var tip: CGFloat { 1 - min(0.85, 0.3 + 0.6 * taper) }
     /// The pressure, as a share of the pencil's full force, under which a line begins to thin toward
-    /// that: about a third of an ordinary touch.
-    private static let lightTouch: CGFloat = 0.085
+    /// that: about half of an ordinary touch.
+    private static let lightTouch: CGFloat = 0.12
 
     /// How much of its width the line has under this pressure. A pencil that is landing or lifting
     /// presses lightly for a moment, and that is what points a line's ends: the line is as wide at
@@ -312,8 +312,14 @@ struct PenLine {
         // Slow, the line is a little wider than it is set; fast, narrower.
         var quick: CGFloat = 1
         if flow > 0, let even = pace {
-            let fast = min(1, max(0, (even - 150) / 1350))
-            quick = 1 + flow * (0.14 - 0.5 * fast * fast * (3 - 2 * fast))
+            // (Measured on a screen of GoodNotes' fountain pen beside this one's, both at a quarter of
+            // the way to their sharpest tip and the least answer to pressure: a line flicked across
+            // went from 9.3 pixels wide to 5.8 as the pen gathered pace, and letters were between 10
+            // and 13 wide; this pen's were 16 wide everywhere. The pace at which a hand writes, a few
+            // hundred points a second, hardly told here: it took 1500 to thin a line by a sixth.)
+            let fast = min(1, max(0, (even - 100) / 1100))
+            let most = min(0.8, (0.25 + 0.5 * taper) * min(1.4, flow / 0.35))
+            quick = 1.04 - most * fast * fast * (3 - 2 * fast)
         }
         last = sample
         // The line goes a share of the way to the pen at each sample, the share shrinking with steadying:
