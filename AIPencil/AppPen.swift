@@ -207,6 +207,56 @@ struct PenLine {
     /// they were shown while the line was written.
     private(set) var reshapedFrom = 0
 
+    /// A line with pointed ends is pointed where it ends for now, all the while it is written: the last
+    /// stretch of it is shown going down to a point, and filled out again as the pen goes on. (Until
+    /// 0.14.0 the end was as wide as the rest while the pen was down and was pointed when it lifted: every
+    /// line changed its look at that moment, a short one all over.) The widths as they are without that
+    /// are kept here, from point [tippedFrom] on, and put back before the line is worked on.
+    private var bare: [CGFloat] = []
+    private var tippedFrom = 0
+    private var tipped = false
+
+    /// How many of the points are as they will stay on show: those that are settled and are not in the
+    /// stretch that is pointed for now.
+    var firm: Int { tipped ? min(settled, tippedFrom) : settled }
+
+    private mutating func untip() {
+        guard tipped else { return }
+        tipped = false
+        if tippedFrom + bare.count == widths.count {
+            widths.replaceSubrange(tippedFrom..., with: bare)
+        }
+        bare = []
+    }
+
+    /// Points the end of the line as it stands. A line too short to have ends (a dot, the stroke of a
+    /// comma) is as wide as the pen is all over; from there to twice that length it goes over to having
+    /// both its ends, little by little, so that nothing about it changes at a stroke as it grows.
+    private mutating func tipEnd() {
+        guard taper > 0, !points.isEmpty else { return }
+        let length = along.last ?? 0
+        let reach = tipReach
+        let blend = min(1, max(0, (length - reach) / reach))
+        var from = points.count - 1
+        if blend < 1 {
+            from = 0
+        } else {
+            while from > 0, length - along[from - 1] < reach { from -= 1 }
+        }
+        bare = Array(widths[from...])
+        tippedFrom = from
+        tipped = true
+        for index in from..<points.count {
+            let ended = max(0.2, widths[index] * pointed(length - along[index]))
+            if blend < 1 {
+                let full = max(widths[index], heldWidth)
+                widths[index] = full + (ended - full) * blend
+            } else {
+                widths[index] = ended
+            }
+        }
+    }
+
     private struct Knot {
         var point: CGPoint
         var width: CGFloat
@@ -288,6 +338,8 @@ struct PenLine {
     }
 
     mutating func add(_ sample: PenSample) {
+        untip()
+        defer { tipEnd() }
         let step = last.map { max(0.0005, sample.time - $0.time) } ?? 0.004
         if last == nil { began = sample.time }
         // The pen's pace, in points of the screen a second, evened out over the last few places.
@@ -358,6 +410,8 @@ struct PenLine {
     @discardableResult
     mutating func correct(id: Int, force: CGFloat, most: CGFloat = 0) -> Bool {
         guard force > 0, let at = heard.lastIndex(where: { $0.id == id }) else { return false }
+        untip()
+        defer { tipEnd() }
         heard[at].share = force / (most > 0 ? most : Self.fullForce)
         heard[at].id = nil
         var pressure = heard[at].press
@@ -462,7 +516,8 @@ struct PenLine {
     /// The pen lifted. A steadied line is still on its way to where the pen left the page; this takes it
     /// there, so that the line ends where the hand ended it, and settles the whole of it.
     mutating func finish() {
-        reshapedFrom = settled
+        reshapedFrom = firm
+        untip()
         guard let last, let held else { return }
         let gap = hypot(last.point.x - held.x, last.point.y - held.y)
         if gap > 0.2 {
@@ -480,21 +535,12 @@ struct PenLine {
         }
         work(toTheEnd: true)
         guard taper > 0, points.count > 1 else { return }
-        if run < tipReach {
-            // Too short to have ends (a dot, the stroke of a comma): as wide as it is, all of it.
-            for index in widths.indices { widths[index] = max(widths[index], heldWidth) }
-            reshapedFrom = 0
-            return
-        }
-        // Where the line ends it goes down to a point as it came up from one.
-        var along: CGFloat = 0
-        var index = points.count - 1
-        while index >= 0, along < tipReach {
-            widths[index] = max(0.2, widths[index] * pointed(along))
-            if index > 0 { along += hypot(points[index].x - points[index - 1].x, points[index].y - points[index - 1].y) }
-            index -= 1
-        }
-        reshapedFrom = min(reshapedFrom, max(index + 1, 0))
+        // Where the line ends it goes down to a point as it came up from one: as it was shown doing
+        // while it was written, and by the same reckoning. These widths are the line's for good.
+        tipEnd()
+        reshapedFrom = min(reshapedFrom, tippedFrom)
+        tipped = false
+        bare = []
     }
 
     /// The line as a PencilKit stroke. The ink is PencilKit's "monoline", which draws every point as wide

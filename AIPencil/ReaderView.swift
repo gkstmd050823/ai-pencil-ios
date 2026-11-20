@@ -1206,7 +1206,7 @@ private struct ToolOptions: View {
     private var penHint: String {
         switch choice.penKind {
         case .fountain:
-            return "필압 감도는 누르는 힘이, 속도 반응은 펜의 빠르기가 굵기를 얼마나 바꿀지예요(천천히 쓰면 굵게, 빨리 쓰면 가늘게). 펜끝 선명도는 획의 처음과 끝이 얼마나 뾰족할지, 획 안정화는 손떨림을 얼마나 펴 줄지예요."
+            return "펜끝 선명도는 획의 처음과 끝이 얼마나 뾰족할지, 필압 감도는 누르는 힘이 굵기를 얼마나 바꿀지예요. 속도에 따른 굵기 조절을 켜면 천천히 쓸 때 굵게, 빨리 쓸 때 가늘게 나와요. 획 안정화는 손떨림을 얼마나 펴 줄지예요."
         case .brush:
             return "붓은 획의 처음과 끝이 늘 뾰족하고, 천천히 쓰면 굵게 빨리 쓰면 가늘게 나와요. 필압 감도는 누르는 힘이 굵기를 얼마나 바꿀지, 획 안정화는 손떨림을 얼마나 펴 줄지예요."
         default:
@@ -1263,12 +1263,20 @@ private struct ToolOptions: View {
                         }
                     }
                     .pickerStyle(.segmented)
+                    // (In the order, and with the switch, that GoodNotes gives its fountain pen: how
+                    // pointed the tip is, how much pressure tells, whether the pace of writing does.)
+                    if choice.penKind == .fountain {
+                        SliderRow(title: "펜끝 선명도", value: $choice.penTaper, range: 0...1, shown: "\(Int((choice.penTaper * 100).rounded()))%")
+                    }
                     SliderRow(title: "필압 감도", value: $choice.penSense, range: 0...1, shown: "\(Int((choice.penSense * 100).rounded()))%")
                         .disabled(choice.penKind != .fountain && choice.penKind != .brush)
                         .opacity(choice.penKind != .fountain && choice.penKind != .brush ? 0.4 : 1)
                     if choice.penKind == .fountain {
-                        SliderRow(title: "펜끝 선명도", value: $choice.penTaper, range: 0...1, shown: "\(Int((choice.penTaper * 100).rounded()))%")
-                        SliderRow(title: "속도 반응", value: $choice.penFlow, range: 0...1, shown: "\(Int((choice.penFlow * 100).rounded()))%")
+                        Toggle("쓰는 속도에 따라 굵기 조절", isOn: Binding(
+                            get: { choice.penFlow > 0 },
+                            set: { choice.penFlow = $0 ? 0.35 : 0 }
+                        ))
+                        .font(.subheadline)
                     }
                     SliderRow(title: "획 안정화", value: $choice.penSteady, range: 0...1, shown: "\(Int((choice.penSteady * 100).rounded()))%")
                     Text(penHint)
