@@ -1943,7 +1943,12 @@ struct PDFInkView: UIViewRepresentable {
         /// How many pixels a point of the page takes on screen now, for shapes drawn over the page.
         private var fineness: CGFloat {
             guard let view = pdfView else { return 2 }
-            return min(64, max(1, zoomSeen) * view.traitCollection.displayScale)
+            // Exactly the screen's, also where the page is shown smaller than it is. (Until 0.14.1 it was
+            // never less than the screen's own two pixels a point. A page fitted beside the questions, or
+            // two to a screen, stands at 0.7 to 0.97 of its size: a line was written at two pixels a point
+            // and shown shrunk to 1.4, and when the picture of the handwriting took it over, drawn at 1.4,
+            // it was a little thinner and sharper all at once.)
+            return min(64, max(0.25, zoomSeen) * view.traitCollection.displayScale)
         }
 
         // MARK: the app's own pen
@@ -2213,6 +2218,7 @@ struct PDFInkView: UIViewRepresentable {
         /// pen's becomes a question.
         private func penDone(kept: Bool, in overlay: PageOverlay) {
             guard let line = penLine else { return }
+            DebugLog.write(String(format: "pen: shown at %.3f pixels a point while written", Double(fineness)))
             DebugLog.write("pen: up, \(line.points.count) points, \(kept ? "kept" : "let go")\(straight != nil ? ", made straight" : "")\(shaped != nil ? ", made a shape" : "")")
             penLine = nil
             holdTimer?.invalidate()
