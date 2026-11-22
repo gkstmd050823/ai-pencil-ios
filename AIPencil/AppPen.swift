@@ -213,6 +213,10 @@ struct PenLine {
     /// it is. Flicked, the pen runs fifty, and the line has room to thin all the way.) Set by how
     /// pointed the tip is: 0.1 to 0.6.
     let slope: CGFloat
+    // (Since 0.14.9 [slope] is the share of its width a line may lose for each point of the SCREEN it
+    // runs, 0.004 to 0.036: what the hand does is the same at any zoom, and so is the look of an end.
+    // In 0.14.8 it was page points of width for a page point run, 0.1 to 0.6, and at 0.23 the end of a
+    // letter's stroke still came down to half: "still thins sharply toward the end".)
 
     private(set) var points: [CGPoint] = []
     private(set) var widths: [CGFloat] = []
@@ -318,7 +322,7 @@ struct PenLine {
         curve: PressureCurve = .fountain, adaptive: Bool = true, dash: DashPattern? = nil, plain: Bool = false
     ) {
         self.plain = plain
-        self.slope = plain ? 0.1 + 0.5 * min(max(taper, 0), 1) : 0
+        self.slope = plain ? 0.004 + 0.032 * min(max(taper, 0), 1) : 0
         self.curve = curve
         self.adaptive = adaptive
         self.dash = dash
@@ -443,7 +447,7 @@ struct PenLine {
             if plain, knot > 0 {
                 let before = knots[knot - 1], here = knots[knot].point
                 let gone = hypot(here.x - before.point.x, here.y - before.point.y)
-                wide = max(wide, before.width - slope * gone)
+                wide = max(wide, before.width * max(0, 1 - slope * gone * zoom))
             }
             if knot == 0, stretches == 0 {
                 knots[0].width = wide
@@ -486,7 +490,7 @@ struct PenLine {
         var wide = max(0.2, size * pointed(run))
         if plain, let end = knots.last {
             let gone = hypot(place.x - end.point.x, place.y - end.point.y)
-            wide = max(wide, end.width - slope * gone)
+            wide = max(wide, end.width * max(0, 1 - slope * gone * zoom))
         }
         knots.append(Knot(point: place, width: wide, time: max(0, time - began)))
         work(toTheEnd: false)
