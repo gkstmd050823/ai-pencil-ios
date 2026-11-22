@@ -1271,7 +1271,7 @@ private struct ToolOptions: View {
                         SliderRow(title: "속도 반응", value: $choice.penFlow, range: 0...1, shown: "\(Int((choice.penFlow * 100).rounded()))%")
                         putDown("실험: 필압 그대로 그리기", $choice.penPlain)
                         if choice.penPlain {
-                            Text("켜면 선의 굵기와 끝 모양을 누르는 힘만으로 정해요. 펜끝 선명도와 속도 반응은 쓰지 않아요.")
+                            Text("켜면 선의 굵기와 끝 모양을 누르는 힘으로 정해요. 펜끝 선명도는 끝이 얼마나 급하게 가늘어질지예요(낮을수록 뭉툭하게). 속도 반응은 쓰지 않아요.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)

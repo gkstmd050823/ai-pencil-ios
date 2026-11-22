@@ -206,6 +206,13 @@ struct PenLine {
     /// blunt. That is how GoodNotes' fountain pen was measured to end its lines, and here it is the
     /// pressure's doing alone.
     let plain: Bool
+    /// For such a line: the most its width goes down by, for each point of length it runs. (A pencil's
+    /// force goes in about 0.04 s when it lifts. At the end of a letter's stroke the pen runs five
+    /// screen points in that time, and a line that lost half its width over them ended in a thin
+    /// tail: "too thin", said the one who writes with it, of the first build that drew the pressure as
+    /// it is. Flicked, the pen runs fifty, and the line has room to thin all the way.) Set by how
+    /// pointed the tip is: 0.1 to 0.6.
+    let slope: CGFloat
 
     private(set) var points: [CGPoint] = []
     private(set) var widths: [CGFloat] = []
@@ -311,6 +318,7 @@ struct PenLine {
         curve: PressureCurve = .fountain, adaptive: Bool = true, dash: DashPattern? = nil, plain: Bool = false
     ) {
         self.plain = plain
+        self.slope = plain ? 0.1 + 0.5 * min(max(taper, 0), 1) : 0
         self.curve = curve
         self.adaptive = adaptive
         self.dash = dash
@@ -431,7 +439,12 @@ struct PenLine {
             let place = heard[index]
             held = widened(place, press: &pressure, held: held)
             guard let knot = place.knot, knot < knots.count else { continue }
-            let wide = max(0.2, held * pointed(place.run))
+            var wide = max(0.2, held * pointed(place.run))
+            if plain, knot > 0 {
+                let before = knots[knot - 1], here = knots[knot].point
+                let gone = hypot(here.x - before.point.x, here.y - before.point.y)
+                wide = max(wide, before.width - slope * gone)
+            }
             if knot == 0, stretches == 0 {
                 knots[0].width = wide
                 if !widths.isEmpty { widths[0] = wide }
@@ -470,7 +483,12 @@ struct PenLine {
         if let end = knots.last, !always, hypot(place.x - end.point.x, place.y - end.point.y) < spacing { return }
         if let end = knots.last { run += hypot(place.x - end.point.x, place.y - end.point.y) }
         // (Where the line begins it comes up from a point, if it is a line with pointed ends.)
-        knots.append(Knot(point: place, width: max(0.2, size * pointed(run)), time: max(0, time - began)))
+        var wide = max(0.2, size * pointed(run))
+        if plain, let end = knots.last {
+            let gone = hypot(place.x - end.point.x, place.y - end.point.y)
+            wide = max(wide, end.width - slope * gone)
+        }
+        knots.append(Knot(point: place, width: wide, time: max(0, time - began)))
         work(toTheEnd: false)
     }
 
