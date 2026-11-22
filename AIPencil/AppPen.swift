@@ -588,6 +588,47 @@ final class PenGesture: UIGestureRecognizer {
     /// The force the pencil last told of in the line being written.
     private var lastForce: CGFloat = 0
 
+    /// What the pencil told of the line being written, as it told it: kept only while a test's notes are
+    /// taken, and put into them when the line is over. (For reckoning how a line's width should follow
+    /// the hand: how hard and how fast a hand really goes at the start of a line, along it and in a
+    /// flick off the page. Nothing here has any part in the line that is drawn.)
+    private struct Told {
+        var time: TimeInterval
+        var point: CGPoint
+        var force: CGFloat
+        var most: CGFloat
+        var height: CGFloat
+        var bearing: CGFloat
+        var id: Int?
+    }
+
+    private var log: [Told] = []
+    private var logGood: [(id: Int, force: CGFloat)] = []
+
+    private func tellNotes(_ how: String) {
+        let heard = log, good = logGood
+        log = []
+        logGood = []
+        guard !heard.isEmpty, TestRecorder.shared.isOn else { return }
+        DispatchQueue.global(qos: .utility).async {
+            let start = heard[0].time
+            var text = "pen samples: \(heard.count), \(how). Each: ms since the first, x, y (the page's points), force, the most force, altitude, azimuth, ~number where the force was a guess still; then = number, the force made good"
+            for one in heard {
+                let ms = (one.time - start) * 1000
+                let x = Double(one.point.x), y = Double(one.point.y)
+                let force = Double(one.force), most = Double(one.most)
+                let height = Double(one.height), bearing = Double(one.bearing)
+                text += String(format: "\n  %.1f %.2f %.2f", ms, x, y)
+                text += String(format: " %.4f %.3f %.3f %.3f", force, most, height, bearing)
+                if let id = one.id { text += " ~\(id)" }
+            }
+            for one in good {
+                text += "\n  = \(one.id)" + String(format: " %.4f", Double(one.force))
+            }
+            TestRecorder.shared.note(text)
+        }
+    }
+
     /// A pencil that has just left the page tells a force of nought, and so at times does one that has
     /// only just landed. Nought is what a finger tells, which has no force to tell and is written at the
     /// ordinary width: handed on as it was, the end of a line written lightly swelled to that width, a
@@ -602,6 +643,12 @@ final class PenGesture: UIGestureRecognizer {
                 force = touch.force > 0 ? touch.force : (lastForce > 0 ? lastForce : 0.15)
                 // (A force the system has only guessed at so far is told again, for good, under this number.)
                 if told, touch.estimatedPropertiesExpectingUpdates.contains(.force) { id = touch.estimationUpdateIndex?.intValue }
+            }
+            if told, TestRecorder.shared.isOn {
+                log.append(Told(
+                    time: touch.timestamp, point: touch.preciseLocation(in: view), force: touch.force, most: touch.maximumPossibleForce,
+                    height: touch.altitudeAngle, bearing: touch.azimuthAngle(in: view), id: id
+                ))
             }
             return PenSample(point: touch.preciseLocation(in: view), force: force, time: touch.timestamp, most: touch.maximumPossibleForce, id: id)
         }
@@ -624,6 +671,8 @@ final class PenGesture: UIGestureRecognizer {
         origin = touch.location(in: view)
         since = touch.timestamp
         lastForce = 0
+        log = []
+        logGood = []
         onDraw?(samples([touch]), [])
         if touch.type == .pencil { state = .began }
     }
@@ -644,6 +693,7 @@ final class PenGesture: UIGestureRecognizer {
         onDraw?(samples([touch]), [])
         followed = nil
         onDone?(true)
+        tellNotes("lifted")
         state = .ended
     }
 
@@ -651,6 +701,7 @@ final class PenGesture: UIGestureRecognizer {
         guard let touch = followed, touches.contains(touch) else { return }
         followed = nil
         onDone?(false)
+        tellNotes("cancelled")
         state = state == .possible ? .failed : .cancelled
     }
 
@@ -659,6 +710,14 @@ final class PenGesture: UIGestureRecognizer {
             // (Only once the force is final: until then more word of it is on its way.)
             guard let id = touch.estimationUpdateIndex?.intValue, touch.force > 0,
                   !touch.estimatedPropertiesExpectingUpdates.contains(.force) else { continue }
+            if TestRecorder.shared.isOn {
+                if log.isEmpty {
+                    // (Word that comes after the line is over and told of.)
+                    DebugLog.write("pen force made good late: = \(id)" + String(format: " %.4f", Double(touch.force)))
+                } else {
+                    logGood.append((id: id, force: touch.force))
+                }
+            }
             onCorrect?(id, touch.force, touch.maximumPossibleForce)
         }
     }
@@ -669,6 +728,7 @@ final class PenGesture: UIGestureRecognizer {
             // Stopped from outside (the tool was changed under the pen, say): the line is let go.
             followed = nil
             onDone?(false)
+            tellNotes("stopped")
         }
     }
 }
