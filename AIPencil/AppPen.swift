@@ -195,6 +195,17 @@ struct PenLine {
     /// Set for a line written in dashes or dots. The points, widths and times are those of the whole
     /// line all the same; it is cut to the pattern where it is shown and where it is handed over.
     let dash: DashPattern?
+    /// The pressure drawn as it is (tried out behind a switch since 0.14.7): the line is at every place
+    /// as wide as the pen pressed there, by one curve, and nothing else shapes it. Its ends are not
+    /// pointed by how far along the line they are, and the pace of the pen does not tell.
+    ///
+    /// What a hand does was taken down from one (62 lines, 22 Nov 2026): a pencil that lifts lets its
+    /// force go over about 0.04 s, whatever it was writing. Flicked off the page it travels 40 to 80
+    /// screen points in that time and the line thins all that way; in a letter it travels four or five,
+    /// and the end is short and pointed; stopped and then lifted it travels nowhere, and the end is
+    /// blunt. That is how GoodNotes' fountain pen was measured to end its lines, and here it is the
+    /// pressure's doing alone.
+    let plain: Bool
 
     private(set) var points: [CGPoint] = []
     private(set) var widths: [CGFloat] = []
@@ -211,6 +222,37 @@ struct PenLine {
         var point: CGPoint
         var width: CGFloat
         var time: TimeInterval
+        /// Its width was reckoned from a force the pencil had only guessed at, and the true one is
+        /// still to come. (Only kept for a line that draws the pressure as it is.)
+        var pending = false
+    }
+
+    /// The force the pencil told first, as a share of its full force. (A pencil that has just landed
+    /// tells a stand-in for about 0.02 s, a third of a newton or so, and its true force a moment after,
+    /// which is far less and still rising. The stand-in is about what a hand writes with.)
+    private var firstShare: CGFloat?
+
+    /// How many times its set width a line is under this pressure, drawn as it is. The force is first
+    /// made a pressure from 0.025 to 1 on a curve that gives a light hand most of the room (half the
+    /// scale is below a quarter of the pencil's full force: a hand writes with a twentieth to a tenth
+    /// of it), and the width goes by a power of that, between 0.38 and 0.57 by how much the pen is set
+    /// to answer to pressure. An ordinary touch (pressure 0.22) writes the set width; the lightest
+    /// 0.44 to 0.29 of it, the heaviest 1.8 to 2.4 times.
+    static func nib(_ share: CGFloat, sense: CGFloat) -> CGFloat {
+        let most = fullForce
+        let force = max(0, share) * most
+        let up = log((most - 2) * force + 1) / log(most - 1)
+        let pressure = min(1, max(0.025, 0.5 * up))
+        let power = 0.38 + 0.19 * min(max(sense, 0), 1)
+        return pow(pressure / 0.22, power)
+    }
+
+    /// Whether the stretch that ends at this knot can be settled: in a line that draws the pressure as
+    /// it is, not while the knot's true force is still to come (it comes about 0.025 s behind the pen),
+    /// unless it has been so long that it will not come.
+    private func sure(_ knot: Int) -> Bool {
+        guard plain, knots[knot].pending else { return true }
+        return knots[knots.count - 1].time - knots[knot].time > 0.12
     }
 
     private var knots: [Knot] = []
@@ -266,8 +308,9 @@ struct PenLine {
 
     init(
         width: CGFloat, sense: CGFloat, steady: CGFloat, spacing: CGFloat = 0.6, taper: CGFloat = 0, flow: CGFloat = 0, zoom: CGFloat = 1,
-        curve: PressureCurve = .fountain, adaptive: Bool = true, dash: DashPattern? = nil
+        curve: PressureCurve = .fountain, adaptive: Bool = true, dash: DashPattern? = nil, plain: Bool = false
     ) {
+        self.plain = plain
         self.curve = curve
         self.adaptive = adaptive
         self.dash = dash
@@ -275,8 +318,8 @@ struct PenLine {
         self.sense = min(max(sense, 0), 1)
         self.steady = min(max(steady, 0), 1)
         self.spacing = min(max(spacing, 0.05), 1)
-        self.taper = min(max(taper, 0), 1)
-        self.flow = min(max(flow, 0), 1)
+        self.taper = plain ? 0 : min(max(taper, 0), 1)
+        self.flow = plain ? 0 : min(max(flow, 0), 1)
         self.zoom = max(zoom, 0.05)
     }
 
@@ -319,6 +362,7 @@ struct PenLine {
         held = place
         // How hard the pen presses, as a share of the most it can tell.
         let pressed: CGFloat? = sample.force > 0 ? sample.force / (sample.most > 0 ? sample.most : Self.fullForce) : nil
+        if firstShare == nil { firstShare = pressed }
         var record = Heard(
             id: sample.id, share: pressed, quick: quick, step: step, elapsed: sample.time - began,
             press: press, width: heldWidth, first: knots.isEmpty
@@ -331,6 +375,7 @@ struct PenLine {
         if knots.count > before {
             record.knot = knots.count - 1
             record.run = run
+            if plain, sample.id != nil { knots[knots.count - 1].pending = true }
         }
         heard.append(record)
         if heard.count > 48 { heard.removeFirst(heard.count - 48) }
@@ -341,10 +386,18 @@ struct PenLine {
     /// moments of a line, while the pencil is still landing, it jumps most and is evened out most.
     private func widened(_ place: Heard, press: inout CGFloat?, held: CGFloat) -> CGFloat {
         var squeeze: CGFloat = 1
-        if let share = place.share {
+        if let told = place.share {
+            var share = told
+            // (The pressure as it is: a line begins at the force the pencil told first, and is not
+            // thinned afterwards by the word that the pencil had hardly touched the page yet.)
+            if plain, place.elapsed < 0.06, let firstShare { share = max(share, firstShare) }
             let lag = place.elapsed < 0.04 ? 0.03 : 0.006
             let even = press.map { $0 + (share - $0) * CGFloat(1 - exp(-place.step / lag)) } ?? share
             press = even
+            if plain {
+                let wanted = max(0.25, width * Self.nib(even, sense: sense))
+                return place.first ? wanted : held + (wanted - held) * 0.35
+            }
             squeeze = curve.swell(even)
         }
         let wanted = max(0.25, width * (1 + sense * (squeeze - 1)) * place.quick)
@@ -360,6 +413,15 @@ struct PenLine {
         guard force > 0, let at = heard.lastIndex(where: { $0.id == id }) else { return false }
         heard[at].share = force / (most > 0 ? most : Self.fullForce)
         heard[at].id = nil
+        if let knot = heard[at].knot, knot < knots.count { knots[knot].pending = false }
+        let changed = rework(from: at)
+        if changed { work(toTheEnd: false) }
+        return changed
+    }
+
+    /// Reckons the widths again from the place numbered [at] on, of the places last heard from. True
+    /// when a knot that is not settled has changed its width.
+    private mutating func rework(from at: Int) -> Bool {
         var pressure = heard[at].press
         var held = heard[at].width
         var changed = false
@@ -381,8 +443,27 @@ struct PenLine {
         }
         press = pressure
         heldWidth = held
-        if changed { work(toTheEnd: false) }
         return changed
+    }
+
+    /// The pen has lifted, and the true force of the last places (about 0.03 s of them) has not come
+    /// yet; it comes after the lift, when the line has been handed on. What it will say is known well
+    /// enough: a pencil's force goes down to nothing as it leaves the page. So from the last force that
+    /// is known for sure it is taken to fall evenly to nothing at the last place.
+    private mutating func fallAway() {
+        guard let first = heard.firstIndex(where: { $0.id != nil }) else { return }
+        let at = max(first, heard.count - 14)
+        guard heard.count - at > 1 else { return }
+        let level = (at > 0 ? heard[at - 1].share : nil) ?? heard[at].share
+        guard let from = level else { return }
+        let left = CGFloat(heard.count - at)
+        for index in at..<heard.count {
+            let gone = CGFloat(index - at + 1) / left
+            heard[index].share = from * (1 - gone)
+            heard[index].id = nil
+            if let knot = heard[index].knot, knot < knots.count { knots[knot].pending = false }
+        }
+        _ = rework(from: at)
     }
 
     private mutating func knot(_ place: CGPoint, _ size: CGFloat, time: TimeInterval, always: Bool = false) {
@@ -447,7 +528,7 @@ struct PenLine {
             along.append(0)
             settled = 1
         }
-        while stretches < count - 1, toTheEnd || stretches + 2 <= count - 1 {
+        while stretches < count - 1, toTheEnd || (stretches + 2 <= count - 1 && sure(stretches + 1)) {
             lay(stretch: stretches)
             stretches += 1
             settled = points.count
@@ -464,6 +545,7 @@ struct PenLine {
     mutating func finish() {
         reshapedFrom = settled
         guard let last, let held else { return }
+        if plain { fallAway() }
         let gap = hypot(last.point.x - held.x, last.point.y - held.y)
         if gap > 0.2 {
             let steps = max(1, min(10, Int(gap / 1.5)))

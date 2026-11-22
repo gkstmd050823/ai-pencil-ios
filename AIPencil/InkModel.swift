@@ -158,6 +158,8 @@ struct InkChoice: Equatable, Codable {
     var highlighterAuto = false
     var shapeAuto = false
     var aiAuto = false
+    /// The fountain pen draws the pressure as it is (see PenLine.plain): tried out behind a switch.
+    var penPlain = false
     /// Draw and hold: a line whose end the pen is held still at is made straight.
     var holdStraight = true
     /// The highlighter draws straight lines only: from where it lands to wherever it is.
@@ -192,6 +194,7 @@ struct InkChoice: Equatable, Codable {
         highlighterAuto = read(.highlighterAuto, highlighterAuto)
         shapeAuto = read(.shapeAuto, shapeAuto)
         aiAuto = read(.aiAuto, aiAuto)
+        penPlain = read(.penPlain, penPlain)
         holdStraight = read(.holdStraight, holdStraight)
         highlighterStraight = read(.highlighterStraight, highlighterStraight)
         // Settings saved before 0.8.0 had one pen width, on a scale of PencilKit's own, and a highlighter

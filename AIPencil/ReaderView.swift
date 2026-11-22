@@ -1269,6 +1269,13 @@ private struct ToolOptions: View {
                     if choice.penKind == .fountain {
                         SliderRow(title: "펜끝 선명도", value: $choice.penTaper, range: 0...1, shown: "\(Int((choice.penTaper * 100).rounded()))%")
                         SliderRow(title: "속도 반응", value: $choice.penFlow, range: 0...1, shown: "\(Int((choice.penFlow * 100).rounded()))%")
+                        putDown("실험: 필압 그대로 그리기", $choice.penPlain)
+                        if choice.penPlain {
+                            Text("켜면 선의 굵기와 끝 모양을 누르는 힘만으로 정해요. 펜끝 선명도와 속도 반응은 쓰지 않아요.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                     SliderRow(title: "획 안정화", value: $choice.penSteady, range: 0...1, shown: "\(Int((choice.penSteady * 100).rounded()))%")
                     Text(penHint)

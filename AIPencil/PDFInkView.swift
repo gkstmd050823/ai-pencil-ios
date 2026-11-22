@@ -1977,11 +1977,12 @@ struct PDFInkView: UIViewRepresentable {
                 default:
                     penLine = PenLine(
                         width: choice.penSeenWidth, sense: choice.appPenSense, steady: CGFloat(choice.penSteady), spacing: 0.5 / zoom,
-                        taper: choice.appPenTaper, flow: choice.appPenFlow, zoom: zoom, curve: choice.appPenCurve, dash: choice.appPenDash
+                        taper: choice.appPenTaper, flow: choice.appPenFlow, zoom: zoom, curve: choice.appPenCurve, dash: choice.appPenDash,
+                        plain: choice.penKind == .fountain && choice.penPlain
                     )
                     if TestRecorder.shared.isOn {
                         let size = "pen: \(choice.penKind), width \(choice.penSeenWidth) page points"
-                        let ways = ", pressure \(choice.appPenSense), ends \(choice.appPenTaper), pace \(choice.appPenFlow), steadying \(choice.penSteady)"
+                        let ways = ", pressure \(choice.appPenSense), ends \(choice.appPenTaper), pace \(choice.appPenFlow), steadying \(choice.penSteady), pressure as it is \(choice.penPlain)"
                         DebugLog.write(size + ways)
                     }
                 }
