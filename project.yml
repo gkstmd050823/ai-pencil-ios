@@ -7,8 +7,8 @@ options:
   createIntermediateGroups: true
 settings:
   base:
-    MARKETING_VERSION: "0.14.9"
-    CURRENT_PROJECT_VERSION: "38"
+    MARKETING_VERSION: "0.14.10"
+    CURRENT_PROJECT_VERSION: "39"
     SWIFT_VERSION: "5.0"
 targets:
   AIPencil:
