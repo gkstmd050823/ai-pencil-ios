@@ -291,15 +291,23 @@ final class Library: ObservableObject {
                 // A file that shows nothing without its password (until 0.14.10 it was turned away as
                 // one that cannot be read). Everything the app does with a document opens the file as
                 // it lies, in a dozen places, and none of them has a password to give. So the password
-                // is used once, here, and what is kept is a copy that opens without it: locked afresh
-                // the way an exported copy is (see Exporter), with the same things held back, under
-                // an owner's password nobody has. The password itself is kept nowhere and noted nowhere.
+                // is used once, here, and what is kept is a copy that opens without it. PDFKit cannot
+                // write a file that was locked as one that is not locked at all (left to itself it
+                // carries the old lock over, and no password fits the copy), so the copy is locked
+                // afresh under an owner's password nobody has, with nothing held back: printing,
+                // copying and the rest are all allowed, as in the Android app's copy. (0.14.11 kept
+                // what the original held back; the user asked for it to be let go here too.) The
+                // password itself is kept nowhere and noted nowhere.
                 guard let password, !password.isEmpty else { throw ImportError.locked }
                 guard pdf.unlock(withPassword: password) else { throw ImportError.wrongPassword }
                 let open = directory.appendingPathComponent("unlocked.pdf")
+                let everything: PDFAccessPermissions = [
+                    .allowsLowQualityPrinting, .allowsHighQualityPrinting, .allowsDocumentChanges, .allowsDocumentAssembly,
+                    .allowsContentCopying, .allowsContentAccessibility, .allowsCommenting, .allowsFormFieldEntry,
+                ]
                 let options: [PDFDocumentWriteOption: Any] = [
                     .ownerPasswordOption: UUID().uuidString,
-                    .accessPermissionsOption: NSNumber(value: pdf.accessPermissions.rawValue),
+                    .accessPermissionsOption: NSNumber(value: everything.rawValue),
                 ]
                 let pages = pdf.pageCount
                 guard pages > 0, pdf.write(to: open, withOptions: options),
