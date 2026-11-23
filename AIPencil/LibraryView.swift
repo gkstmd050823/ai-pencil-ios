@@ -278,11 +278,18 @@ enum Tone {
     static let tabOn = shade(0xF2F2F7, 0x4A4A4F)
     /// The tool bar afloat over the pages: black, whatever the light.
     static let pill = Color(red: 0.055, green: 0.055, blue: 0.063)
+
+    /// How long ago, in Korean whatever language the iPad is set to (the app's own words are Korean, and
+    /// "1 minute ago" stood among them).
+    static func ago(_ date: Date) -> String {
+        let style = Date.RelativeFormatStyle(presentation: .named, unitsStyle: .wide, locale: Locale(identifier: "ko_KR"))
+        return style.format(date)
+    }
 }
 
 /// What the shelf is showing: every document, a sorting of them, or what is in one folder.
 private enum ShelfPlace: Hashable {
-    case all, recent, asked
+    case home, all, recent, asked
     case folder(UUID)
 }
 
@@ -294,7 +301,7 @@ private struct Shelf: View {
     @Binding var path: NavigationPath
     @EnvironmentObject private var library: Library
     @AppStorage("librarySort") private var sort = LibrarySort.recent
-    @State private var place = ShelfPlace.all
+    @State private var place = ShelfPlace.home
     @State private var search = ""
     @State private var importing = false
     @State private var showingSettings = false
@@ -331,6 +338,8 @@ private struct Shelf: View {
         let wanted = search.trimmingCharacters(in: .whitespaces)
         var found: [Doc]
         switch place {
+        // Home shows only what is in no folder (a search there looks through everything).
+        case .home: found = wanted.isEmpty ? library.docs.filter { $0.folder == nil } : library.docs
         case .all: found = library.docs
         case .recent: found = library.docs.filter { $0.openedAt != nil }
         case .asked: found = library.docs.filter { (asked[$0.id] ?? 0) > 0 }
@@ -349,6 +358,7 @@ private struct Shelf: View {
 
     private var title: String {
         switch place {
+        case .home: return "홈"
         case .all: return "모든 문서"
         case .recent: return "최근 본 문서"
         case .asked: return "질문한 문서"
@@ -356,9 +366,9 @@ private struct Shelf: View {
         }
     }
 
-    /// The documents last read, for the row at the top: only where every document is shown.
+    /// The documents last read, for the row at the top of home.
     private var lately: [Doc] {
-        guard place == .all, !searching, !selecting else { return [] }
+        guard place == .home, !searching, !selecting else { return [] }
         let read = library.docs.filter { $0.openedAt != nil }
         return Array(read.sorted { ($0.openedAt ?? $0.addedAt) > ($1.openedAt ?? $1.addedAt) }.prefix(3))
     }
@@ -453,7 +463,7 @@ private struct Shelf: View {
         ) {
             Button("폴더 삭제", role: .destructive) {
                 if let item = deletingFolder {
-                    if place == .folder(item.id) { place = .all }
+                    if place == .folder(item.id) { place = .home }
                     library.deleteFolder(item)
                 }
             }
@@ -523,6 +533,10 @@ private struct Shelf: View {
                 .padding(.leading, 12)
                 .frame(height: 56)
 
+                sideRow(.home, "house", "홈", count: nil)
+                    .dropDestination(for: String.self) { dragged, _ in
+                        drop(dragged, into: nil)
+                    }
                 sideRow(.all, "doc.on.doc", "모든 문서", count: library.docs.count)
                     // (A document dragged here is taken out of its folder.)
                     .dropDestination(for: String.self) { dragged, _ in
@@ -621,6 +635,7 @@ private struct Shelf: View {
             if narrow {
                 // No room for the list: the places are a menu.
                 Menu {
+                    Button("홈") { place = .home }
                     Button("모든 문서") { place = .all }
                     Button("최근 본 문서") { place = .recent }
                     Button("질문한 문서") { place = .asked }
@@ -751,7 +766,7 @@ private struct Shelf: View {
                 if !lately.isEmpty {
                     VStack(alignment: .leading, spacing: 14) {
                         heading("이어서 보기", count: nil)
-                        HStack(spacing: 16) {
+                        HStack(spacing: 14) {
                             ForEach(lately) { doc in
                                 NavigationLink(value: doc) {
                                     RecentCard(doc: doc)
@@ -763,8 +778,8 @@ private struct Shelf: View {
                 }
                 if !docs.isEmpty {
                     VStack(alignment: .leading, spacing: 14) {
-                        heading(searching ? "찾은 문서" : "문서", count: docs.count)
-                        ShelfGrid(minimum: 168, maximum: 230, spacing: 26, rowSpacing: 26) {
+                        heading(gridTitle, count: docs.count)
+                        ShelfGrid(minimum: 138, maximum: 172, spacing: 22, rowSpacing: 22) {
                             ForEach(docs) { doc in
                                 docCell(doc)
                             }
@@ -790,6 +805,11 @@ private struct Shelf: View {
                 picked = []
             }
         }
+    }
+
+    private var gridTitle: String {
+        if searching { return "찾은 문서" }
+        return place == .home ? "폴더에 넣지 않은 문서" : "문서"
     }
 
     /// A document on the shelf: a way into it, or, while several are being picked, something to pick.
@@ -902,7 +922,7 @@ private struct Shelf: View {
             QuickAction(symbol: "arrow.down.doc", title: "PDF 가져오기") {
                 importing = true
             }
-            if place == .all {
+            if folder == nil {
                 QuickAction(symbol: "folder.badge.plus", title: "새 폴더") {
                     newName = ""
                     makingFolder = true
@@ -1008,6 +1028,16 @@ private struct Shelf: View {
                 Text("빈 폴더예요")
                     .font(.title3.bold())
                 Text("오른쪽 위 +로 문서를 가져오거나, 서재에서 문서를 길게 눌러 이 폴더로 옮겨 보세요.")
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            } else if !library.docs.isEmpty {
+                // Home, with every document in a folder and none read yet.
+                Image(systemName: "folder")
+                    .font(.system(size: 44))
+                    .foregroundStyle(.secondary)
+                Text("문서는 모두 폴더 안에 있어요")
+                    .font(.title3.bold())
+                Text("왼쪽에서 폴더를 고르거나 \"모든 문서\"를 눌러 보세요.")
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             } else {
@@ -1349,13 +1379,6 @@ private struct RecentCard: View {
     @EnvironmentObject private var library: Library
     @State private var cover: UIImage?
 
-    /// The share of the document that lies before the page it was left at.
-    private var read: CGFloat {
-        let page = Library.lastPage(for: doc.id) ?? 0
-        let all = max(doc.pageCount, 1)
-        return min(1, max(0, CGFloat(page + 1) / CGFloat(all)))
-    }
-
     var body: some View {
         HStack(spacing: 12) {
             ZStack {
@@ -1364,37 +1387,27 @@ private struct RecentCard: View {
                     Image(uiImage: cover)
                         .resizable()
                         .scaledToFit()
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
-                        .shadow(color: .black.opacity(0.16), radius: 3, y: 1)
+                        .clipShape(RoundedRectangle(cornerRadius: 3))
+                        .shadow(color: .black.opacity(0.16), radius: 2, y: 1)
                 }
             }
-            .frame(width: 88, height: 84)
-            VStack(alignment: .leading, spacing: 4) {
+            .frame(width: 62, height: 54)
+            VStack(alignment: .leading, spacing: 3) {
                 Text(doc.title)
                     .font(.subheadline.weight(.semibold))
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
+                    .lineLimit(1)
                 if let opened = doc.openedAt {
-                    Text(opened.formatted(.relative(presentation: .named)))
+                    Text(Tone.ago(opened))
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
-                // How far it has been read: the page it was left at, of all its pages.
-                GeometryReader { space in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(Tone.chip)
-                        Capsule().fill(Tone.ink).frame(width: max(4, space.size.width * read))
-                    }
-                }
-                .frame(height: 4)
-                .padding(.top, 6)
             }
             Spacer(minLength: 0)
         }
-        .padding(14)
-        .frame(maxWidth: 340, minHeight: 112, maxHeight: 112, alignment: .leading)
-        .background(Tone.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Tone.line, lineWidth: 1))
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity, minHeight: 76, maxHeight: 76, alignment: .leading)
+        .background(Tone.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .task(id: doc.id) {
             cover = await library.cover(for: doc, width: 440)
         }
@@ -1416,7 +1429,7 @@ private struct DocCard: View {
     private var detail: String {
         var parts = ["\(doc.pageCount)쪽"]
         if let opened = doc.openedAt {
-            parts.append(opened.formatted(.relative(presentation: .named)))
+            parts.append(Tone.ago(opened))
         }
         if let folderName { parts.append(folderName) }
         return parts.joined(separator: " · ")
@@ -1424,18 +1437,20 @@ private struct DocCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ZStack(alignment: .bottom) {
-                Color.clear
+            // Every document in a box of one size, whatever the shape of its page: the rows stay even.
+            ZStack {
+                Tone.card
                 if let cover {
                     Image(uiImage: cover)
                         .resizable()
                         .scaledToFit()
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.12), lineWidth: 0.5))
-                        .shadow(color: .black.opacity(0.09), radius: 3, y: 1)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .shadow(color: .black.opacity(0.12), radius: 2, y: 1)
+                        .padding(12)
                 }
             }
-            .aspectRatio(0.84, contentMode: .fit)
+            .aspectRatio(1.16, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(alignment: .topLeading) {
                 if let mark {
                     Image(systemName: mark ? "checkmark.circle.fill" : "circle")
@@ -1447,22 +1462,26 @@ private struct DocCard: View {
             }
 
             Text(doc.title)
-                .font(.subheadline.weight(.semibold))
-                .lineLimit(2)
+                .font(.footnote.weight(.semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
             HStack(spacing: 5) {
                 Text(detail)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.secondary)
                     .lineLimit(1)
                 if asked > 0 {
-                    // (The one colour the shelf has: the AI pen's.)
+                    // (The one colour the shelf has: the AI pen's. Until 0.15.0 it was set on the whole
+                    // row and the grey of the text beside it gave way to it.)
+                    let teal = Color(uiColor: InkChoice.markColor)
                     Image(systemName: "pencil.tip.crop.circle")
                         .font(.caption)
+                        .foregroundStyle(teal)
                     Text("\(asked)")
                         .font(.caption.weight(.semibold).monospacedDigit())
+                        .foregroundStyle(teal)
                 }
             }
-            .foregroundStyle(Color(uiColor: InkChoice.markColor))
         }
         .task(id: doc.id) {
             cover = await library.cover(for: doc, width: 440)
