@@ -21,6 +21,19 @@ private final class InkStamp: PDFAnnotation {
 /// added to (one with a password, or one put together wrongly) is written anew by PDFKit instead, which
 /// shows the same but may lose what the letters of some fonts are.
 enum Exporter {
+    /// The eight things a PDF can hold back, all allowed, as PDFKit numbers them (bits 0 to 7).
+    static let everything: UInt = {
+        var all = PDFAccessPermissions.allowsLowQualityPrinting.rawValue
+        all |= PDFAccessPermissions.allowsHighQualityPrinting.rawValue
+        all |= PDFAccessPermissions.allowsDocumentChanges.rawValue
+        all |= PDFAccessPermissions.allowsDocumentAssembly.rawValue
+        all |= PDFAccessPermissions.allowsContentCopying.rawValue
+        all |= PDFAccessPermissions.allowsContentAccessibility.rawValue
+        all |= PDFAccessPermissions.allowsCommenting.rawValue
+        all |= PDFAccessPermissions.allowsFormFieldEntry.rawValue
+        return all
+    }()
+
     /// Everything written on one page.
     private struct Written {
         var ink: PKDrawing?
@@ -305,10 +318,11 @@ enum Exporter {
         var options: [PDFDocumentWriteOption: Any] = [:]
         if document.isEncrypted {
             // Left to itself PDFKit carries the old lock into the new file, where no password fits it any
-            // more. So the copy is locked afresh the way the original was: open to read without a password,
-            // with the same things held back (printing, copying), under an owner's password nobody has.
+            // more. So the copy is locked afresh under an owner's password nobody has: open to read without
+            // a password, and with nothing held back. (Until 0.14.12 it held back what the original did,
+            // printing and copying; the user asked for that to be let go.)
             options[.ownerPasswordOption] = UUID().uuidString
-            options[.accessPermissionsOption] = NSNumber(value: document.accessPermissions.rawValue)
+            options[.accessPermissionsOption] = NSNumber(value: Exporter.everything)
         }
         guard document.write(to: url, withOptions: options.isEmpty ? nil : options) else { return false }
         // A copy that does not open is worse than none.
