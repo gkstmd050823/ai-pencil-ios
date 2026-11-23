@@ -301,13 +301,18 @@ final class Library: ObservableObject {
                 guard let password, !password.isEmpty else { throw ImportError.locked }
                 guard pdf.unlock(withPassword: password) else { throw ImportError.wrongPassword }
                 let open = directory.appendingPathComponent("unlocked.pdf")
-                let everything: PDFAccessPermissions = [
-                    .allowsLowQualityPrinting, .allowsHighQualityPrinting, .allowsDocumentChanges, .allowsDocumentAssembly,
-                    .allowsContentCopying, .allowsContentAccessibility, .allowsCommenting, .allowsFormFieldEntry,
-                ]
+                // (The eight things a PDF can hold back, as PDFKit numbers them: bits 0 to 7.)
+                var everything = PDFAccessPermissions.allowsLowQualityPrinting.rawValue
+                everything |= PDFAccessPermissions.allowsHighQualityPrinting.rawValue
+                everything |= PDFAccessPermissions.allowsDocumentChanges.rawValue
+                everything |= PDFAccessPermissions.allowsDocumentAssembly.rawValue
+                everything |= PDFAccessPermissions.allowsContentCopying.rawValue
+                everything |= PDFAccessPermissions.allowsContentAccessibility.rawValue
+                everything |= PDFAccessPermissions.allowsCommenting.rawValue
+                everything |= PDFAccessPermissions.allowsFormFieldEntry.rawValue
                 let options: [PDFDocumentWriteOption: Any] = [
                     .ownerPasswordOption: UUID().uuidString,
-                    .accessPermissionsOption: NSNumber(value: everything.rawValue),
+                    .accessPermissionsOption: NSNumber(value: everything),
                 ]
                 let pages = pdf.pageCount
                 guard pages > 0, pdf.write(to: open, withOptions: options),
