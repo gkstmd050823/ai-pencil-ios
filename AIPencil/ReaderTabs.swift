@@ -21,18 +21,23 @@ struct ReaderHost: View {
     }
 
     var body: some View {
+        // The tabs are handed to the reading screen, which puts them in the one bar at its top beside its
+        // own buttons. (The system's bar, with the title the tab already says, is not shown.)
+        let strip = TabStrip(open: open, current: doc?.id, onPick: pick, onClose: close) {
+            dismiss()
+        }
         VStack(spacing: 0) {
-            TabStrip(open: open, current: doc?.id, onPick: pick, onClose: close) {
-                dismiss()
-            }
             if let doc {
                 // (Each document gets a reading screen of its own, made afresh when the tab changes.)
-                ReaderView(doc: doc)
+                ReaderView(doc: doc, lead: AnyView(strip))
                     .id(doc.id)
             } else {
+                strip
+                    .background(Tone.bar.ignoresSafeArea(edges: .top))
                 Color(uiColor: .secondarySystemBackground)
             }
         }
+        .toolbar(.hidden, for: .navigationBar)
         .task {
             library.openTab(first.id)
         }
@@ -66,8 +71,12 @@ struct ReaderHost: View {
     }
 }
 
-/// The row of tabs.
-private struct TabStrip: View {
+/// The bar along the top of the reading screen: the way back to the shelf, the open documents as tabs,
+/// and a plus for opening another. The tab of the document on show stands up from the bar in the colour
+/// of what is under it, with how many pages it has; the others lie flat with a line between them.
+/// (Until 0.14.13 the tabs were a row of small words, 36 points tall, under the system's own bar with the
+/// title in it: three dark bands in all, the tabs "narrow and hard to tell apart".)
+struct TabStrip: View {
     let open: [Doc]
     let current: UUID?
     let onPick: (UUID) -> Void
@@ -76,74 +85,82 @@ private struct TabStrip: View {
 
     var body: some View {
         HStack(spacing: 0) {
+            Button(action: onAdd) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 19, weight: .semibold))
+                    .frame(width: 44, height: 44)
+            }
+            .accessibilityLabel("서재로")
             ScrollViewReader { reader in
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 4) {
+                    HStack(alignment: .bottom, spacing: 0) {
                         ForEach(open) { doc in
                             tab(doc)
                                 .id(doc.id)
                         }
                     }
-                    .padding(.horizontal, 10)
+                    .frame(height: 50, alignment: .bottom)
                 }
                 .onChange(of: current) {
                     if let current { withAnimation { reader.scrollTo(current, anchor: .center) } }
                 }
             }
             Button(action: onAdd) {
-                HStack(spacing: 4) {
-                    Text("탭 추가")
-                        .font(.footnote)
-                    Image(systemName: "plus")
-                        .font(.footnote.weight(.semibold))
-                }
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 12)
-                .frame(height: 36)
+                Image(systemName: "plus")
+                    .font(.system(size: 18, weight: .medium))
+                    .frame(width: 44, height: 44)
             }
             .accessibilityLabel("탭 추가")
         }
-        .frame(height: 36)
-        .background(Color(uiColor: .systemBackground))
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Color.primary.opacity(0.08))
-                .frame(height: 0.5)
-        }
+        .foregroundStyle(.primary)
+        .frame(height: 50)
     }
 
     private func tab(_ doc: Doc) -> some View {
         let selected = doc.id == current
-        return HStack(spacing: 2) {
+        return HStack(spacing: 6) {
+            Button {
+                onPick(doc.id)
+            } label: {
+                HStack(spacing: 8) {
+                    Text(doc.title)
+                        .font(.system(size: 14, weight: selected ? .semibold : .regular))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if selected {
+                        Text("\(doc.pageCount)쪽")
+                            .font(.system(size: 11))
+                            .opacity(0.6)
+                    }
+                }
+                .frame(minWidth: 70, maxWidth: 200, alignment: .leading)
+                .frame(height: 42)
+                .contentShape(Rectangle())
+            }
+            .accessibilityLabel("\(doc.title) 탭")
             Button {
                 onClose(doc.id)
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(selected ? Color.primary.opacity(0.7) : Color.secondary)
-                    .frame(width: 24, height: 28)
+                    .font(.system(size: 11, weight: .semibold))
+                    .opacity(0.55)
+                    .frame(width: 30, height: 42)
+                    .contentShape(Rectangle())
             }
             .accessibilityLabel("\(doc.title) 탭 닫기")
-            Button {
-                onPick(doc.id)
-            } label: {
-                Text(doc.title)
-                    .font(.footnote.weight(selected ? .semibold : .regular))
-                    .foregroundStyle(selected ? Color.primary : Color.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: 190)
-                    .padding(.trailing, 10)
-                    .frame(height: 28)
-            }
-            .accessibilityLabel("\(doc.title) 탭")
         }
-        .padding(.leading, 4)
-        .overlay(alignment: .bottom) {
+        .padding(.leading, 14)
+        .padding(.trailing, 4)
+        .foregroundStyle(selected ? Color.primary : Color.secondary)
+        .background(
+            selected ? Tone.tabOn : Color.clear,
+            in: UnevenRoundedRectangle(topLeadingRadius: 11, bottomLeadingRadius: 0, bottomTrailingRadius: 0, topTrailingRadius: 11, style: .continuous)
+        )
+        .overlay(alignment: .trailing) {
+            // (A line between two tabs that lie flat.)
             Rectangle()
-                .fill(selected ? Color.primary : Color.clear)
-                .frame(height: 2)
-                .padding(.horizontal, 6)
+                .fill(selected ? Color.clear : Color.primary.opacity(0.16))
+                .frame(width: 1, height: 22)
         }
     }
 }

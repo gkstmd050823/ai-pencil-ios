@@ -27,6 +27,11 @@ private struct NavigatorRequest: Identifiable {
 /// beside or below them the explanation of a mark when one is open.
 struct ReaderView: View {
     let doc: Doc
+    /// What stands at the left of the bar at the top: the way back and the tabs.
+    var lead = AnyView(EmptyView())
+    /// The tool bar floats over the pages, at their top or (dragged down by its handle) at their bottom.
+    @AppStorage("toolBarLow") private var toolBarLow = false
+    @State private var barDrag: CGFloat = 0
     @EnvironmentObject private var library: Library
     @Environment(\.colorScheme) private var scheme
     @AppStorage("fingerDraws") private var fingerDraws = false
@@ -75,8 +80,9 @@ struct ReaderView: View {
     @State private var dragStart: Double?
     @State private var ready = false
 
-    init(doc: Doc) {
+    init(doc: Doc, lead: AnyView = AnyView(EmptyView())) {
         self.doc = doc
+        self.lead = lead
         // Where pages were just put in; or the page the build server asked for; or the page it was last read at.
         let asked = UserDefaults.standard.object(forKey: "demoPage") != nil ? max(0, UserDefaults.standard.integer(forKey: "demoPage")) : nil
         let start = Library.startPage(for: doc.id) ?? asked ?? Library.lastPage(for: doc.id) ?? 0
@@ -103,6 +109,8 @@ struct ReaderView: View {
     }
 
     var body: some View {
+        VStack(spacing: 0) {
+        topBar
         GeometryReader { geometry in
             // On a wide screen the explanation stands beside the pages; otherwise it lies below them.
             // ("-demoWide YES" lets the build server, whose simulator stands upright, see the wide form.)
@@ -123,44 +131,10 @@ struct ReaderView: View {
             .frame(width: geometry.size.width, height: geometry.size.height)
             .background(backdrop)
         }
+        }
         .navigationTitle(doc.title)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button {
-                    showingQuestions = true
-                } label: {
-                    Label("질문 목록", systemImage: "text.bubble")
-                }
-                Button {
-                    readOnly.toggle()
-                    Diagnostics.shared.step(readOnly ? "reading only" : "reading and writing")
-                } label: {
-                    Label(readOnly ? "읽기 전용 끄기" : "읽기 전용", systemImage: readOnly ? "eye.fill" : "eye")
-                }
-                if !readOnly {
-                    Button {
-                        mathDraft = MathDraft()
-                    } label: {
-                        Label("수식 넣기", systemImage: "sum")
-                    }
-                    Button {
-                        fingerDraws.toggle()
-                    } label: {
-                        Label(
-                            fingerDraws ? "손가락 필기 끄기" : "손가락 필기 켜기",
-                            systemImage: fingerDraws ? "hand.draw.fill" : "hand.draw"
-                        )
-                    }
-                }
-                Button {
-                    openNavigator(.search)
-                } label: {
-                    Label("문서 안에서 찾기", systemImage: "magnifyingglass")
-                }
-                menu
-            }
-        }
+        .toolbar(.hidden, for: .navigationBar)
         .sheet(item: $mathDraft) { draft in
             MathEditorView(
                 initial: draft.editing?.latex ?? draft.preset,
@@ -275,6 +249,97 @@ struct ReaderView: View {
         .onAppear(perform: setUp)
     }
 
+    /// The one bar at the top: the tabs, and what can be done with the document on show.
+    private var topBar: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                lead
+                barButton("text.bubble", "질문 목록") {
+                    showingQuestions = true
+                }
+                barButton(readOnly ? "eye.fill" : "eye", readOnly ? "읽기 전용 끄기" : "읽기 전용") {
+                    readOnly.toggle()
+                    Diagnostics.shared.step(readOnly ? "reading only" : "reading and writing")
+                }
+                if !readOnly {
+                    barButton("sum", "수식 넣기") {
+                        mathDraft = MathDraft()
+                    }
+                    barButton(fingerDraws ? "hand.draw.fill" : "hand.draw", fingerDraws ? "손가락 필기 끄기" : "손가락 필기 켜기") {
+                        fingerDraws.toggle()
+                    }
+                }
+                barButton("magnifyingglass", "문서 안에서 찾기") {
+                    openNavigator(.search)
+                }
+                menu
+                    .labelStyle(.iconOnly)
+                    .font(.system(size: 19))
+                    .frame(width: 42, height: 44)
+                    .padding(.trailing, 6)
+            }
+            .foregroundStyle(.primary)
+            .frame(height: 50)
+            // (The tab on show stands on this line, which is of its colour.)
+            Rectangle()
+                .fill(Tone.tabOn)
+                .frame(height: 3)
+        }
+        .background(Tone.bar.ignoresSafeArea(edges: .top))
+    }
+
+    private func barButton(_ symbol: String, _ label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 19))
+                .frame(width: 42, height: 44)
+        }
+        .accessibilityLabel(label)
+    }
+
+    /// The tool bar (or, reading only, a word on what the pen does), afloat over the pages.
+    @ViewBuilder
+    private func floatingBar(roomy: Bool) -> some View {
+        if readOnly {
+            // Reading only: no tools, and a word on what the pen and the fingers do.
+            HStack(spacing: 10) {
+                Image(systemName: "eye")
+                    .foregroundStyle(Color(uiColor: InkChoice.markColor))
+                Text("읽기 전용 · 손가락은 넘기기만, 펜으로 동그라미를 치면 설명해 줘요")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Button("끄기") {
+                    readOnly = false
+                }
+                .font(.footnote.weight(.semibold))
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 42)
+            .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+        } else {
+            ToolBar(
+                choice: $choice, showingOptions: $showingOptions, darkPaper: showsDark, roomy: roomy,
+                canUndo: controller.canUndo, canRedo: controller.canRedo, questions: answered,
+                onPick: pick, onUndo: controller.undo, onRedo: controller.redo,
+                onQuestions: { showingQuestions = true }, onClearPage: controller.clearPage,
+                onGrip: { moved in barDrag = moved },
+                onGripEnd: { moved in
+                    // Dragged far enough down, it goes to the bottom of the pages; far enough up, back.
+                    if !toolBarLow, moved > 110 { toolBarLow = true }
+                    if toolBarLow, moved < -110 { toolBarLow = false }
+                    withAnimation(.snappy(duration: 0.22)) { barDrag = 0 }
+                    Diagnostics.shared.step(toolBarLow ? "tool bar at the bottom" : "tool bar at the top")
+                }
+            )
+            // (White on black whatever the light: the bar is the one black thing on the screen.)
+            .environment(\.colorScheme, .dark)
+        }
+    }
+
     private var menu: some View {
         Menu {
             Picker("보기 방식", selection: $layoutMode) {
@@ -336,43 +401,10 @@ struct ReaderView: View {
         }
     }
 
-    /// The tool bar has a strip of its own above the pages, so that it never covers the top of a page.
+    /// The pages, with the tool bar afloat over them. (Until 0.14.13 the bar had a strip of its own above
+    /// the pages. Now it can cover the top of a page; dragged down by its handle it goes to the bottom.)
     private func pages(roomy: Bool) -> some View {
         VStack(spacing: 0) {
-            Group {
-                if readOnly {
-                    // Reading only: no tools, and a word on what the pen and the fingers do.
-                    HStack(spacing: 10) {
-                        Image(systemName: "eye")
-                            .foregroundStyle(Color(uiColor: InkChoice.markColor))
-                        Text("읽기 전용 · 손가락은 넘기기만, 펜으로 동그라미를 치면 설명해 줘요")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.8)
-                        Button("끄기") {
-                            readOnly = false
-                        }
-                        .font(.footnote.weight(.semibold))
-                    }
-                    .padding(.horizontal, 16)
-                    .frame(height: 42)
-                    .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
-                } else {
-                    ToolBar(
-                        choice: $choice, showingOptions: $showingOptions, darkPaper: showsDark, roomy: roomy,
-                        canUndo: controller.canUndo, canRedo: controller.canRedo, questions: answered,
-                        onPick: pick, onUndo: controller.undo, onRedo: controller.redo,
-                        onQuestions: { showingQuestions = true }, onClearPage: controller.clearPage
-                    )
-                }
-            }
-            .padding(.vertical, 7)
-            .frame(maxWidth: .infinity)
-            .background(backdrop)
-            // Above the pages, so that the bar's shadow falls on them.
-            .zIndex(1)
             PDFInkView(
                 url: library.pdfURL(for: doc.id),
                 store: DrawingStore(folder: folder),
@@ -391,9 +423,15 @@ struct ReaderView: View {
             // The settings of the tool in hand, as a card under the tool bar. (Until 0.9.0 this was a
             // popover, a window of its own that sizes itself to what is in it; the app's crashes on an
             // iPad came when the pen was touched to open it.) A touch anywhere else puts it away.
-            .overlay(alignment: .top) {
+            .overlay(alignment: toolBarLow ? .bottom : .top) {
+                floatingBar(roomy: roomy)
+                    .offset(y: barDrag)
+                    .padding(.top, toolBarLow ? 0 : 10)
+                    .padding(.bottom, toolBarLow ? 54 : 0)
+            }
+            .overlay(alignment: toolBarLow ? .bottom : .top) {
                 if showingOptions, !readOnly {
-                    ZStack(alignment: .top) {
+                    ZStack(alignment: toolBarLow ? .bottom : .top) {
                         Color.black.opacity(0.001)
                             .contentShape(Rectangle())
                             .onTapGesture { showingOptions = false }
@@ -401,7 +439,9 @@ struct ReaderView: View {
                             showingOptions = false
                             controller.clearPage()
                         }
-                        .padding(.top, 4)
+                        // (Beside the bar: under it at the top, over it at the bottom.)
+                        .padding(.top, toolBarLow ? 0 : 74)
+                        .padding(.bottom, toolBarLow ? 118 : 0)
                     }
                 }
             }
@@ -411,7 +451,7 @@ struct ReaderView: View {
                         showingSettings = true
                     }
                     .padding(.horizontal, 16)
-                    .padding(.bottom, 54)
+                    .padding(.bottom, toolBarLow ? 122 : 54)
                 }
             }
             .overlay(alignment: .top) {
@@ -421,7 +461,7 @@ struct ReaderView: View {
                         .padding(.horizontal, 16)
                         .padding(.vertical, 9)
                         .background(.regularMaterial, in: Capsule())
-                        .padding(.top, 12)
+                        .padding(.top, toolBarLow ? 12 : 78)
                 }
             }
             .overlay(alignment: .bottom) {
@@ -857,6 +897,10 @@ private struct ToolBar: View {
     var onRedo: () -> Void
     var onQuestions: () -> Void
     var onClearPage: () -> Void
+    /// The handle at the bar's left end is being dragged this far down (up, when less than nought), and
+    /// has been let go there.
+    var onGrip: (CGFloat) -> Void = { _ in }
+    var onGripEnd: (CGFloat) -> Void = { _ in }
 
     /// The width kept for the tool's own part.
     private static let room: CGFloat = 304
@@ -877,6 +921,7 @@ private struct ToolBar: View {
 
     var body: some View {
         HStack(spacing: 1) {
+            grip
             step("arrow.uturn.backward", "실행 취소", enabled: canUndo, action: onUndo)
             step("arrow.uturn.forward", "다시 실행", enabled: canRedo, action: onRedo)
             rule
@@ -911,11 +956,28 @@ private struct ToolBar: View {
                     .frame(width: Self.room, height: 42)
             }
         }
-        .padding(.horizontal, 8)
+        .padding(.leading, 2)
+        .padding(.trailing, 8)
         .padding(.vertical, 5)
-        .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color.primary.opacity(0.10), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.07), radius: 6, y: 2)
+        .background(Tone.pill, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color.white.opacity(0.10), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.24), radius: 10, y: 4)
+    }
+
+    /// The handle the bar is dragged by, to the top of the pages or to their bottom.
+    private var grip: some View {
+        Image(systemName: "line.3.horizontal")
+            .font(.system(size: 13, weight: .semibold))
+            .rotationEffect(.degrees(90))
+            .foregroundStyle(Color.white.opacity(0.38))
+            .frame(width: 24, height: 42)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 4, coordinateSpace: .global)
+                    .onChanged { value in onGrip(value.translation.height) }
+                    .onEnded { value in onGripEnd(value.translation.height) }
+            )
+            .accessibilityLabel("도구 막대 옮기기")
     }
 
     private var rule: some View {

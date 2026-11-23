@@ -16,10 +16,7 @@ struct LibraryView: View {
 
     var body: some View {
         NavigationStack(path: $path) {
-            Shelf(folder: nil, path: $path)
-                .navigationDestination(for: Folder.self) { folder in
-                    Shelf(folder: folder, path: $path)
-                }
+            Shelf(path: $path)
                 .navigationDestination(for: Doc.self) { doc in
                     ReaderHost(first: doc)
                 }
@@ -256,12 +253,48 @@ enum LibrarySort: String, CaseIterable, Identifiable {
     }
 }
 
-/// One level of the shelf: the top, with its folders, or the inside of a folder.
+/// The colours of the app's own surfaces: paper tones in the light, a step or two up from black in the dark.
+/// Black (in the dark, its opposite) is kept for one thing at a time: the place chosen, the button that adds.
+enum Tone {
+    static func shade(_ light: UInt32, _ dark: UInt32) -> Color {
+        Color(uiColor: UIColor { traits in
+            let hex = traits.userInterfaceStyle == .dark ? dark : light
+            return UIColor(
+                red: CGFloat((hex >> 16) & 0xFF) / 255, green: CGFloat((hex >> 8) & 0xFF) / 255,
+                blue: CGFloat(hex & 0xFF) / 255, alpha: 1
+            )
+        })
+    }
+
+    static let page = shade(0xECEAE5, 0x1C1C1E)
+    static let side = shade(0xE2E0DA, 0x242426)
+    static let card = shade(0xFFFFFF, 0x2C2C2F)
+    static let line = shade(0xD6D4CD, 0x3A3A3E)
+    static let chip = shade(0xDEDCD6, 0x38383C)
+    static let ink = shade(0x17181A, 0xF1F1EF)
+    static let onInk = shade(0xFFFFFF, 0x17181A)
+    /// The bar the reading screen's tabs stand on, and the tab of the document on show.
+    static let bar = shade(0xDEDCD6, 0x2C2C2F)
+    static let tabOn = shade(0xF2F2F7, 0x4A4A4F)
+    /// The tool bar afloat over the pages: black, whatever the light.
+    static let pill = Color(red: 0.055, green: 0.055, blue: 0.063)
+}
+
+/// What the shelf is showing: every document, a sorting of them, or what is in one folder.
+private enum ShelfPlace: Hashable {
+    case all, recent, asked
+    case folder(UUID)
+}
+
+/// The shelf: a list of places down its left side (every document, the ones read lately, the ones asked
+/// about, each folder), and beside it the documents of the place chosen, their first pages large.
+/// (Until 0.14.13 the folders were cards among the documents and were gone into like a document; they
+/// were awkward to get to.)
 private struct Shelf: View {
-    let folder: Folder?
     @Binding var path: NavigationPath
     @EnvironmentObject private var library: Library
     @AppStorage("librarySort") private var sort = LibrarySort.recent
+    @State private var place = ShelfPlace.all
     @State private var search = ""
     @State private var importing = false
     @State private var showingSettings = false
@@ -282,89 +315,74 @@ private struct Shelf: View {
     @State private var deletingPicked = false
     /// How many files are still being copied in.
     @State private var bringingIn = 0
+    /// How many questions each document has, counted when the shelf comes up.
+    @State private var asked: [UUID: Int] = [:]
+    @State private var askedStamp = 0
 
-    private let columns = [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 22)]
+    /// The folder being shown, when it is a folder that is.
+    private var folder: Folder? {
+        guard case .folder(let id) = place else { return nil }
+        return library.folders.first { $0.id == id }
+    }
 
     private var searching: Bool { !search.trimmingCharacters(in: .whitespaces).isEmpty }
-    /// Looking for a document looks in every folder; otherwise only what is on this level shows.
-    private var docs: [Doc] { library.documents(in: folder?.id, sort: sort, matching: search) }
-    private var folders: [Folder] { folder == nil && !searching ? library.folders : [] }
+
+    private var docs: [Doc] {
+        let wanted = search.trimmingCharacters(in: .whitespaces)
+        var found: [Doc]
+        switch place {
+        case .all: found = library.docs
+        case .recent: found = library.docs.filter { $0.openedAt != nil }
+        case .asked: found = library.docs.filter { (asked[$0.id] ?? 0) > 0 }
+        case .folder(let id): found = library.docs.filter { $0.folder == id }
+        }
+        if !wanted.isEmpty {
+            found = found.filter { $0.title.localizedCaseInsensitiveContains(wanted) }
+        }
+        let order = place == .recent ? LibrarySort.recent : sort
+        switch order {
+        case .recent: return found.sorted { ($0.openedAt ?? $0.addedAt) > ($1.openedAt ?? $1.addedAt) }
+        case .name: return found.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        case .added: return found.sorted { $0.addedAt > $1.addedAt }
+        }
+    }
+
+    private var title: String {
+        switch place {
+        case .all: return "모든 문서"
+        case .recent: return "최근 본 문서"
+        case .asked: return "질문한 문서"
+        case .folder: return folder?.name ?? "폴더"
+        }
+    }
+
+    /// The documents last read, for the row at the top: only where every document is shown.
+    private var lately: [Doc] {
+        guard place == .all, !searching, !selecting else { return [] }
+        let read = library.docs.filter { $0.openedAt != nil }
+        return Array(read.sorted { ($0.openedAt ?? $0.addedAt) > ($1.openedAt ?? $1.addedAt) }.prefix(3))
+    }
 
     var body: some View {
-        Group {
-            if docs.isEmpty && folders.isEmpty {
-                emptyState
-            } else {
-                grid
-            }
-        }
-        .navigationTitle(folder?.name ?? "문서")
-        .searchable(text: $search, prompt: "문서 찾기")
-        .toolbar {
-            if folder == nil {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button {
-                        showingSettings = true
-                    } label: {
-                        Label("설정", systemImage: "gearshape")
-                    }
+        GeometryReader { space in
+            let narrow = space.size.width < 640
+            HStack(spacing: 0) {
+                if !narrow {
+                    sidebar
+                        .frame(width: space.size.width < 900 ? 232 : 280)
                 }
-            }
-            if selecting {
-                ToolbarItemGroup(placement: .primaryAction) {
-                    Button(picked.count == docs.count ? "선택 해제" : "전체 선택") {
-                        picked = picked.count == docs.count ? [] : Set(docs.map(\.id))
+                VStack(spacing: 0) {
+                    header(narrow: narrow)
+                    if docs.isEmpty && lately.isEmpty {
+                        emptyState
+                    } else {
+                        grid
                     }
-                    Button("완료") {
-                        selecting = false
-                        picked = []
-                    }
-                    .fontWeight(.semibold)
-                }
-            }
-            ToolbarItemGroup(placement: .primaryAction) {
-                if !selecting, !docs.isEmpty {
-                    Button {
-                        selecting = true
-                        picked = []
-                        Diagnostics.shared.step("picking documents")
-                    } label: {
-                        Label("여러 개 선택", systemImage: "checkmark.circle")
-                    }
-                }
-                Menu {
-                    Picker("정렬", selection: $sort) {
-                        ForEach(LibrarySort.allCases) { item in
-                            Text(item.label).tag(item)
-                        }
-                    }
-                } label: {
-                    Label("정렬", systemImage: "arrow.up.arrow.down")
-                }
-                Menu {
-                    Button {
-                        importing = true
-                    } label: {
-                        Label("PDF 가져오기", systemImage: "square.and.arrow.down")
-                    }
-                    Button {
-                        choosingPaper = true
-                    } label: {
-                        Label("새 노트 만들기", systemImage: "doc.badge.plus")
-                    }
-                    if folder == nil {
-                        Button {
-                            newName = ""
-                            makingFolder = true
-                        } label: {
-                            Label("새 폴더", systemImage: "folder.badge.plus")
-                        }
-                    }
-                } label: {
-                    Label("추가", systemImage: "plus")
                 }
             }
         }
+        .background(Tone.page.ignoresSafeArea())
+        .toolbar(.hidden, for: .navigationBar)
         .fileImporter(isPresented: $importing, allowedContentTypes: [.pdf], allowsMultipleSelection: true) { result in
             switch result {
             case .success(let urls):
@@ -417,7 +435,8 @@ private struct Shelf: View {
             TextField("폴더 이름", text: $newName)
             Button("취소", role: .cancel) {}
             Button("만들기") {
-                library.createFolder(named: newName)
+                let made = library.createFolder(named: newName)
+                place = .folder(made.id)
             }
         }
         .confirmationDialog(
@@ -433,7 +452,10 @@ private struct Shelf: View {
             isPresented: Binding(get: { deletingFolder != nil }, set: { if !$0 { deletingFolder = nil } }), titleVisibility: .visible
         ) {
             Button("폴더 삭제", role: .destructive) {
-                if let item = deletingFolder { library.deleteFolder(item) }
+                if let item = deletingFolder {
+                    if place == .folder(item.id) { place = .all }
+                    library.deleteFolder(item)
+                }
             }
         }
         .alert("하지 못했어요", isPresented: Binding(get: { errorText != nil }, set: { if !$0 { errorText = nil } })) {
@@ -443,60 +465,298 @@ private struct Shelf: View {
         }
         .onAppear {
             // "-demoSettings" shows the settings for the build server's picture.
-            if folder == nil, !ranDemo, ProcessInfo.processInfo.arguments.contains("-demoSettings") {
+            if !ranDemo, ProcessInfo.processInfo.arguments.contains("-demoSettings") {
                 showingSettings = true
             }
-            if folder == nil, !ranDemo, ProcessInfo.processInfo.arguments.contains("-demoPapers") {
+            if !ranDemo, ProcessInfo.processInfo.arguments.contains("-demoPapers") {
                 choosingPaper = true
             }
-            if folder == nil, !ranDemo, ProcessInfo.processInfo.arguments.contains("-demoMerge"), library.docs.count > 1 {
+            if !ranDemo, ProcessInfo.processInfo.arguments.contains("-demoMerge"), library.docs.count > 1 {
                 // (For the build server: the two newest documents put together.)
                 merge(Array(library.docs.prefix(2)))
             }
             ranDemo = true
             library.shelfFolder = folder?.id
+            askedStamp += 1
             Diagnostics.shared.step("shelf shown, \(library.docs.count) documents")
+        }
+        .onChange(of: place) {
+            library.shelfFolder = folder?.id
+            selecting = false
+            picked = []
+        }
+        .task(id: askedStamp) {
+            // (A look into each document's folder for the files its questions are kept in; nothing is read.)
+            let folders = library.docs.map { ($0.id, library.folder(for: $0.id)) }
+            let counted = await Task.detached(priority: .utility) { () -> [UUID: Int] in
+                var out: [UUID: Int] = [:]
+                for (id, url) in folders {
+                    let names = (try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? []
+                    let count = names.filter { $0.hasPrefix("qa-") && $0.hasSuffix(".json") && !$0.hasSuffix(".messages.json") }.count
+                    if count > 0 { out[id] = count }
+                }
+                return out
+            }.value
+            asked = counted
         }
     }
 
-    /// The documents opened last, from any folder: the ones most likely to be wanted again.
-    private var recent: [Doc] {
-        guard folder == nil, !searching else { return [] }
-        return Array(library.docs.filter { $0.openedAt != nil }.sorted { ($0.openedAt ?? $0.addedAt) > ($1.openedAt ?? $1.addedAt) }.prefix(8))
+    // MARK: the list of places
+
+    private var sidebar: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text("AI 펜슬")
+                        .font(.system(size: 20, weight: .bold))
+                    Spacer()
+                    Button {
+                        showingSettings = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                            .font(.system(size: 19))
+                            .frame(width: 40, height: 40)
+                    }
+                    .accessibilityLabel("설정")
+                }
+                .foregroundStyle(.primary)
+                .padding(.leading, 12)
+                .frame(height: 56)
+
+                sideRow(.all, "doc.on.doc", "모든 문서", count: library.docs.count)
+                    // (A document dragged here is taken out of its folder.)
+                    .dropDestination(for: String.self) { dragged, _ in
+                        drop(dragged, into: nil)
+                    }
+                sideRow(.recent, "clock", "최근 본 문서", count: nil)
+                sideRow(.asked, "pencil.tip.crop.circle", "질문한 문서", count: asked.isEmpty ? nil : asked.count)
+
+                Text("폴더")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 18)
+                    .padding(.bottom, 6)
+                ForEach(library.folders) { item in
+                    sideRow(.folder(item.id), "folder", item.name, count: count(in: item))
+                        // A document dragged onto a folder goes into it.
+                        .dropDestination(for: String.self) { dragged, _ in
+                            drop(dragged, into: item.id)
+                        }
+                        .contextMenu {
+                            Button {
+                                newName = item.name
+                                renamingFolder = item
+                            } label: {
+                                Label("이름 바꾸기", systemImage: "pencil")
+                            }
+                            Button(role: .destructive) {
+                                deletingFolder = item
+                            } label: {
+                                Label("폴더 삭제", systemImage: "trash")
+                            }
+                        }
+                }
+                Button {
+                    newName = ""
+                    makingFolder = true
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 17))
+                            .frame(width: 24)
+                        Text("새 폴더")
+                            .font(.system(size: 15))
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 12)
+                    .frame(height: 42)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+        }
+        .background(Tone.side.ignoresSafeArea())
+        .overlay(alignment: .trailing) {
+            Rectangle()
+                .fill(Tone.line)
+                .frame(width: 1)
+                .ignoresSafeArea()
+        }
     }
+
+    private func sideRow(_ spot: ShelfPlace, _ symbol: String, _ name: String, count: Int?) -> some View {
+        let chosen = place == spot
+        return Button {
+            place = spot
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: symbol)
+                    .font(.system(size: 17))
+                    .frame(width: 24)
+                Text(name)
+                    .font(.system(size: 15, weight: chosen ? .semibold : .regular))
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if let count {
+                    Text("\(count)")
+                        .font(.system(size: 13).monospacedDigit())
+                        .opacity(0.7)
+                }
+            }
+            .foregroundStyle(chosen ? Tone.onInk : Color.primary)
+            .padding(.horizontal, 12)
+            .frame(height: 42)
+            .background(chosen ? Tone.ink : Color.clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: the top of the documents
+
+    private func header(narrow: Bool) -> some View {
+        HStack(spacing: 10) {
+            if narrow {
+                // No room for the list: the places are a menu.
+                Menu {
+                    Button("모든 문서") { place = .all }
+                    Button("최근 본 문서") { place = .recent }
+                    Button("질문한 문서") { place = .asked }
+                    ForEach(library.folders) { item in
+                        Button {
+                            place = .folder(item.id)
+                        } label: {
+                            Label(item.name, systemImage: "folder")
+                        }
+                    }
+                    Divider()
+                    Button("설정") { showingSettings = true }
+                } label: {
+                    Image(systemName: "sidebar.left")
+                        .font(.system(size: 19))
+                        .frame(width: 40, height: 40)
+                }
+            }
+            Text(title)
+                .font(.system(size: narrow ? 22 : 30, weight: .bold))
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            if selecting {
+                Button(picked.count == docs.count ? "선택 해제" : "전체 선택") {
+                    picked = picked.count == docs.count ? [] : Set(docs.map(\.id))
+                }
+                Button("완료") {
+                    selecting = false
+                    picked = []
+                }
+                .fontWeight(.semibold)
+            } else {
+                searchField
+                Menu {
+                    Picker("정렬", selection: $sort) {
+                        ForEach(LibrarySort.allCases) { item in
+                            Text(item.label).tag(item)
+                        }
+                    }
+                } label: {
+                    Image(systemName: "arrow.up.arrow.down")
+                        .font(.system(size: 18))
+                        .frame(width: 40, height: 40)
+                }
+                .accessibilityLabel("정렬")
+                if !docs.isEmpty {
+                    Button {
+                        selecting = true
+                        picked = []
+                        Diagnostics.shared.step("picking documents")
+                    } label: {
+                        Image(systemName: "checkmark.circle")
+                            .font(.system(size: 19))
+                            .frame(width: 40, height: 40)
+                    }
+                    .accessibilityLabel("여러 개 선택")
+                }
+                addMenu
+            }
+        }
+        .foregroundStyle(.primary)
+        .padding(.horizontal, narrow ? 16 : 36)
+        .frame(height: 64)
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("문서 찾기", text: $search)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            if !search.isEmpty {
+                Button {
+                    search = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityLabel("찾는 말 지우기")
+            }
+        }
+        .font(.system(size: 15))
+        .padding(.horizontal, 12)
+        .frame(height: 40)
+        .frame(maxWidth: 280)
+        .background(Tone.chip, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private var addMenu: some View {
+        Menu {
+            Button {
+                importing = true
+            } label: {
+                Label("PDF 가져오기", systemImage: "square.and.arrow.down")
+            }
+            Button {
+                choosingPaper = true
+            } label: {
+                Label("새 노트 만들기", systemImage: "doc.badge.plus")
+            }
+            Button {
+                newName = ""
+                makingFolder = true
+            } label: {
+                Label("새 폴더", systemImage: "folder.badge.plus")
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "plus")
+                    .font(.system(size: 15, weight: .bold))
+                Text("추가")
+                    .font(.system(size: 15, weight: .semibold))
+            }
+            .foregroundStyle(Tone.onInk)
+            .padding(.horizontal, 14)
+            .frame(height: 40)
+            .background(Tone.ink, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .accessibilityLabel("추가")
+    }
+
+    // MARK: the documents
 
     private var grid: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
-                if !searching {
-                    quickActions
-                }
-                if !folders.isEmpty {
+                if !lately.isEmpty {
                     VStack(alignment: .leading, spacing: 14) {
-                        heading("폴더", count: folders.count)
-                        ShelfGrid(rowSpacing: 22) {
-                            ForEach(folders) { item in
-                                NavigationLink(value: item) {
-                                    FolderCard(folder: item, count: count(in: item))
+                        heading("이어서 보기", count: nil)
+                        HStack(spacing: 16) {
+                            ForEach(lately) { doc in
+                                NavigationLink(value: doc) {
+                                    RecentCard(doc: doc)
                                 }
                                 .buttonStyle(.plain)
-                                // A document dragged onto a folder goes into it.
-                                .dropDestination(for: String.self) { dragged, _ in
-                                    drop(dragged, into: item.id)
-                                }
-                                .contextMenu {
-                                    Button {
-                                        newName = item.name
-                                        renamingFolder = item
-                                    } label: {
-                                        Label("이름 바꾸기", systemImage: "pencil")
-                                    }
-                                    Button(role: .destructive) {
-                                        deletingFolder = item
-                                    } label: {
-                                        Label("폴더 삭제", systemImage: "trash")
-                                    }
-                                }
                             }
                         }
                     }
@@ -504,7 +764,7 @@ private struct Shelf: View {
                 if !docs.isEmpty {
                     VStack(alignment: .leading, spacing: 14) {
                         heading(searching ? "찾은 문서" : "문서", count: docs.count)
-                        ShelfGrid(rowSpacing: 24) {
+                        ShelfGrid(minimum: 168, maximum: 230, spacing: 26, rowSpacing: 26) {
                             ForEach(docs) { doc in
                                 docCell(doc)
                             }
@@ -512,12 +772,11 @@ private struct Shelf: View {
                     }
                 }
             }
-            .padding(.horizontal, 26)
-            .padding(.top, 14)
+            .padding(.horizontal, 36)
+            .padding(.top, 10)
             .padding(.bottom, 40)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Color(uiColor: .systemGroupedBackground))
         .safeAreaInset(edge: .bottom) {
             if selecting { pickedBar }
         }
@@ -544,12 +803,12 @@ private struct Shelf: View {
                     picked.insert(doc.id)
                 }
             } label: {
-                DocCard(doc: doc, folderName: folderName(for: doc), mark: picked.contains(doc.id))
+                DocCard(doc: doc, folderName: folderName(for: doc), mark: picked.contains(doc.id), asked: asked[doc.id] ?? 0)
             }
             .buttonStyle(.plain)
         } else {
             NavigationLink(value: doc) {
-                DocCard(doc: doc, folderName: folderName(for: doc))
+                DocCard(doc: doc, folderName: folderName(for: doc), asked: asked[doc.id] ?? 0)
             }
             .buttonStyle(.plain)
             .contextMenu { docMenu(doc) }
@@ -643,7 +902,7 @@ private struct Shelf: View {
             QuickAction(symbol: "arrow.down.doc", title: "PDF 가져오기") {
                 importing = true
             }
-            if folder == nil {
+            if place == .all {
                 QuickAction(symbol: "folder.badge.plus", title: "새 폴더") {
                     newName = ""
                     makingFolder = true
@@ -673,9 +932,10 @@ private struct Shelf: View {
         library.docs.filter { $0.folder == item.id }.count
     }
 
-    /// The folder a document found by searching lives in, to show under its name.
+    /// The folder a document lives in, to show under its name wherever documents of every folder are shown.
     private func folderName(for doc: Doc) -> String? {
-        guard searching, let id = doc.folder else { return nil }
+        if case .folder = place { return nil }
+        guard let id = doc.folder else { return nil }
         return library.folders.first { $0.id == id }?.name
     }
 
@@ -735,6 +995,12 @@ private struct Shelf: View {
                     .foregroundStyle(.secondary)
                 Text("\"\(search)\"에 맞는 문서가 없어요")
                     .font(.headline)
+            } else if place == .recent || place == .asked {
+                Image(systemName: place == .recent ? "clock" : "pencil.tip.crop.circle")
+                    .font(.system(size: 44))
+                    .foregroundStyle(.secondary)
+                Text(place == .recent ? "아직 연 문서가 없어요" : "아직 질문한 문서가 없어요")
+                    .font(.title3.bold())
             } else if folder != nil {
                 Image(systemName: "folder")
                     .font(.system(size: 48))
@@ -768,7 +1034,6 @@ private struct Shelf: View {
         .padding(36)
         .frame(maxWidth: 520)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(uiColor: .systemGroupedBackground))
     }
 
     /// Puts documents together into a new one and opens it.
@@ -1084,6 +1349,13 @@ private struct RecentCard: View {
     @EnvironmentObject private var library: Library
     @State private var cover: UIImage?
 
+    /// The share of the document that lies before the page it was left at.
+    private var read: CGFloat {
+        let page = Library.lastPage(for: doc.id) ?? 0
+        let all = max(doc.pageCount, 1)
+        return min(1, max(0, CGFloat(page + 1) / CGFloat(all)))
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             ZStack {
@@ -1096,26 +1368,33 @@ private struct RecentCard: View {
                         .shadow(color: .black.opacity(0.16), radius: 3, y: 1)
                 }
             }
-            .frame(width: 62, height: 82)
+            .frame(width: 88, height: 84)
             VStack(alignment: .leading, spacing: 4) {
                 Text(doc.title)
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
-                Text("\(doc.pageCount)쪽")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
                 if let opened = doc.openedAt {
                     Text(opened.formatted(.relative(presentation: .named)))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                // How far it has been read: the page it was left at, of all its pages.
+                GeometryReader { space in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Tone.chip)
+                        Capsule().fill(Tone.ink).frame(width: max(4, space.size.width * read))
+                    }
+                }
+                .frame(height: 4)
+                .padding(.top, 6)
             }
             Spacer(minLength: 0)
         }
-        .padding(12)
-        .frame(width: 236, height: 106, alignment: .leading)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .padding(14)
+        .frame(maxWidth: 340, minHeight: 112, maxHeight: 112, alignment: .leading)
+        .background(Tone.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Tone.line, lineWidth: 1))
         .task(id: doc.id) {
             cover = await library.cover(for: doc, width: 440)
         }
@@ -1129,6 +1408,8 @@ private struct DocCard: View {
     var folderName: String?
     /// While several documents are being picked: whether this one is.
     var mark: Bool?
+    /// How many questions were asked in it.
+    var asked = 0
     @EnvironmentObject private var library: Library
     @State private var cover: UIImage?
 
@@ -1168,10 +1449,20 @@ private struct DocCard: View {
             Text(doc.title)
                 .font(.subheadline.weight(.semibold))
                 .lineLimit(2)
-            Text(detail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            HStack(spacing: 5) {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                if asked > 0 {
+                    // (The one colour the shelf has: the AI pen's.)
+                    Image(systemName: "pencil.tip.crop.circle")
+                        .font(.caption)
+                    Text("\(asked)")
+                        .font(.caption.weight(.semibold).monospacedDigit())
+                }
+            }
+            .foregroundStyle(Color(uiColor: InkChoice.markColor))
         }
         .task(id: doc.id) {
             cover = await library.cover(for: doc, width: 440)
