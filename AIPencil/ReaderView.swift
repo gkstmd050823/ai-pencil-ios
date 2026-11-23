@@ -31,6 +31,8 @@ struct ReaderView: View {
     var lead = AnyView(EmptyView())
     /// The tool bar floats over the pages, at their top or (dragged down by its handle) at their bottom.
     @AppStorage("toolBarLow") private var toolBarLow = false
+    /// The tool bar is folded away, to a small pill at the side of the pages.
+    @AppStorage("toolBarFolded") private var toolBarFolded = false
     @State private var barDrag: CGFloat = 0
     @EnvironmentObject private var library: Library
     @Environment(\.colorScheme) private var scheme
@@ -297,6 +299,12 @@ struct ReaderView: View {
         .accessibilityLabel(label)
     }
 
+    /// Where the tool bar floats: in the middle of the top or the bottom, and folded away at the right end of it.
+    private var barPlace: Alignment {
+        if toolBarFolded, !readOnly { return toolBarLow ? .bottomTrailing : .topTrailing }
+        return toolBarLow ? .bottom : .top
+    }
+
     /// The tool bar (or, reading only, a word on what the pen does), afloat over the pages.
     @ViewBuilder
     private func floatingBar(roomy: Bool) -> some View {
@@ -323,9 +331,15 @@ struct ReaderView: View {
         } else {
             ToolBar(
                 choice: $choice, showingOptions: $showingOptions, darkPaper: showsDark, roomy: roomy,
+                folded: toolBarFolded,
                 canUndo: controller.canUndo, canRedo: controller.canRedo, questions: answered,
                 onPick: pick, onUndo: controller.undo, onRedo: controller.redo,
                 onQuestions: { showingQuestions = true }, onClearPage: controller.clearPage,
+                onFold: {
+                    showingOptions = false
+                    withAnimation(.snappy(duration: 0.22)) { toolBarFolded.toggle() }
+                    Diagnostics.shared.step(toolBarFolded ? "tool bar folded" : "tool bar opened out")
+                },
                 onGrip: { moved in barDrag = moved },
                 onGripEnd: { moved in
                     // Dragged far enough down, it goes to the bottom of the pages; far enough up, back.
@@ -423,9 +437,10 @@ struct ReaderView: View {
             // The settings of the tool in hand, as a card under the tool bar. (Until 0.9.0 this was a
             // popover, a window of its own that sizes itself to what is in it; the app's crashes on an
             // iPad came when the pen was touched to open it.) A touch anywhere else puts it away.
-            .overlay(alignment: toolBarLow ? .bottom : .top) {
+            .overlay(alignment: barPlace) {
                 floatingBar(roomy: roomy)
                     .offset(y: barDrag)
+                    .padding(.trailing, toolBarFolded && !readOnly ? 12 : 0)
                     .padding(.top, toolBarLow ? 0 : 10)
                     .padding(.bottom, toolBarLow ? 54 : 0)
             }
@@ -451,7 +466,7 @@ struct ReaderView: View {
                         showingSettings = true
                     }
                     .padding(.horizontal, 16)
-                    .padding(.bottom, toolBarLow ? 122 : 54)
+                    .padding(.bottom, toolBarLow && !toolBarFolded ? 122 : 54)
                 }
             }
             .overlay(alignment: .top) {
@@ -461,7 +476,7 @@ struct ReaderView: View {
                         .padding(.horizontal, 16)
                         .padding(.vertical, 9)
                         .background(.regularMaterial, in: Capsule())
-                        .padding(.top, toolBarLow ? 12 : 78)
+                        .padding(.top, toolBarLow || toolBarFolded ? 12 : 78)
                 }
             }
             .overlay(alignment: .bottom) {
@@ -888,6 +903,8 @@ private struct ToolBar: View {
     var darkPaper: Bool
     /// There is room for the tool's own part beside the tools.
     var roomy: Bool
+    /// Folded away: only the handle and the tool in hand.
+    var folded = false
     var canUndo: Bool
     var canRedo: Bool
     /// How many questions the document has, shown beside the AI pen.
@@ -899,6 +916,8 @@ private struct ToolBar: View {
     var onClearPage: () -> Void
     /// The handle at the bar's left end is being dragged this far down (up, when less than nought), and
     /// has been let go there.
+    /// The handle was touched (or, folded, the tool): fold the bar away, or open it out.
+    var onFold: () -> Void = {}
     var onGrip: (CGFloat) -> Void = { _ in }
     var onGripEnd: (CGFloat) -> Void = { _ in }
 
@@ -920,6 +939,38 @@ private struct ToolBar: View {
     }
 
     var body: some View {
+        Group {
+            if folded {
+                small
+            } else {
+                whole
+            }
+        }
+        .background(Tone.pill, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color.white.opacity(0.10), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.24), radius: 10, y: 4)
+    }
+
+    /// The bar folded away: its handle and the tool in hand, which a touch opens out again. The pen goes
+    /// on writing with that tool meanwhile.
+    private var small: some View {
+        HStack(spacing: 1) {
+            grip
+            Button(action: onFold) {
+                Image(systemName: choice.tool.symbol)
+                    .font(.system(size: 18, weight: .medium))
+                    .frame(width: 44, height: 42)
+                    .foregroundStyle(Color(uiColor: .systemBackground))
+                    .background(choice.tool == .ai ? tint(.ai) : Color.primary, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+            }
+            .accessibilityLabel("도구 막대 펼치기")
+        }
+        .padding(.leading, 2)
+        .padding(.trailing, 5)
+        .padding(.vertical, 5)
+    }
+
+    private var whole: some View {
         HStack(spacing: 1) {
             grip
             step("arrow.uturn.backward", "실행 취소", enabled: canUndo, action: onUndo)
@@ -959,12 +1010,10 @@ private struct ToolBar: View {
         .padding(.leading, 2)
         .padding(.trailing, 8)
         .padding(.vertical, 5)
-        .background(Tone.pill, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color.white.opacity(0.10), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.24), radius: 10, y: 4)
     }
 
-    /// The handle the bar is dragged by, to the top of the pages or to their bottom.
+    /// The handle the bar is dragged by, to the top of the pages or to their bottom; a touch folds the
+    /// bar away, or opens it out.
     private var grip: some View {
         Image(systemName: "line.3.horizontal")
             .font(.system(size: 13, weight: .semibold))
@@ -972,12 +1021,13 @@ private struct ToolBar: View {
             .foregroundStyle(Color.white.opacity(0.38))
             .frame(width: 24, height: 42)
             .contentShape(Rectangle())
+            .onTapGesture(perform: onFold)
             .gesture(
                 DragGesture(minimumDistance: 4, coordinateSpace: .global)
                     .onChanged { value in onGrip(value.translation.height) }
                     .onEnded { value in onGripEnd(value.translation.height) }
             )
-            .accessibilityLabel("도구 막대 옮기기")
+            .accessibilityLabel(folded ? "도구 막대 펼치기" : "도구 막대 접기 · 끌어서 옮기기")
     }
 
     private var rule: some View {
