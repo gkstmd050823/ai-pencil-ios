@@ -46,9 +46,17 @@ enum ImportError: LocalizedError {
     case unreadable
     case unwritable
     case cannotAdd
+    /// The file wants a password before it shows anything, and none was given.
+    case locked
+    case wrongPassword
+    /// The password fitted, but no copy that opens without it could be written.
+    case cannotUnlock
 
     var errorDescription: String? {
         switch self {
+        case .locked: return "암호가 걸린 PDF예요. 보관함에서 가져오면 암호를 물어봐요."
+        case .wrongPassword: return "암호가 맞지 않아요."
+        case .cannotUnlock: return "암호는 맞지만 잠금을 푼 사본을 만들지 못했어요."
         case .cannotAdd: return "쪽을 넣지 못했어요. 넣으려는 PDF나 이 문서가 암호로 잠겨 있거나 손상됐을 수 있어요. 새 문서로 가져와 보세요."
         case .unreadable: return "이 파일은 열 수 없어요. 손상됐거나 암호가 걸린 PDF일 수 있어요."
         case .unwritable: return "저장하지 못했어요. 아이패드에 남은 공간이 있는지 확인해 주세요."
@@ -270,7 +278,7 @@ final class Library: ObservableObject {
 
     /// Copies a PDF to [target] in a new folder and counts its pages. Run off the main thread: a large
     /// file, or one that has to come down from iCloud first, takes a while.
-    private static func copy(_ source: URL, to target: URL) throws -> Int {
+    private static func copy(_ source: URL, to target: URL, password: String? = nil) throws -> Int {
         // Files picked from the Files app are only readable between these two calls.
         let scoped = source.startAccessingSecurityScopedResource()
         defer { if scoped { source.stopAccessingSecurityScopedResource() } }
@@ -278,7 +286,33 @@ final class Library: ObservableObject {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         do {
             try FileManager.default.copyItem(at: source, to: target)
-            guard let pdf = PDFDocument(url: target), pdf.pageCount > 0 else { throw ImportError.unreadable }
+            guard let pdf = PDFDocument(url: target) else { throw ImportError.unreadable }
+            if pdf.isLocked {
+                // A file that shows nothing without its password (until 0.14.10 it was turned away as
+                // one that cannot be read). Everything the app does with a document opens the file as
+                // it lies, in a dozen places, and none of them has a password to give. So the password
+                // is used once, here, and what is kept is a copy that opens without it: locked afresh
+                // the way an exported copy is (see Exporter), with the same things held back, under
+                // an owner's password nobody has. The password itself is kept nowhere and noted nowhere.
+                guard let password, !password.isEmpty else { throw ImportError.locked }
+                guard pdf.unlock(withPassword: password) else { throw ImportError.wrongPassword }
+                let open = directory.appendingPathComponent("unlocked.pdf")
+                let options: [PDFDocumentWriteOption: Any] = [
+                    .ownerPasswordOption: UUID().uuidString,
+                    .accessPermissionsOption: NSNumber(value: pdf.accessPermissions.rawValue),
+                ]
+                let pages = pdf.pageCount
+                guard pages > 0, pdf.write(to: open, withOptions: options),
+                      let check = PDFDocument(url: open), !check.isLocked, check.pageCount == pages else {
+                    DebugLog.write("import: the copy without the password does not open; given up")
+                    throw ImportError.cannotUnlock
+                }
+                try FileManager.default.removeItem(at: target)
+                try FileManager.default.moveItem(at: open, to: target)
+                DebugLog.write("import: a file that wanted a password, kept as a copy that opens without it, \(pages) pages")
+                return pages
+            }
+            guard pdf.pageCount > 0 else { throw ImportError.unreadable }
             return pdf.pageCount
         } catch {
             try? FileManager.default.removeItem(at: directory)
@@ -304,11 +338,11 @@ final class Library: ObservableObject {
 
     /// The same without holding the screen still while the file is copied.
     @MainActor
-    func bringIn(_ source: URL, into place: UUID? = nil) async throws -> Doc {
+    func bringIn(_ source: URL, into place: UUID? = nil, password: String? = nil) async throws -> Doc {
         let id = UUID()
         let target = pdfURL(for: id)
         let pages = try await Task.detached(priority: .userInitiated) {
-            try Library.copy(source, to: target)
+            try Library.copy(source, to: target, password: password)
         }.value
         return shelve(id, source: source, title: nil, pages: pages, into: place)
     }

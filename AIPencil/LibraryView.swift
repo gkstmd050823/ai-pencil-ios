@@ -7,6 +7,12 @@ struct LibraryView: View {
     @State private var path = NavigationPath()
     @State private var errorText: String?
     @State private var ranDemo = false
+    /// Files brought in that want a password, still to be asked about, and where they are to go.
+    @State private var lockedFiles: [URL] = []
+    @State private var lockedPlace: UUID?
+    @State private var lockedWrong = false
+    @State private var askingPassword = false
+    @State private var passwordText = ""
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -55,6 +61,13 @@ struct LibraryView: View {
         } message: {
             Text(errorText ?? "")
         }
+        .alert(lockedWrong ? "암호가 맞지 않아요" : "암호가 걸린 PDF예요", isPresented: $askingPassword) {
+            SecureField("암호", text: $passwordText)
+            Button("취소", role: .cancel) { skipLocked() }
+            Button("열기") { openLocked() }
+        } message: {
+            Text(lockedHint)
+        }
         .onAppear {
             if ProcessInfo.processInfo.arguments.contains("-selfCheck") { SelfCheck.run() }
             runDemoIfAsked()
@@ -71,6 +84,10 @@ struct LibraryView: View {
             for url in urls {
                 do {
                     last = try await library.bringIn(url, into: place)
+                } catch ImportError.locked {
+                    // (Asked about once the others are in.)
+                    lockedFiles.append(url)
+                    lockedPlace = place
                 } catch {
                     errorText = error.localizedDescription
                 }
@@ -80,6 +97,65 @@ struct LibraryView: View {
                 // (In place of a document that is on show; on top of the shelf otherwise, folder and all.)
                 if reading { path = NavigationPath() }
                 path.append(doc)
+            }
+            if !lockedFiles.isEmpty {
+                lockedWrong = false
+                passwordText = ""
+                askingPassword = true
+            }
+        }
+    }
+
+    private var lockedHint: String {
+        let name = lockedFiles.first?.deletingPathExtension().lastPathComponent ?? ""
+        return "\(name)\n암호를 넣으면 잠금을 푼 사본을 앱 안에 보관해요. 암호는 저장하지 않아요."
+    }
+
+    /// The file being asked about is left out; the next one, if there is one, is asked about.
+    private func skipLocked() {
+        passwordText = ""
+        lockedWrong = false
+        if !lockedFiles.isEmpty { lockedFiles.removeFirst() }
+        askNextLocked()
+    }
+
+    private func askNextLocked() {
+        guard !lockedFiles.isEmpty else { return }
+        // (A moment later: the sheet that has just gone must be gone before the next comes up.)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { askingPassword = true }
+    }
+
+    private func openLocked() {
+        guard let url = lockedFiles.first, library.working == nil else { return }
+        let password = passwordText
+        passwordText = ""
+        let place = lockedPlace
+        let reading = library.showing != nil
+        library.working = "PDF를 준비하는 중"
+        Task { @MainActor in
+            var made: Doc?
+            do {
+                made = try await library.bringIn(url, into: place, password: password)
+                lockedWrong = false
+                lockedFiles.removeFirst()
+            } catch ImportError.wrongPassword {
+                lockedWrong = true
+            } catch ImportError.locked {
+                // (Nothing was typed.)
+                lockedWrong = true
+            } catch {
+                errorText = error.localizedDescription
+                lockedWrong = false
+                lockedFiles.removeFirst()
+            }
+            library.working = nil
+            if lockedFiles.isEmpty {
+                if let doc = made {
+                    if reading { path = NavigationPath() }
+                    path.append(doc)
+                }
+            } else {
+                askNextLocked()
             }
         }
     }
