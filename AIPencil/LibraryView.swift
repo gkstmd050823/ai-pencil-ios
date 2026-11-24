@@ -68,6 +68,7 @@ struct LibraryView: View {
         .onAppear {
             if ProcessInfo.processInfo.arguments.contains("-selfCheck") { SelfCheck.run() }
             if ProcessInfo.processInfo.arguments.contains("-convertCheck") { Converter.check() }
+            if ProcessInfo.processInfo.arguments.contains("-gpuCheck") { InkGPUCheck.run() }
             runDemoIfAsked()
         }
     }

@@ -405,6 +405,10 @@ enum InkPaint {
         var high: CGImage?
         var highRect = CGRect.null
         var strokes = 0
+        /// Made by the graphics processor (InkGPU) and not here.
+        var byGPU = false
+        /// For such a picture, what its making was spent on.
+        var spent = ""
     }
 
     /// Draws the handwriting. Called off the main thread.

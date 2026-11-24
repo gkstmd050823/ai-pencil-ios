@@ -32,6 +32,7 @@ struct SettingsView: View {
     @AppStorage("showAiMarks") private var showAiMarks = true
     @AppStorage("pageLayout") private var layoutMode = PageLayoutMode.vertical
     @AppStorage("darkPaper") private var darkPaper = true
+    @AppStorage("gpuInk") private var gpuInk = true
     @State private var diagnosticsCopied = false
     @State private var diagnosticsCleared = 0
     @State private var typedKey = ""
@@ -177,6 +178,8 @@ struct SettingsView: View {
     private var writingSection: some View {
         Section {
             Toggle("손가락으로도 필기", isOn: $fingerDraws)
+            // (The pictures of the handwriting are made by the graphics processor; off, by the processor as before.)
+            Toggle("GPU로 필기 그리기", isOn: $gpuInk)
             Picker("펜슬 두 번 탭", selection: $pencilTap) {
                 ForEach(PencilChoice.all) { item in
                     Text(item.label).tag(item.id)

@@ -3289,10 +3289,22 @@ struct PDFInkView: UIViewRepresentable {
             // The highlighter's picture is brought up to date the same way, where there is one of the same part.
             let highBase: CGImage? = base != nil && overlay.highPicture.shown == extent ? overlay.highPicture.picture : nil
             inkQueue.async { [weak self, weak overlay] in
-                let made = InkPaint.pictures(
-                    of: drawing, rect: extent.rect, scale: extent.scale, dark: dark, over: base, redoing: dirty, highOver: highBase,
-                    still: { ticket.current == number }
-                )
+                // By the graphics processor where it can (see InkGPU): it draws the part whole each time,
+                // which costs it less than finding out what to keep. Where it cannot (a stroke of
+                // PencilKit's in view, no graphics processor, switched off), InkPaint draws as before.
+                var made: InkPaint.Made?
+                if InkGPU.wanted, let gpu = InkGPU.shared {
+                    made = gpu.pictures(of: drawing, rect: extent.rect, scale: extent.scale, dark: dark, still: { ticket.current == number })
+                    if made != nil {
+                        made?.spent = String(format: "lines %.1f, drawing %.1f, copy %.1f", gpu.lastLines, gpu.lastDrawing, gpu.lastCopy)
+                    }
+                }
+                if made == nil {
+                    made = InkPaint.pictures(
+                        of: drawing, rect: extent.rect, scale: extent.scale, dark: dark, over: base, redoing: dirty, highOver: highBase,
+                        still: { ticket.current == number }
+                    )
+                }
                 let took = (CACurrentMediaTime() - began) * 1000
                 DispatchQueue.main.async {
                     guard let self, let overlay else { return }
@@ -3358,7 +3370,8 @@ struct PDFInkView: UIViewRepresentable {
                         } else {
                             overlay.inkDirtyAll = true
                         }
-                        let how = dirty.map { "part \(Int($0.width)) x \(Int($0.height)) redrawn" } ?? "drawn whole"
+                        var how = dirty.map { "part \(Int($0.width)) x \(Int($0.height)) redrawn" } ?? "drawn whole"
+                        if made.byGPU { how = "drawn whole by the GPU (\(made.spent))" }
                         DebugLog.write(String(format: "ink picture: page %d, %d lines, %d x %d at %.3f pixels a point, %@ in %.1f ms", index, made.strokes, made.pens.width, made.pens.height, Double(extent.scale), how, took))
                     } else {
                         overlay.inkPicture.gaveUp = true
