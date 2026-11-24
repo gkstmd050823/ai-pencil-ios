@@ -337,7 +337,7 @@ enum SelfCheck {
         )
         note("a force told under a number no place has changes nothing", !long.correct(id: 1234, force: 2))
 
-        // A short line with pointed ends is on show as it will stay: lifting the pen changes none of it.
+        // A short line with pointed ends stays as it was on show: lifting the pen changes none of it.
         var short = PenLine(width: 1.42, sense: 0, steady: 0, spacing: 0.3, taper: 0.5)
         for step in 0..<6 {
             short.add(PenSample(point: CGPoint(x: 100 + 0.4 * Double(step), y: 100), force: 0, time: Double(step) * 0.004))
@@ -346,25 +346,30 @@ enum SelfCheck {
         short.finish()
         var apartMost: CGFloat = 0
         for (after, before) in zip(short.widths, shown) { apartMost = max(apartMost, abs(after - before)) }
-        let thinnest = shown.min() ?? 0
-        note(
-            "a short pointed line is not changed by the lift",
-            short.widths.count == shown.count && apartMost < 0.001 && thinnest > 1.4 && !short.startFirm,
-            "thinnest \(thinnest), changed by \(apartMost)"
-        )
+        note("a short pointed line is not changed by the lift", short.widths.count == shown.count && apartMost < 0.001, "changed by \(apartMost)")
+        // What is settled of a pointed line stays as it is while the line goes on.
         var pointy = PenLine(width: 1.42, sense: 0, steady: 0, spacing: 0.3, taper: 0.5)
-        for step in 0..<60 {
+        for step in 0..<12 {
+            pointy.add(PenSample(point: CGPoint(x: 100 + 0.5 * Double(step), y: 100), force: 0, time: Double(step) * 0.004))
+        }
+        let early = Array(pointy.widths.prefix(pointy.settled))
+        for step in 12..<60 {
             pointy.add(PenSample(point: CGPoint(x: 100 + 0.5 * Double(step), y: 100), force: 0, time: Double(step) * 0.004))
         }
         let head = pointy.widths.first ?? 9
-        pointy.finish()
-        let foot = pointy.widths.last ?? 9
-        let middle = pointy.widths[pointy.widths.count / 2]
         note(
-            "a long pointed line comes up from a point and goes down to one",
-            pointy.startFirm && abs(head - 0.8875) < 0.01 && abs(foot - 0.8875) < 0.01 && abs(middle - 1.42) < 0.01,
-            "\(head), \(middle), \(foot)"
+            "the beginning of a pointed line is not drawn again as the line goes on",
+            early.count > 4 && Array(pointy.widths.prefix(early.count)) == early && abs(head - 0.8875) < 0.01, "\(head)"
         )
+        // A pen that rests where it landed leaves a dot of its full width, and lifting it changes nothing.
+        var dot = PenLine(width: 1.42, sense: 0, steady: 0, spacing: 0.3, taper: 0.5)
+        for step in 0..<25 {
+            dot.add(PenSample(point: CGPoint(x: 100, y: 100), force: 0, time: Double(step) * 0.004))
+        }
+        let resting = dot.widths.first ?? 0
+        dot.finish()
+        let lifted = dot.widths.max() ?? 0
+        note("a dot is as wide as the pen, and is so before the pen lifts", resting > 1.4 && abs(lifted - resting) < 0.001, "\(resting), \(lifted)")
     }
 
     // MARK: steadying

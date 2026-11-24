@@ -394,8 +394,7 @@ final class WetInk: UIView {
         // A long line is cut into pieces. A piece is closed where the line is settled (what comes after
         // that may still change), and goes into the lower tiles there and then, for good.
         var closed: [Piece] = []
-        // (Not while the line's beginning may still change: a short line with pointed ends is all open.)
-        while line.startFirm, line.settled - openFrom > 64 {
+        while line.settled - openFrom > 64 {
             let piece = cut(line, openFrom, line.settled)
             current.pieces.append(piece)
             current.box = current.box.union(piece.box)
