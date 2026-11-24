@@ -20,8 +20,8 @@ import UIKit
 ///
 /// What comes out is a picture like InkPaint's, for the same part of the page on the same pixels, and
 /// is put on screen the same way: nothing else in the app knows which of the two made it. Strokes that
-/// are PencilKit's to draw (its pencil, a line the part eraser has cut) are not drawn here; a page that
-/// has them in view is left to InkPaint.
+/// are PencilKit's to draw (its pencil, a line the part eraser has cut) are drawn by PencilKit, as
+/// InkPaint has them drawn, and its picture of them is laid in where they come in the order of things.
 ///
 /// Used from one queue at a time.
 final class InkGPU {
@@ -39,6 +39,7 @@ final class InkGPU {
     private let queue: MTLCommandQueue
     private let cover: MTLRenderPipelineState
     private let paint: MTLRenderPipelineState
+    private let stamp: MTLRenderPipelineState
 
     /// A stroke's line as it was last worked out, by the moment the stroke was made.
     private struct Kept {
@@ -46,7 +47,9 @@ final class InkGPU {
         var turn: CGAffineTransform
         var first: CGPoint
         var step: CGFloat
-        var line: InkPaint.Line
+        /// Whether the numbers are the stroke's own points (and not points worked out between them).
+        var own: Bool
+        var numbers: [Float]
     }
 
     private var kept: [Date: Kept] = [:]
@@ -56,6 +59,8 @@ final class InkGPU {
     private(set) var lastDrawing: Double = 0
     private(set) var lastCopy: Double = 0
     private(set) var lastRuns = 0
+    /// How many strokes of the last picture PencilKit drew.
+    private(set) var lastLaidIn = 0
 
     private static let source = """
     #include <metal_stdlib>
@@ -131,6 +136,24 @@ final class InkGPU {
         return out;
     }
 
+    struct Stamp { float4 box; };
+    struct Stamped { float4 position [[position]]; float2 share; };
+
+    vertex Stamped stamp_vertex(uint corner [[vertex_id]], constant Stamp &stamp [[buffer(0)]], constant Page &page [[buffer(1)]]) {
+        float2 unit = float2((corner & 1) != 0 ? 1.0 : 0.0, (corner & 2) != 0 ? 1.0 : 0.0);
+        float2 at = stamp.box.xy + unit * stamp.box.zw;
+        float2 share = (at - page.origin) / page.size;
+        Stamped out;
+        out.position = float4(share.x * 2.0 - 1.0, 1.0 - share.y * 2.0, 0.0, 1.0);
+        out.share = unit;
+        return out;
+    }
+
+    fragment float4 stamp_fragment(Stamped in [[stage_in]], texture2d<float> image [[texture(0)]]) {
+        constexpr sampler nearest(filter::nearest, address::clamp_to_edge);
+        return image.sample(nearest, in.share);
+    }
+
     struct Tint { float4 colour; };
 
     fragment float4 whole_fragment(Whole in [[stage_in]], texture2d<float> covered [[texture(0)]], constant Tint &tint [[buffer(0)]]) {
@@ -173,6 +196,10 @@ final class InkGPU {
             painting.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
             painting.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
             paint = try device.makeRenderPipelineState(descriptor: painting)
+            // (Laid over in the same way: the picture laid in is colour times its own strength too.)
+            painting.vertexFunction = library.makeFunction(name: "stamp_vertex")
+            painting.fragmentFunction = library.makeFunction(name: "stamp_fragment")
+            stamp = try device.makeRenderPipelineState(descriptor: painting)
         } catch {
             DebugLog.write("gpu: the programs could not be made: \(error)")
             return nil
@@ -182,11 +209,14 @@ final class InkGPU {
 
     /// Lines of one colour that are painted together: every stretch of them as six numbers (where it
     /// begins and ends, and half its width at either end), and which parts of the picture they reach.
+    /// Or, with [image], strokes that are PencilKit's to draw, as its picture of them and where it goes.
     private struct Run {
         var colour: SIMD4<Float>
         var numbers: [Float] = []
         /// The picture as thirty-two squares by thirty-two: a bit for each square a line of the run reaches.
         var cells = [UInt64](repeating: 0, count: 16)
+        var image: CGImage?
+        var box = CGRect.null
     }
 
     /// The lines to draw into one picture, as runs to be painted one after the other.
@@ -224,46 +254,13 @@ final class InkGPU {
             return cells
         }
 
-        mutating func add(_ line: InkPaint.Line, colour: SIMD4<Float>, wide: Bool, box: CGRect) {
-            var points = line.points
-            var widths = line.widths
-            // (A highlighter's line needs only some of its points, as in InkPaint.)
-            if wide, line.even, points.count > 2, let width = widths.first {
-                points = InkPaint.thinned(points, gap: width * InkPaint.wideGap)
-                widths = [CGFloat](repeating: width, count: points.count)
-            }
-            let count = points.count
-            guard count > 0, widths.count == count else { return }
-            var made: [Float] = []
-            made.reserveCapacity(count * 6)
-            func piece(_ a: CGPoint, _ b: CGPoint, _ ra: CGFloat, _ rb: CGFloat) {
-                made.append(Float(a.x))
-                made.append(Float(a.y))
-                made.append(Float(b.x))
-                made.append(Float(b.y))
-                made.append(Float(ra))
-                made.append(Float(rb))
-            }
-            var index = 0
-            while index < count {
-                let width = widths[index]
-                if width > 0 {
-                    let joinsAfter = index + 1 < count && widths[index + 1] > 0
-                    if joinsAfter {
-                        piece(points[index], points[index + 1], width / 2, widths[index + 1] / 2)
-                    } else if index == 0 || widths[index - 1] <= 0 {
-                        // (A place with nothing inked on either side of it: a dot.)
-                        piece(points[index], points[index], width / 2, width / 2)
-                    }
-                }
-                index += 1
-            }
+        mutating func add(_ made: [Float], colour: SIMD4<Float>, box: CGRect) {
             guard !made.isEmpty else { return }
             let mine = cells(of: box)
             var target = -1
             var at = runs.count - 1
             while at >= 0 {
-                if runs[at].colour == colour {
+                if runs[at].image == nil, runs[at].colour == colour {
                     target = at
                     break
                 }
@@ -291,6 +288,53 @@ final class InkGPU {
             }
             pieces += made.count / 6
         }
+
+        /// A picture of strokes drawn elsewhere, to go where they are in the order of things.
+        mutating func add(_ image: CGImage, at box: CGRect) {
+            var run = Run(colour: SIMD4<Float>(0, 0, 0, 0))
+            run.image = image
+            run.box = box
+            run.cells = cells(of: box)
+            runs.append(run)
+        }
+    }
+
+    /// A line as numbers: six for every stretch of it.
+    private static func numbers(of line: InkPaint.Line, wide: Bool) -> [Float] {
+        var points = line.points
+        var widths = line.widths
+        // (A highlighter's line needs only some of its points, as in InkPaint.)
+        if wide, line.even, points.count > 2, let width = widths.first {
+            points = InkPaint.thinned(points, gap: width * InkPaint.wideGap)
+            widths = [CGFloat](repeating: width, count: points.count)
+        }
+        let count = points.count
+        var made: [Float] = []
+        guard count > 0, widths.count == count else { return made }
+        made.reserveCapacity(count * 6)
+        func piece(_ a: CGPoint, _ b: CGPoint, _ ra: CGFloat, _ rb: CGFloat) {
+            made.append(Float(a.x))
+            made.append(Float(a.y))
+            made.append(Float(b.x))
+            made.append(Float(b.y))
+            made.append(Float(ra))
+            made.append(Float(rb))
+        }
+        var index = 0
+        while index < count {
+            let width = widths[index]
+            if width > 0 {
+                let joinsAfter = index + 1 < count && widths[index + 1] > 0
+                if joinsAfter {
+                    piece(points[index], points[index + 1], width / 2, widths[index + 1] / 2)
+                } else if index == 0 || widths[index - 1] <= 0 {
+                    // (A place with nothing inked on either side of it: a dot.)
+                    piece(points[index], points[index], width / 2, width / 2)
+                }
+            }
+            index += 1
+        }
+        return made
     }
 
     private static func colour(_ colour: CGColor) -> SIMD4<Float> {
@@ -305,21 +349,23 @@ final class InkGPU {
         return SIMD4<Float>(part(parts[0]), part(parts[1]), part(parts[2]), (alpha * 255).rounded() / 255)
     }
 
-    private func line(of stroke: PKStroke, step: CGFloat) -> InkPaint.Line {
+    /// A stroke's numbers, kept from the last time where the stroke is as it was: the graphics
+    /// processor is then handed what it was handed before, and nothing is worked out anew.
+    private func numbers(of stroke: PKStroke, step: CGFloat, wide: Bool) -> [Float] {
         let path = stroke.path
         let date = path.creationDate
         let count = path.count
         let first = count > 0 ? path[0].location : .zero
         if let have = kept[date], have.count == count, have.turn == stroke.transform, have.first == first {
-            // The same line does for the same zoom, and a line that is the stroke's own points does for
-            // any zoom further out than the one it was worked out for.
-            let own = have.line.points.count == count
-            if abs(have.step - step) < 0.01 * step || (own && step > have.step) { return have.line }
+            // The same numbers do for the same zoom, and those that are the stroke's own points do for
+            // any zoom further out than the one they were made for.
+            if abs(have.step - step) < 0.01 * step || (have.own && step > have.step) { return have.numbers }
         }
         let line = InkPaint.line(of: stroke, step: step)
+        let made = Self.numbers(of: line, wide: wide)
         if kept.count > 30000 { kept = [:] }
-        kept[date] = Kept(count: count, turn: stroke.transform, first: first, step: step, line: line)
-        return line
+        kept[date] = Kept(count: count, turn: stroke.transform, first: first, step: step, own: line.points.count == count, numbers: made)
+        return made
     }
 
     /// Lets go of the lines kept (the app is short of memory, or a test wants to start from nothing).
@@ -334,7 +380,10 @@ final class InkGPU {
     func pictures(of drawing: PKDrawing, rect: CGRect, scale: CGFloat, dark: Bool, still: (() -> Bool)? = nil) -> InkPaint.Made? {
         let width = Int((rect.width * scale).rounded())
         let height = Int((rect.height * scale).rounded())
-        guard width > 0, height > 0, width <= 16384, height <= 16384 else { return nil }
+        guard width > 0, height > 0, width <= 16384, height <= 16384 else {
+            DebugLog.write("gpu: left to InkPaint: a picture of \(width) x \(height)")
+            return nil
+        }
         let began = CACurrentMediaTime()
         let strokes = drawing.strokes
         var pens = Batch(rect: rect)
@@ -342,20 +391,65 @@ final class InkGPU {
         var anyHigh = false
         let step = max(0.02, 1.2 / scale)
         let highStep = max(0.6, 1.2 / scale)
+        // Strokes that are PencilKit's to draw (its pencil, a line the part eraser has cut) are drawn by
+        // it, a run of them at a time into a picture of just the room they take, as InkPaint has them
+        // drawn; that picture is laid in where the strokes come in the order of things.
+        var others: [PKStroke] = []
+        var othersBox = CGRect.null
+        var otherHigh: [PKStroke] = []
+        var otherHighBox = CGRect.null
+        var laidIn = 0
+        func lay(_ run: [PKStroke], _ room: CGRect, into batch: inout Batch) {
+            let box = InkPaint.whole(room.intersection(rect), scale: scale, origin: rect.origin)
+            guard !run.isEmpty, box.width > 0, box.height > 0 else { return }
+            var made: CGImage?
+            UITraitCollection(userInterfaceStyle: dark ? .dark : .light).performAsCurrent {
+                made = PKDrawing(strokes: run).image(from: box, scale: scale).cgImage
+            }
+            if let made {
+                batch.add(made, at: box)
+                laidIn += run.count
+            }
+        }
         for stroke in strokes {
             let isHigh = InkPaint.isHighlighter(stroke)
             if isHigh { anyHigh = true }
             let box = stroke.renderBounds
             guard box.intersects(rect) else { continue }
-            guard InkPaint.isPlain(stroke) else { return nil }
+            guard InkPaint.isPlain(stroke) else {
+                if isHigh {
+                    otherHigh.append(stroke)
+                    otherHighBox = otherHighBox.union(box)
+                } else {
+                    others.append(stroke)
+                    othersBox = othersBox.union(box)
+                }
+                continue
+            }
             let colour = Self.colour(InkPaint.color(of: stroke, dark: dark, solid: isHigh))
             if isHigh {
-                high.add(line(of: stroke, step: highStep), colour: colour, wide: true, box: box)
+                if !otherHigh.isEmpty {
+                    lay(otherHigh, otherHighBox, into: &high)
+                    otherHigh = []
+                    otherHighBox = .null
+                }
+                high.add(numbers(of: stroke, step: highStep, wide: true), colour: colour, box: box)
             } else {
-                pens.add(line(of: stroke, step: step), colour: colour, wide: false, box: box)
+                if !others.isEmpty {
+                    lay(others, othersBox, into: &pens)
+                    others = []
+                    othersBox = .null
+                }
+                pens.add(numbers(of: stroke, step: step, wide: false), colour: colour, box: box)
             }
-            if pens.runs.count > 96 || high.runs.count > 96 { return nil }
+            if pens.runs.count > 160 || high.runs.count > 160 {
+                DebugLog.write("gpu: left to InkPaint: more than 160 runs of one colour on this page")
+                return nil
+            }
         }
+        lay(others, othersBox, into: &pens)
+        lay(otherHigh, otherHighBox, into: &high)
+        lastLaidIn = laidIn
         if let still, !still() { return nil }
         lastLines = (CACurrentMediaTime() - began) * 1000
         lastDrawing = 0
@@ -370,6 +464,31 @@ final class InkGPU {
             made.highRect = rect
         }
         if let still, !still() { return nil }
+        return made
+    }
+
+    /// A picture as something the graphics processor can lay in: its pixels, blue first, colour times strength.
+    private func texture(of image: CGImage) -> MTLTexture? {
+        let width = image.width, height = image.height
+        guard width > 0, height > 0, let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let drawn = pixels.withUnsafeMutableBytes { raw -> Bool in
+            guard let context = CGContext(
+                data: raw.baseAddress, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4, space: space,
+                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+            ) else { return false }
+            context.setBlendMode(.copy)
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        let wanted = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
+        wanted.usage = [.shaderRead]
+        guard drawn, let made = device.makeTexture(descriptor: wanted) else { return nil }
+        pixels.withUnsafeBytes { raw in
+            if let base = raw.baseAddress {
+                made.replace(region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0, withBytes: base, bytesPerRow: width * 4)
+            }
+        }
         return made
     }
 
@@ -401,6 +520,8 @@ final class InkGPU {
             pieces = numbers.withUnsafeBytes { bytes in
                 bytes.baseAddress.flatMap { device.makeBuffer(bytes: $0, length: bytes.count, options: .storageModeShared) }
             }
+        }
+        if !batch.runs.isEmpty {
             var colours: [Float] = []
             for run in batch.runs {
                 colours.append(run.colour.x)
@@ -411,7 +532,7 @@ final class InkGPU {
             tints = colours.withUnsafeBytes { bytes in
                 bytes.baseAddress.flatMap { device.makeBuffer(bytes: $0, length: bytes.count, options: .storageModeShared) }
             }
-            guard pieces != nil, tints != nil else { return nil }
+            guard tints != nil, numbers.isEmpty || pieces != nil else { return nil }
         }
         if batch.runs.isEmpty {
             // Nothing in view: a clear picture.
@@ -425,6 +546,26 @@ final class InkGPU {
         }
         var number = 0
         for run in batch.runs {
+            if let image = run.image {
+                // Strokes PencilKit drew: its picture of them, over what is in the picture already.
+                var place: [Float] = [Float(run.box.minX), Float(run.box.minY), Float(run.box.width), Float(run.box.height)]
+                guard let laid = texture(of: image),
+                      let placeBuffer = device.makeBuffer(bytes: &place, length: place.count * MemoryLayout<Float>.stride, options: .storageModeShared) else { return nil }
+                let over = MTLRenderPassDescriptor()
+                over.colorAttachments[0].texture = picture
+                over.colorAttachments[0].loadAction = number == 0 ? .clear : .load
+                over.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+                over.colorAttachments[0].storeAction = .store
+                guard let laying = commands.makeRenderCommandEncoder(descriptor: over) else { return nil }
+                laying.setRenderPipelineState(stamp)
+                laying.setVertexBuffer(placeBuffer, offset: 0, index: 0)
+                laying.setVertexBuffer(pageBuffer, offset: 0, index: 1)
+                laying.setFragmentTexture(laid, index: 0)
+                laying.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+                laying.endEncoding()
+                number += 1
+                continue
+            }
             guard let pieces, let tints else { return nil }
             // How much of each pixel the lines of this run cover.
             let first = MTLRenderPassDescriptor()
@@ -519,6 +660,16 @@ enum InkGPUCheck {
             line.finish()
             let colour = row % 2 == 0 ? UIColor(red: 1, green: 0.9, blue: 0.1, alpha: 0.4) : UIColor(red: 0.3, green: 0.9, blue: 0.4, alpha: 0.4)
             if let stroke = line.stroke(color: colour) { strokes.append(stroke) }
+        }
+        // PencilKit's pencil, which is its own to draw: under the last of the lines, where they come in the order.
+        for row in 0..<3 {
+            var points: [PKStrokePoint] = []
+            for step in 0...30 {
+                let at = CGPoint(x: 180 + CGFloat(step) * 6, y: 300 + CGFloat(row) * 60 + cos(CGFloat(step) / 4) * 12)
+                points.append(PKStrokePoint(location: at, timeOffset: Double(step) * 0.01, size: CGSize(width: 4, height: 4), opacity: 1, force: 1, azimuth: 0, altitude: .pi / 2))
+            }
+            let pencil = PKStroke(ink: PKInk(.pencil, color: UIColor(red: 0.1, green: 0.2, blue: 0.8, alpha: 1)), path: PKStrokePath(controlPoints: points, creationDate: Date()))
+            strokes.insert(pencil, at: min(strokes.count, 40 + row * 50))
         }
         return PKDrawing(strokes: strokes)
     }
@@ -616,7 +767,7 @@ enum InkGPUCheck {
                         DebugLog.write("gpu check: \(name) at \(scale): a picture did not come (InkPaint \(byHand != nil), GPU \(cold != nil))")
                         continue
                     }
-                    DebugLog.write("gpu check: " + name + " at " + String(describing: scale) + ": runs of one colour, pens " + String(gpu.lastRuns))
+                    DebugLog.write("gpu check: " + name + " at " + String(describing: scale) + ": runs, pens " + String(gpu.lastRuns) + "; strokes PencilKit drew " + String(gpu.lastLaidIn))
                     DebugLog.write(String(format: "gpu check: %@ at %.2f, %d x %d: InkPaint %.1f ms; GPU %.1f ms the first time (%@), %.1f ms again (%@)", name, Double(scale), cold.pens.width, cold.pens.height, slow, first, firstParts, second, secondParts))
                     DebugLog.write("gpu check: \(name) at \(scale): pens: " + apart(byHand.pens, cold.pens))
                     if let a = byHand.high, let b = cold.high {
