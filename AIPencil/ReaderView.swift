@@ -33,6 +33,8 @@ struct ReaderView: View {
     @AppStorage("toolBarLow") private var toolBarLow = false
     /// The tool bar is folded away, to a small pill at the side of the pages.
     @AppStorage("toolBarFolded") private var toolBarFolded = false
+    /// The tool bar folds away by itself once the pen has written.
+    @AppStorage("toolBarAuto") private var toolBarAuto = true
     @State private var barDrag: CGFloat = 0
     @EnvironmentObject private var library: Library
     @Environment(\.colorScheme) private var scheme
@@ -299,9 +301,9 @@ struct ReaderView: View {
         .accessibilityLabel(label)
     }
 
-    /// Where the tool bar floats: in the middle of the top or the bottom, and folded away at the right end of it.
+    /// Where the tool bar floats: in the middle of the top or the bottom, folded away or not. (In 0.15.2
+    /// it went to the right end when folded; a pencil that came to open it was then far from the tools.)
     private var barPlace: Alignment {
-        if toolBarFolded, !readOnly { return toolBarLow ? .bottomTrailing : .topTrailing }
         return toolBarLow ? .bottom : .top
     }
 
@@ -356,6 +358,7 @@ struct ReaderView: View {
 
     private var menu: some View {
         Menu {
+            Toggle("쓰는 동안 도구 막대 접기", isOn: $toolBarAuto)
             Picker("보기 방식", selection: $layoutMode) {
                 ForEach(PageLayoutMode.allCases) { mode in
                     Label(mode.label, systemImage: mode.symbol).tag(mode)
@@ -440,7 +443,6 @@ struct ReaderView: View {
             .overlay(alignment: barPlace) {
                 floatingBar(roomy: roomy)
                     .offset(y: barDrag)
-                    .padding(.trailing, toolBarFolded && !readOnly ? 12 : 0)
                     .padding(.top, toolBarLow ? 0 : 10)
                     .padding(.bottom, toolBarLow ? 54 : 0)
             }
@@ -632,6 +634,13 @@ struct ReaderView: View {
         }
         controller.onDeleteMark = { id in
             session.delete(id)
+        }
+        controller.onWrote = {
+            // The pen is writing: the bar is not wanted, and gets out of the way of the page.
+            guard toolBarAuto, !toolBarFolded, !readOnly else { return }
+            showingOptions = false
+            withAnimation(.snappy(duration: 0.22)) { toolBarFolded = true }
+            Diagnostics.shared.step("tool bar folded by itself")
         }
         controller.onToolUsed = { tool in
             // A tool set to be put down after use gives way to the one held before it.
@@ -921,6 +930,9 @@ private struct ToolBar: View {
     var onGrip: (CGFloat) -> Void = { _ in }
     var onGripEnd: (CGFloat) -> Void = { _ in }
 
+    /// Just opened out by a pencil held over it: no touch is taken for a moment.
+    @State private var shield = false
+
     /// The width kept for the tool's own part.
     private static let room: CGFloat = 304
 
@@ -968,6 +980,15 @@ private struct ToolBar: View {
         .padding(.leading, 2)
         .padding(.trailing, 5)
         .padding(.vertical, 5)
+        // An Apple Pencil held just above it opens the bar out, without a touch. The pencil is then over
+        // the middle of the bar, on its way down to touch what was there a moment ago: for a moment the
+        // bar takes no touch, so that touch picks no tool (and writes no dot on the page under it).
+        .onHover { over in
+            guard over else { return }
+            shield = true
+            onFold()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { shield = false }
+        }
     }
 
     private var whole: some View {
@@ -1010,6 +1031,13 @@ private struct ToolBar: View {
         .padding(.leading, 2)
         .padding(.trailing, 8)
         .padding(.vertical, 5)
+        .overlay {
+            if shield {
+                Color.black.opacity(0.001)
+                    .contentShape(Rectangle())
+                    .onTapGesture {}
+            }
+        }
     }
 
     /// The handle the bar is dragged by, to the top of the pages or to their bottom; a touch folds the
