@@ -246,6 +246,10 @@ struct PenLine {
         /// The knot this place became, if it became one, and how far along the line that was.
         var knot: Int?
         var run: CGFloat = 0
+        /// The place itself, where the steadied line had got to after it, and how wide the line was then.
+        var sample: PenSample?
+        var place: CGPoint = .zero
+        var after: CGFloat = 0
     }
 
     private var heard: [Heard] = []
@@ -342,6 +346,9 @@ struct PenLine {
         var pressure = press
         heldWidth = widened(record, press: &pressure, held: heldWidth)
         press = pressure
+        record.sample = sample
+        record.place = place
+        record.after = heldWidth
         let before = knots.count
         knot(place, heldWidth, time: sample.time)
         if knots.count > before {
@@ -484,10 +491,55 @@ struct PenLine {
         }
     }
 
+    /// How long before a touch is told to have ended the pencil is off the paper already, in seconds:
+    /// three of its tellings. (Of 37 lines in the test notes of 2026-11-24 the pencil's true force was
+    /// under 3% of its full force for the last 12.5 ms as a rule, and in that time it went on a quarter
+    /// of a page point sideways, up to 1.15: a little hook at the end of the line. The true force of
+    /// those last places is not known when the touch ends; it is made good some milliseconds later.)
+    static let liftOff = 0.0128
+
+    /// Takes the pencil's way off the paper out of the line: the places heard in the last moments, and
+    /// the knots made of them. The line then ends where the pen was before that. Gives the number of
+    /// points, from the line's beginning, that are as they were.
+    private mutating func leave() -> Int {
+        guard let end = last, heard.count > 1, !knots.isEmpty else { return Int.max }
+        let whole = end.time - began
+        let cut = whole - min(Self.liftOff, whole * 0.25)
+        guard let at = heard.lastIndex(where: { $0.elapsed <= cut }), at < heard.count - 1, let stays = heard[at].sample else { return Int.max }
+        last = stays
+        held = heard[at].place
+        heldWidth = heard[at].after
+        var count = knots.count
+        while count > 1, knots[count - 1].time > cut { count -= 1 }
+        guard count < knots.count else { return Int.max }
+        knots.removeSubrange(count...)
+        run = 0
+        var index = 1
+        while index < knots.count {
+            run += hypot(knots[index].point.x - knots[index - 1].point.x, knots[index].point.y - knots[index - 1].point.y)
+            index += 1
+        }
+        // The line is laid again from its knots. (What was settled of it comes out the same.)
+        let was = points
+        let wide = widths
+        points = []
+        widths = []
+        times = []
+        along = []
+        settled = 0
+        stretches = 0
+        work(toTheEnd: false)
+        var same = 0
+        let most = min(was.count, points.count)
+        while same < most, was[same] == points[same], wide[same] == widths[same] { same += 1 }
+        return same
+    }
+
     /// The pen lifted. A steadied line is still on its way to where the pen left the page; this takes it
     /// there, so that the line ends where the hand ended it, and settles the whole of it.
     mutating func finish() {
-        reshapedFrom = settled
+        let same = leave()
+        reshapedFrom = min(settled, same)
         guard let last, let held else { return }
         let gap = hypot(last.point.x - held.x, last.point.y - held.y)
         if gap > 0.2 {

@@ -346,7 +346,20 @@ enum SelfCheck {
         short.finish()
         var apartMost: CGFloat = 0
         for (after, before) in zip(short.widths, shown) { apartMost = max(apartMost, abs(after - before)) }
-        note("a short pointed line is not changed by the lift", short.widths.count == shown.count && apartMost < 0.001, "changed by \(apartMost)")
+        note("a short pointed line is not changed by the lift", short.widths.count <= shown.count && apartMost < 0.001, "changed by \(apartMost)")
+        // A pencil slips sideways as it leaves the paper: those last places are not in the line.
+        var hooked = PenLine(width: 1.42, sense: 0, steady: 0, spacing: 0.1)
+        for step in 0..<40 {
+            hooked.add(PenSample(point: CGPoint(x: 100, y: 100 + 0.3 * Double(step)), force: 0, time: Double(step) * 0.004))
+        }
+        for step in 0..<3 {
+            hooked.add(PenSample(point: CGPoint(x: 100.3 + 0.3 * Double(step), y: 111.7), force: 0, time: Double(40 + step) * 0.004))
+        }
+        hooked.finish()
+        var astray: CGFloat = 0
+        for point in hooked.points { astray = max(astray, abs(point.x - 100)) }
+        let foot = hooked.points.last?.y ?? 0
+        note("the pencil's way off the paper is no part of the line", astray < 0.05 && foot > 111, "\(astray) astray, ends at \(foot)")
         // What is settled of a pointed line stays as it is while the line goes on.
         var pointy = PenLine(width: 1.42, sense: 0, steady: 0, spacing: 0.3, taper: 0.5)
         for step in 0..<12 {
