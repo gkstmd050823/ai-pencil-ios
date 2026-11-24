@@ -558,7 +558,8 @@ enum Converter {
     }
 
     /// [file] is a copy made by [borrow]; [name] is what the document is to be called.
-    static func convert(_ file: URL, kind: ForeignKind, name: String, way: Way = Converter.way, progress: ((String) -> Void)? = nil) async throws -> Made {
+    static func convert(_ file: URL, kind: ForeignKind, name: String, way asked: Way? = nil, progress: ((String) -> Void)? = nil) async throws -> Made {
+        let way = asked ?? Converter.way
         let folder = file.deletingLastPathComponent()
         let target = folder.appendingPathComponent("converted.pdf")
         try? FileManager.default.removeItem(at: target)
