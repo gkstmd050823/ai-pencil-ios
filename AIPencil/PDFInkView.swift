@@ -920,8 +920,8 @@ final class ReaderController: ObservableObject {
     /// Called to put a mark back on the page that was taken off it.
     var onShowMark: ((UUID) -> Void)?
     var onDeleteMark: ((UUID) -> Void)?
-    /// Called when the pen (or whatever tool is in hand) has been lifted off a page it worked on.
-    var onWrote: (() -> Void)?
+    /// Called when the zoom changes.
+    var onZoom: (() -> Void)?
     /// Called when a tool that is to be put down after use has been used.
     var onToolUsed: ((InkTool) -> Void)?
     /// Words were picked out of a page with a finger, and the finger has let go.
@@ -1504,6 +1504,7 @@ struct PDFInkView: UIViewRepresentable {
 
         /// The zoom changed. Once it has settled, the canvases are redrawn as fine as it needs.
         private func scaleChanged() {
+            controller?.onZoom?()
             NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(settleScale), object: nil)
             perform(#selector(settleScale), with: nil, afterDelay: 0.25)
         }
@@ -1785,16 +1786,7 @@ struct PDFInkView: UIViewRepresentable {
                 return
             }
             canvasInUse(overlay, false)
-            wrote()
             toolUsed()
-        }
-
-        /// The tool in hand was lifted off a page. (Told after this turn of the run loop: nothing the
-        /// screen above does about it comes between the lift and the line being put on the page.)
-        private func wrote() {
-            DispatchQueue.main.async { [weak self] in
-                self?.controller?.onWrote?()
-            }
         }
 
         /// A tool has done its work. One that is set to be put down after use is handed back now.
@@ -2234,7 +2226,6 @@ struct PDFInkView: UIViewRepresentable {
         /// pen's becomes a question.
         private func penDone(kept: Bool, in overlay: PageOverlay) {
             guard let line = penLine else { return }
-            if kept { wrote() }
             DebugLog.write(String(format: "pen: shown at %.3f pixels a point while written", Double(fineness)))
             DebugLog.write("pen: up, \(line.points.count) points, \(kept ? "kept" : "let go")\(straight != nil ? ", made straight" : "")\(shaped != nil ? ", made a shape" : "")")
             penLine = nil
