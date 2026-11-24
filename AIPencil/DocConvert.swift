@@ -8,7 +8,7 @@ import WebKit
 /// The kinds of file, other than PDF, that can be brought in. Each is made into a PDF first: the pages,
 /// the pen and the AI pen all work on PDF pages.
 enum ForeignKind {
-    case word, slides, sheet, text, epub
+    case word, slides, sheet, text, epub, hangul
 
     static func of(_ url: URL) -> ForeignKind? {
         switch url.pathExtension.lowercased() {
@@ -17,6 +17,7 @@ enum ForeignKind {
         case "xls", "xlsx": return .sheet
         case "rtf": return .text
         case "epub": return .epub
+        case "hwp", "hwpx": return .hangul
         default: return nil
         }
     }
@@ -33,6 +34,10 @@ enum ForeignKind {
         var types: [UTType] = [.pdf]
         for identifier in identifiers {
             if let type = UTType(identifier) { types.append(type) }
+        }
+        // (Hangul files have no kind the system knows by name: they are known by their endings.)
+        for ending in ["hwp", "hwpx"] {
+            if let type = UTType(filenameExtension: ending) { types.append(type) }
         }
         return types
     }
@@ -268,6 +273,51 @@ struct Epub: Codable {
     }
 }
 
+/// Hands the page that draws Hangul files, its engine (rhwp, in the app's Web/hwp folder) and the file
+/// to be drawn to a web view, under an address of the app's own making. Nothing of it is on the network.
+final class HangulFiles: NSObject, WKURLSchemeHandler {
+    static let scheme = "aipencil-hwp"
+    static let page = URL(string: "aipencil-hwp://local/hwp.html")!
+    static let input = "aipencil-hwp://local/input"
+
+    private let file: URL
+
+    init(file: URL) {
+        self.file = file
+    }
+
+    func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        guard let url = urlSchemeTask.request.url else {
+            urlSchemeTask.didFailWithError(URLError(.badURL))
+            return
+        }
+        let name = url.lastPathComponent
+        var source: URL?
+        var kind = "application/octet-stream"
+        if name == "input" {
+            source = file
+        } else if ["hwp.html", "rhwp.js", "rhwp_bg.wasm"].contains(name), let folder = Bundle.main.url(forResource: "Web", withExtension: nil) {
+            source = folder.appendingPathComponent("hwp").appendingPathComponent(name)
+            if name.hasSuffix(".html") { kind = "text/html; charset=utf-8" }
+            if name.hasSuffix(".js") { kind = "text/javascript; charset=utf-8" }
+            if name.hasSuffix(".wasm") { kind = "application/wasm" }
+        }
+        guard let source, let data = try? Data(contentsOf: source, options: .mappedIfSafe),
+              let answer = HTTPURLResponse(
+                url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": kind, "Content-Length": String(data.count), "Access-Control-Allow-Origin": "*"]
+              ) else {
+            urlSchemeTask.didFailWithError(URLError(.fileDoesNotExist))
+            return
+        }
+        urlSchemeTask.didReceive(answer)
+        urlSchemeTask.didReceive(data)
+        urlSchemeTask.didFinish()
+    }
+
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
+}
+
 // MARK: pages out of a web view
 
 /// A web view that is not looked at: a file is shown in it, and what it shows is taken as PDF pages.
@@ -278,8 +328,9 @@ final class WebPages: NSObject, WKNavigationDelegate {
     private var waiting: CheckedContinuation<Bool, Never>?
     private var turn = 0
 
-    init(size: CGSize, scripts: Bool) {
+    init(size: CGSize, scripts: Bool, handler: HangulFiles? = nil) {
         let configuration = WKWebViewConfiguration()
+        if let handler { configuration.setURLSchemeHandler(handler, forURLScheme: HangulFiles.scheme) }
         configuration.defaultWebpagePreferences.allowsContentJavaScript = scripts
         web = WKWebView(frame: CGRect(origin: .zero, size: size), configuration: configuration)
         super.init()
@@ -307,6 +358,21 @@ final class WebPages: NSObject, WKNavigationDelegate {
         let shown = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             waiting = continuation
             web.loadFileURL(file, allowingReadAccessTo: access)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in
+                guard let self, self.turn == mine else { return }
+                self.done(false)
+            }
+        }
+        return shown
+    }
+
+    /// Shows a page at an address of the app's own (see [HangulFiles]).
+    func open(_ url: URL) async -> Bool {
+        turn += 1
+        let mine = turn
+        let shown = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            waiting = continuation
+            web.load(URLRequest(url: url))
             DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in
                 guard let self, self.turn == mine else { return }
                 self.done(false)
@@ -535,7 +601,7 @@ enum Converter {
     /// cut between its lines on pages of a book's size.
     static func way(for kind: ForeignKind) -> Way {
         switch kind {
-        case .slides, .epub: return .sliced
+        case .slides, .epub, .hangul: return .sliced
         case .word, .sheet, .text: return .printed
         }
     }
@@ -575,7 +641,9 @@ enum Converter {
         var book: URL?
         var title = name
         var count = 0
-        if kind == .epub {
+        if kind == .hangul {
+            count = try await hangulPages(file, to: target, progress: progress)
+        } else if kind == .epub {
             let root = folder.appendingPathComponent("book", isDirectory: true)
             let read = try Epub.unpack(file, to: root)
             book = root
@@ -668,6 +736,46 @@ enum Converter {
             if let data = await pages.piece(CGRect(x: 0, y: top, width: width, height: bottom - top)) {
                 binder.add(data)
             }
+        }
+        binder.close()
+        return binder.pages
+    }
+
+    /// A Hangul file's pages: rhwp draws each as a picture made of lines and letters (SVG) in a box of the
+    /// page's size, and every box is taken as a page.
+    private static func hangulPages(_ file: URL, to target: URL, progress: ((String) -> Void)?) async throws -> Int {
+        let pages = WebPages(size: CGSize(width: 794, height: 1123), scripts: true, handler: HangulFiles(file: file))
+        defer { pages.close() }
+        guard await pages.open(HangulFiles.page) else { throw ConvertError.unreadable }
+        // (The page's script is a module: it may not have run yet when the page says it is finished.)
+        var looks = 0
+        while looks < 50 {
+            if await pages.run("String(window.hwpState||'')") == "ready" { break }
+            await pages.pause(0.1)
+            looks += 1
+        }
+        guard looks < 50 else {
+            DebugLog.write("convert: the Hangul engine did not come up")
+            throw ConvertError.unreadable
+        }
+        _ = await pages.run("(function(){window.convertHwp('\(HangulFiles.input)');return 'ok';})()")
+        var state = ""
+        var waited = 0
+        while waited < 900 {
+            state = await pages.run("String(window.hwpState||'')")
+            if state.hasPrefix("done") || state.hasPrefix("error") { break }
+            if state.hasPrefix("working ") { progress?(String(state.dropFirst(8))) }
+            await pages.pause(0.2)
+            waited += 1
+        }
+        guard state.hasPrefix("done") else {
+            DebugLog.write("convert: Hangul file not drawn: \(state.prefix(160))")
+            throw ConvertError.unreadable
+        }
+        let boxes = await slideRects(pages)
+        guard !boxes.isEmpty, let binder = PageBinder(url: target, size: boxes[0].size, margin: 0) else { throw ConvertError.nothing }
+        for rect in boxes {
+            if let data = await pages.piece(rect) { binder.add(data, asItIs: true) }
         }
         binder.close()
         return binder.pages
@@ -805,7 +913,7 @@ enum Converter {
                         DebugLog.write("convert: \(name) \(label) FAILED: \(error)")
                     }
                 }
-                if kind != .epub, let copy = try? borrow(file) {
+                if kind != .epub, kind != .hangul, let copy = try? borrow(file) {
                     let pages = WebPages(size: CGSize(width: 794, height: 1123), scripts: true)
                     if await pages.show(copy, access: copy.deletingLastPathComponent()) {
                         await pages.pause(0.5)

@@ -319,6 +319,10 @@ jobs:
           python3 -m venv venv
           venv/bin/pip install -q python-docx python-pptx openpyxl
           venv/bin/python tools/make_samples.py samples
+          # Two Hangul files of the rhwp project's own samples (not kept in this repository).
+          for name in biz_plan.hwp eq-01.hwp; do
+            curl -sfL -o "samples/$name" "https://raw.githubusercontent.com/edwardkim/rhwp/main/samples/$name" || echo "could not fetch $name"
+          done
           ls -la samples
           UDID=$(xcrun simctl list devices available -j | python3 -c '
           import json, sys

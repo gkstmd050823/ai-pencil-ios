@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>hwp</title>
+<style>
+html, body { margin: 0; padding: 0; background: #fff; }
+/* One box a page, as large as the page: the app takes each as a page of the PDF. */
+.slide { display: block; margin: 0; padding: 0; overflow: hidden; page-break-after: always; page-break-inside: avoid; background: #fff; }
+.slide svg { display: block; }
+</style>
+</head>
+<body>
+<script type="module">
+// Draws a Hangul (HWP/HWPX) file as one SVG a page with rhwp (MIT, github.com/edwardkim/rhwp), all on
+// this device. The app asks with convertHwp(where the file is) and then watches window.hwpState.
+import init, { HwpDocument } from './rhwp.js';
+
+window.hwpState = 'ready';
+
+// rhwp lays lines out by asking how wide words are in the fonts this web view has.
+let ctx = null;
+let lastFont = '';
+globalThis.measureTextWidth = (font, text) => {
+  if (!ctx) ctx = document.createElement('canvas').getContext('2d');
+  if (font !== lastFont) { ctx.font = font; lastFont = font; }
+  return ctx.measureText(text).width;
+};
+
+window.convertHwp = async (url) => {
+  window.hwpState = 'working';
+  try {
+    await init({ module_or_path: './rhwp_bg.wasm' });
+    const answer = await fetch(url);
+    if (!answer.ok) throw new Error('file ' + answer.status);
+    const bytes = new Uint8Array(await answer.arrayBuffer());
+    const doc = new HwpDocument(bytes);
+    const count = doc.pageCount();
+    let width = 0;
+    let height = 0;
+    for (let i = 0; i < count; i++) {
+      const box = document.createElement('div');
+      box.className = 'slide';
+      box.innerHTML = doc.renderPageSvg(i);
+      const svg = box.querySelector('svg');
+      if (!svg) continue;
+      // The page's size, from the picture itself.
+      let w = parseFloat(svg.getAttribute('width'));
+      let h = parseFloat(svg.getAttribute('height'));
+      const view = (svg.getAttribute('viewBox') || '').split(/[ ,]+/).map(Number);
+      if (!(w > 0) && view.length === 4) w = view[2];
+      if (!(h > 0) && view.length === 4) h = view[3];
+      if (!(w > 0) || !(h > 0)) { w = 794; h = 1123; }
+      box.style.width = w + 'px';
+      box.style.height = h + 'px';
+      if (i === 0) { width = w; height = h; }
+      document.body.appendChild(box);
+      window.hwpState = 'working ' + (i + 1) + '/' + count;
+    }
+    try { doc.free(); } catch (e) {}
+    const paper = document.createElement('style');
+    paper.textContent = '@page{size:' + width + 'px ' + height + 'px;margin:0;}';
+    document.head.appendChild(paper);
+    window.hwpState = 'done ' + count + ' ' + width + ' ' + height;
+  } catch (error) {
+    window.hwpState = 'error ' + (error && error.message ? error.message : String(error));
+  }
+};
+
+// (Opened by hand with ?file=name, for trying it in a browser.)
+const asked = new URLSearchParams(location.search).get('file');
+if (asked) window.convertHwp(asked);
+</script>
+</body>
+</html>
