@@ -530,7 +530,15 @@ enum Converter {
         case sliced, printed
     }
 
-    static var way: Way = .sliced
+    /// The way each kind is made into pages when none is asked for: a Word file and a workbook as
+    /// printed (the printer leaves a margin and fills its pages), a deck slide by slide and a book
+    /// cut between its lines on pages of a book's size.
+    static func way(for kind: ForeignKind) -> Way {
+        switch kind {
+        case .slides, .epub: return .sliced
+        case .word, .sheet, .text: return .printed
+        }
+    }
 
     struct Made {
         /// The PDF, in a folder of its own that is to be thrown away once it has been copied.
@@ -559,7 +567,7 @@ enum Converter {
 
     /// [file] is a copy made by [borrow]; [name] is what the document is to be called.
     static func convert(_ file: URL, kind: ForeignKind, name: String, way asked: Way? = nil, progress: ((String) -> Void)? = nil) async throws -> Made {
-        let way = asked ?? Converter.way
+        let way = asked ?? Converter.way(for: kind)
         let folder = file.deletingLastPathComponent()
         let target = folder.appendingPathComponent("converted.pdf")
         try? FileManager.default.removeItem(at: target)
@@ -592,7 +600,36 @@ enum Converter {
         guard await pages.show(file, access: file.deletingLastPathComponent()) else { throw ConvertError.unreadable }
         await pages.pause(0.5)
         await pages.settle()
-        if way == .printed {
+        // How WebKit lays these files out was read off the build server's samples (0.16.0): a deck is a
+        // column of boxes, one a slide, the later ones filled in only once they are scrolled to; a
+        // workbook is a row of tabs over a frame that shows one sheet; a Word file is one long column.
+        if kind == .slides, way == .sliced {
+            let slides = await slideRects(pages)
+            if !slides.isEmpty, let binder = PageBinder(url: target, size: slides[0].size, margin: 0) {
+                for rect in slides {
+                    if let data = await pages.piece(rect) { binder.add(data, asItIs: true) }
+                }
+                binder.close()
+                if binder.pages > 0 { return binder.pages }
+            }
+        }
+        if kind == .sheet {
+            let tabs = Int(await pages.run("String(document.querySelectorAll('.TabView').length)")) ?? 0
+            if tabs > 1, let binder = PageBinder(url: target, size: a4, margin: 0) {
+                var index = 0
+                while index < min(tabs, 40) {
+                    if index > 0 {
+                        _ = await pages.run("(function(){var t=document.getElementById('Tab\(index)');if(t){t.click();return 'ok';}return 'none';})()")
+                        await pages.pause(0.7)
+                    }
+                    binder.add(pages.printed(paper: a4, margin: 24), asItIs: true)
+                    index += 1
+                }
+                binder.close()
+                return binder.pages
+            }
+        }
+        if way == .printed || kind != .slides {
             let data = pages.printed(paper: a4, margin: kind == .slides ? 0 : 28)
             do {
                 try data.write(to: target, options: .atomic)
@@ -604,7 +641,6 @@ enum Converter {
         let extent = await pages.extent()
         guard extent.width > 0, extent.height > 0 else { throw ConvertError.nothing }
         let width = max(extent.width, 200)
-        // A sheet wider than the paper makes a page that much larger; its shape stays that of A4.
         let height = (width * view.height / view.width).rounded()
         let cuts = await pages.cuts(height: height)
         guard cuts.count >= 2, let binder = PageBinder(url: target, size: CGSize(width: width, height: height), margin: 0) else { throw ConvertError.unwritable }
@@ -620,6 +656,38 @@ enum Converter {
         }
         binder.close()
         return binder.pages
+    }
+
+    /// Where each slide of a deck stands in the web view, once every slide has been filled in.
+    private static func slideRects(_ pages: WebPages) async -> [CGRect] {
+        // Scrolled through from top to bottom: a slide is only laid out once it has come near the screen.
+        let high = await pages.extent().height
+        var at: CGFloat = 0
+        var steps = 0
+        while at < high, steps < 400 {
+            _ = await pages.run("(function(){window.scrollTo(0,\(Int(at)));return 'ok';})()")
+            await pages.pause(0.05)
+            at += 900
+            steps += 1
+        }
+        var tries = 0
+        while tries < 60 {
+            let waiting = await pages.run("String(document.querySelectorAll('.loading-slide').length)")
+            if waiting == "0" || waiting.isEmpty { break }
+            await pages.pause(0.25)
+            tries += 1
+        }
+        _ = await pages.run("(function(){window.scrollTo(0,0);return 'ok';})()")
+        await pages.settle()
+        let script = "(function(){var s=document.querySelectorAll('.slide'),o=[],i,r;for(i=0;i<s.length;i++){r=s[i].getBoundingClientRect();"
+            + "if(r.width>20&&r.height>20)o.push([r.left+window.scrollX,r.top+window.scrollY,r.width,r.height].join(' '));}return o.join(';');})()"
+        let text = await pages.run(script)
+        var rects: [CGRect] = []
+        for part in text.split(separator: ";") {
+            let numbers = part.split(separator: " ").compactMap { Double($0) }
+            if numbers.count == 4 { rects.append(CGRect(x: numbers[0], y: numbers[1], width: numbers[2], height: numbers[3])) }
+        }
+        return rects
     }
 
     /// The look of a book's pages: the book's own, on paper of this size, with room at the sides.
