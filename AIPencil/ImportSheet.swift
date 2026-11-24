@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Asked whenever a PDF comes in, from the file picker or from another app: a document of its own (and in
+/// Asked whenever a file comes in (a PDF, or a file a PDF is made of), from the file picker or from another app: a document of its own (and in
 /// which folder), or more pages for a document that is open (and where in it).
 struct ImportSheet: View {
     let files: IncomingFiles
@@ -90,7 +90,7 @@ struct ImportSheet: View {
                     }
                 }
             }
-            .navigationTitle("PDF 가져오기")
+            .navigationTitle("파일 가져오기")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

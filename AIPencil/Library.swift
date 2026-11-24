@@ -342,13 +342,29 @@ final class Library: ObservableObject {
 
     /// The same without holding the screen still while the file is copied.
     @MainActor
-    func bringIn(_ source: URL, into place: UUID? = nil, password: String? = nil) async throws -> Doc {
+    func bringIn(_ source: URL, into place: UUID? = nil, password: String? = nil, title: String? = nil) async throws -> Doc {
         let id = UUID()
         let target = pdfURL(for: id)
         let pages = try await Task.detached(priority: .userInitiated) {
             try Library.copy(source, to: target, password: password)
         }.value
-        return shelve(id, source: source, title: nil, pages: pages, into: place)
+        return shelve(id, source: source, title: title, pages: pages, into: place)
+    }
+
+    /// Where the EPUB a document was made of is kept, taken apart, for reading as it is.
+    func bookFolder(for id: UUID) -> URL {
+        folder(for: id).appendingPathComponent("epub", isDirectory: true)
+    }
+
+    /// Keeps the folder an EPUB was taken apart into beside the PDF made of it.
+    func keepBook(_ root: URL, for id: UUID) {
+        let target = bookFolder(for: id)
+        try? FileManager.default.removeItem(at: target)
+        do {
+            try FileManager.default.moveItem(at: root, to: target)
+        } catch {
+            DebugLog.write("import: the book itself could not be kept (\(error))")
+        }
     }
 
     /// A name for a new notebook that no document has yet: "새 노트", then "새 노트 2", ...

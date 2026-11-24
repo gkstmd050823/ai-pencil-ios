@@ -22,6 +22,10 @@ on:
         description: Also run the app in a simulator (pictures, the app's own checks, touches). About an hour.
         type: boolean
         default: false
+      convert:
+        description: Make PDFs of sample Word, PowerPoint, Excel and EPUB files in a simulator. A few minutes.
+        type: boolean
+        default: false
 
 concurrency:
   # (A push does not stop a run that was asked for by hand, the hour of checks: they are apart.)
@@ -47,7 +51,7 @@ jobs:
 
       # First for the simulator: it is the quicker build, so a compile error shows up sooner.
       - name: Build for the simulator
-        if: github.event_name == 'workflow_dispatch' && inputs.verify
+        if: github.event_name == 'workflow_dispatch' && (inputs.verify || inputs.convert)
         run: |
           set -o pipefail
           xcodebuild build \
@@ -304,6 +308,59 @@ jobs:
           echo "---- dashes ----"
           grep "^dashes: " app-debug.log || true
           xcrun simctl shutdown "$UDID" || true
+
+      # Sample files made here (tools/make_samples.py) are made into PDFs by the app in a simulator, both
+      # ways it knows; the PDFs, pictures of their pages and how WebKit laid the files out are kept.
+      - name: Make PDFs of sample documents in a simulator
+        if: github.event_name == 'workflow_dispatch' && inputs.convert
+        run: |
+          set -e
+          mkdir -p samples converted
+          python3 -m venv venv
+          venv/bin/pip install -q python-docx python-pptx openpyxl
+          venv/bin/python tools/make_samples.py samples
+          ls -la samples
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          found = ""
+          for runtime, devices in json.load(sys.stdin)["devices"].items():
+              if "iOS" not in runtime:
+                  continue
+              for d in devices:
+                  if "iPad" in d["name"]:
+                      found = d["udid"]
+          print(found)')
+          if [ -z "$UDID" ]; then echo "no iPad simulator on this runner"; exit 1; fi
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl install "$UDID" build/Build/Products/Debug-iphonesimulator/AIPencil.app
+          DATA=$(xcrun simctl get_app_container "$UDID" app.aipencil.ios data)
+          mkdir -p "$DATA/Documents/convert-in"
+          cp samples/* "$DATA/Documents/convert-in/"
+          xcrun simctl launch --terminate-running-process "$UDID" app.aipencil.ios -noRestore -convertCheck
+          for i in $(seq 1 150); do
+            if grep -q "^convert: done" "$DATA/Documents/debug.log" 2>/dev/null; then break; fi
+            sleep 2
+          done
+          xcrun simctl io "$UDID" screenshot converted/screen.png || true
+          cp "$DATA/Documents/debug.log" converted/app-debug.log 2>/dev/null || true
+          cp -R "$DATA/Documents/convert-out/." converted/ 2>/dev/null || true
+          grep "^convert: " converted/app-debug.log || true
+          for made in converted/*.pdf; do
+            [ -f "$made" ] || continue
+            swift tools/pdf_pages.swift "$made" "converted/$(basename "$made" .pdf)" 6 || true
+          done
+          xcrun simctl shutdown "$UDID" || true
+
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.convert
+        with:
+          name: converted
+          path: |
+            converted
+            samples
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Build for the iPad (unsigned)
         run: |

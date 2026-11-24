@@ -7,8 +7,8 @@ options:
   createIntermediateGroups: true
 settings:
   base:
-    MARKETING_VERSION: "0.15.9"
-    CURRENT_PROJECT_VERSION: "52"
+    MARKETING_VERSION: "0.16.0"
+    CURRENT_PROJECT_VERSION: "53"
     SWIFT_VERSION: "5.0"
 targets:
   AIPencil:
@@ -46,6 +46,18 @@ targets:
             LSHandlerRank: Alternate
             LSItemContentTypes:
               - com.adobe.pdf
+          # Files a PDF is made of when they come in.
+          - CFBundleTypeName: Document
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - org.openxmlformats.wordprocessingml.document
+              - com.microsoft.word.doc
+              - org.openxmlformats.presentationml.presentation
+              - com.microsoft.powerpoint.ppt
+              - org.openxmlformats.spreadsheetml.sheet
+              - com.microsoft.excel.xls
+              - public.rtf
+              - org.idpf.epub-container
         LSSupportsOpeningDocumentsInPlace: false
         UIFileSharingEnabled: true
         ITSAppUsesNonExemptEncryption: false

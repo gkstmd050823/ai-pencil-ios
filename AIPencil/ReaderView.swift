@@ -73,6 +73,7 @@ struct ReaderView: View {
     @State private var errorText: String?
     @State private var showingSettings = false
     @State private var showingQuestions = false
+    @State private var showingBook = false
     @State private var navigator: NavigatorRequest?
     @State private var showingOptions = false
     @State private var exporting = false
@@ -210,7 +211,10 @@ struct ReaderView: View {
                 library.pageOnShow = nil
             }
         }
-        .fileImporter(isPresented: $pickingPages, allowedContentTypes: [.pdf], allowsMultipleSelection: true) { result in
+        .fullScreenCover(isPresented: $showingBook) {
+            EpubReader(root: library.bookFolder(for: doc.id), key: doc.id.uuidString)
+        }
+        .fileImporter(isPresented: $pickingPages, allowedContentTypes: ForeignKind.pickable, allowsMultipleSelection: true) { result in
             switch result {
             case .success(let urls):
                 guard !urls.isEmpty else { return }
@@ -368,7 +372,15 @@ struct ReaderView: View {
             Button {
                 pickingPages = true
             } label: {
-                Label("PDF 가져오기", systemImage: "arrow.down.doc")
+                Label("파일 가져오기", systemImage: "arrow.down.doc")
+            }
+            // (A document made of an EPUB: the book itself, to read with the words flowing.)
+            if FileManager.default.fileExists(atPath: library.bookFolder(for: doc.id).path) {
+                Button {
+                    showingBook = true
+                } label: {
+                    Label("EPUB 원본 보기", systemImage: "book")
+                }
             }
             Button {
                 export(toDocuments: false)

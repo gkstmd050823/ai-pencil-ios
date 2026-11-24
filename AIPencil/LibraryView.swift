@@ -31,7 +31,7 @@ struct LibraryView: View {
             ImportSheet(files: files) { place in
                 bringIn(files.urls, into: place)
             } onAdd: { doc, atEnd in
-                addPages(files.urls, to: doc, atEnd: atEnd)
+                asPDFs(files.urls) { addPages($0, to: doc, atEnd: atEnd) }
             }
         }
         // While files are copied or pages put in, nothing else is to be touched: a page written on meanwhile
@@ -67,6 +67,7 @@ struct LibraryView: View {
         }
         .onAppear {
             if ProcessInfo.processInfo.arguments.contains("-selfCheck") { SelfCheck.run() }
+            if ProcessInfo.processInfo.arguments.contains("-convertCheck") { Converter.check() }
             runDemoIfAsked()
         }
     }
@@ -80,7 +81,11 @@ struct LibraryView: View {
             var last: Doc?
             for url in urls {
                 do {
-                    last = try await library.bringIn(url, into: place)
+                    if let kind = ForeignKind.of(url) {
+                        last = try await converted(url, kind: kind, into: place)
+                    } else {
+                        last = try await library.bringIn(url, into: place)
+                    }
                 } catch ImportError.locked {
                     // (Asked about once the others are in.)
                     lockedFiles.append(url)
@@ -154,6 +159,52 @@ struct LibraryView: View {
             } else {
                 askNextLocked()
             }
+        }
+    }
+
+    /// A Word, PowerPoint or Excel file or an EPUB becomes a document: a PDF is made of it and brought
+    /// in like any other. An EPUB is kept as well, to be read as it is from inside the document.
+    @MainActor
+    private func converted(_ url: URL, kind: ForeignKind, into place: UUID?) async throws -> Doc {
+        Diagnostics.shared.step("making a PDF of a file")
+        library.working = "PDF로 바꾸는 중"
+        let name = url.deletingPathExtension().lastPathComponent
+        let copy = try await Task.detached(priority: .userInitiated) { try Converter.borrow(url) }.value
+        defer { try? FileManager.default.removeItem(at: copy.deletingLastPathComponent()) }
+        let made = try await Converter.convert(copy, kind: kind, name: name) { step in
+            library.working = "PDF로 바꾸는 중 \(step)"
+        }
+        let doc = try await library.bringIn(made.pdf, into: place, title: made.title)
+        if let book = made.book { library.keepBook(book, for: doc.id) }
+        return doc
+    }
+
+    /// Hands on the files with those that are not PDFs made into PDFs. (The PDFs made lie in the
+    /// temporary folder, which the system empties.)
+    private func asPDFs(_ urls: [URL], then go: @escaping ([URL]) -> Void) {
+        guard urls.contains(where: { ForeignKind.of($0) != nil }) else {
+            go(urls)
+            return
+        }
+        guard library.working == nil else { return }
+        library.working = "PDF로 바꾸는 중"
+        Task { @MainActor in
+            var ready: [URL] = []
+            for url in urls {
+                guard let kind = ForeignKind.of(url) else {
+                    ready.append(url)
+                    continue
+                }
+                do {
+                    let copy = try await Task.detached(priority: .userInitiated) { try Converter.borrow(url) }.value
+                    let made = try await Converter.convert(copy, kind: kind, name: url.deletingPathExtension().lastPathComponent)
+                    ready.append(made.pdf)
+                } catch {
+                    errorText = error.localizedDescription
+                }
+            }
+            library.working = nil
+            if !ready.isEmpty { go(ready) }
         }
     }
 
@@ -393,7 +444,7 @@ private struct Shelf: View {
         }
         .background(Tone.page.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
-        .fileImporter(isPresented: $importing, allowedContentTypes: [.pdf], allowsMultipleSelection: true) { result in
+        .fileImporter(isPresented: $importing, allowedContentTypes: ForeignKind.pickable, allowsMultipleSelection: true) { result in
             switch result {
             case .success(let urls):
                 guard !urls.isEmpty else { return }
@@ -730,7 +781,7 @@ private struct Shelf: View {
             Button {
                 importing = true
             } label: {
-                Label("PDF 가져오기", systemImage: "square.and.arrow.down")
+                Label("파일 가져오기", systemImage: "square.and.arrow.down")
             }
             Button {
                 choosingPaper = true
@@ -919,7 +970,7 @@ private struct Shelf: View {
             QuickAction(symbol: "square.and.pencil", title: "새 노트") {
                 choosingPaper = true
             }
-            QuickAction(symbol: "arrow.down.doc", title: "PDF 가져오기") {
+            QuickAction(symbol: "arrow.down.doc", title: "파일 가져오기") {
                 importing = true
             }
             if folder == nil {
@@ -1052,7 +1103,7 @@ private struct Shelf: View {
                 Button {
                     importing = true
                 } label: {
-                    Label("PDF 가져오기", systemImage: "plus")
+                    Label("파일 가져오기", systemImage: "plus")
                         .padding(.horizontal, 8)
                 }
                 .buttonStyle(.borderedProminent)
