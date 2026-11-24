@@ -213,6 +213,16 @@ struct PenLine {
         var time: TimeInterval
     }
 
+    /// The width the pen made each point, before any pointing of the line's ends.
+    private var bare: [CGFloat] = []
+    /// The widest the pen has made the line, while its beginning is not settled.
+    private var peak: CGFloat = 0
+    /// The line is long enough to have its pointed beginning, and that is as it will stay.
+    private var begun = false
+    /// Whether the line's first points are as they will stay. (Until they are, nothing of the line is
+    /// to be put away as done.)
+    var startFirm: Bool { taper <= 0 || begun }
+
     private var knots: [Knot] = []
     /// How many of the stretches between knots have been worked out for good.
     private var stretches = 0
@@ -259,6 +269,17 @@ struct PenLine {
         guard taper > 0 else { return 1 }
         let along = min(1, max(0, distance / tipReach))
         return tip + (1 - tip) * along * (2 - along)
+    }
+
+    /// The length up to which a line is too short to have pointed ends. (It is the reach of a point,
+    /// and less for a very wide pen far zoomed in: the beginning of a line is dressed anew at every knot
+    /// until the line is twice this long, and that is not to be more than some two hundred points.)
+    private var turn: CGFloat { min(tipReach, spacing * 150) }
+
+    /// How much of its pointed ends a line of this length has: none up to `turn`, all of them from twice that.
+    private func grown(_ length: CGFloat) -> CGFloat {
+        let part = min(1, max(0, (length - turn) / turn))
+        return part * part * (3 - 2 * part)
     }
 
     /// The longest the line trails the pen at full steadying, in seconds.
@@ -325,6 +346,7 @@ struct PenLine {
         )
         var pressure = press
         heldWidth = widened(record, press: &pressure, held: heldWidth)
+        if !begun { peak = max(peak, heldWidth) }
         press = pressure
         let before = knots.count
         knot(place, heldWidth, time: sample.time)
@@ -369,10 +391,10 @@ struct PenLine {
             let place = heard[index]
             held = widened(place, press: &pressure, held: held)
             guard let knot = place.knot, knot < knots.count else { continue }
-            let wide = max(0.2, held * pointed(place.run))
+            let wide = max(0.2, held)
             if knot == 0, stretches == 0 {
                 knots[0].width = wide
-                if !widths.isEmpty { widths[0] = wide }
+                if !bare.isEmpty { bare[0] = wide }
                 changed = true
             } else if knot > stretches {
                 knots[knot].width = wide
@@ -381,6 +403,7 @@ struct PenLine {
         }
         press = pressure
         heldWidth = held
+        if !begun { peak = max(peak, heldWidth) }
         if changed { work(toTheEnd: false) }
         return changed
     }
@@ -388,8 +411,8 @@ struct PenLine {
     private mutating func knot(_ place: CGPoint, _ size: CGFloat, time: TimeInterval, always: Bool = false) {
         if let end = knots.last, !always, hypot(place.x - end.point.x, place.y - end.point.y) < spacing { return }
         if let end = knots.last { run += hypot(place.x - end.point.x, place.y - end.point.y) }
-        // (Where the line begins it comes up from a point, if it is a line with pointed ends.)
-        knots.append(Knot(point: place, width: max(0.2, size * pointed(run)), time: max(0, time - began)))
+        // (The width is the pen's own; `dress` gives a line with pointed ends the point it begins from.)
+        knots.append(Knot(point: place, width: max(0.2, size), time: max(0, time - began)))
         work(toTheEnd: false)
     }
 
@@ -427,6 +450,7 @@ struct PenLine {
             }
             points.append(place)
             widths.append(b.width + (c.width - b.width) * t)
+            bare.append(b.width + (c.width - b.width) * t)
             times.append(b.time + (c.time - b.time) * Double(t))
         }
     }
@@ -436,13 +460,16 @@ struct PenLine {
     private mutating func work(toTheEnd: Bool) {
         let count = knots.count
         guard count > 0 else { return }
+        let from = settled
         points.removeSubrange(settled...)
         widths.removeSubrange(settled...)
+        bare.removeSubrange(settled...)
         times.removeSubrange(settled...)
         along.removeSubrange(settled...)
         if settled == 0 {
             points.append(knots[0].point)
             widths.append(knots[0].width)
+            bare.append(knots[0].width)
             times.append(knots[0].time)
             along.append(0)
             settled = 1
@@ -457,6 +484,26 @@ struct PenLine {
             lay(stretch: rest)
             rest += 1
         }
+        dress(from: from)
+    }
+
+    /// Gives the points from [from] on the widths they are shown in: the pen's own (`bare`), and at the
+    /// line's beginning the point it comes up from. A line too short to have ends has none: it is as
+    /// wide as the pen made it at its widest, all of it, and is on show so while it is written (until
+    /// 0.15.5 it was shown coming up from a point, and filled out when the pen lifted: a dot grew as the
+    /// pen left it). As the line grows past that length its beginning comes down to its point little
+    /// by little; until it has, all of the line is dressed again at every knot.
+    private mutating func dress(from: Int) {
+        guard taper > 0 else { return }
+        let share = begun ? 1 : grown(along.last ?? 0)
+        var index = begun && stretches > 0 ? from : 0
+        while index < points.count {
+            let filled = bare[index] + (1 - share) * max(0, peak - bare[index])
+            let ended = 1 - share * (1 - pointed(along[index]))
+            widths[index] = max(0.2, filled * ended)
+            index += 1
+        }
+        if share >= 1 { begun = true }
     }
 
     /// The pen lifted. A steadied line is still on its way to where the pen left the page; this takes it
@@ -478,20 +525,20 @@ struct PenLine {
         if knots.count == 1 {
             knot(CGPoint(x: knots[0].point.x + 0.1, y: knots[0].point.y), knots[0].width, time: last.time, always: true)
         }
+        let fresh = !begun
         work(toTheEnd: true)
         guard taper > 0, points.count > 1 else { return }
-        if run < tipReach {
-            // Too short to have ends (a dot, the stroke of a comma): as wide as it is, all of it.
-            for index in widths.indices { widths[index] = max(widths[index], heldWidth) }
-            reshapedFrom = 0
-            return
-        }
+        // (A line whose beginning was not settled yet was dressed anew, all of it, as it got its last knots.)
+        if fresh { reshapedFrom = 0 }
+        let length = along.last ?? 0
+        let share = begun ? 1 : grown(length)
+        // Too short to have ends (a dot, the stroke of a comma): it stays as it was on show.
+        guard share > 0 else { return }
         // Where the line ends it goes down to a point as it came up from one.
-        var along: CGFloat = 0
         var index = points.count - 1
-        while index >= 0, along < tipReach {
-            widths[index] = max(0.2, widths[index] * pointed(along))
-            if index > 0 { along += hypot(points[index].x - points[index - 1].x, points[index].y - points[index - 1].y) }
+        while index >= 0, length - along[index] < tipReach {
+            let ended = 1 - share * (1 - pointed(length - along[index]))
+            widths[index] = max(0.2, widths[index] * ended)
             index -= 1
         }
         reshapedFrom = min(reshapedFrom, max(index + 1, 0))
