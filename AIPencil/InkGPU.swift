@@ -55,6 +55,7 @@ final class InkGPU {
     private(set) var lastLines: Double = 0
     private(set) var lastDrawing: Double = 0
     private(set) var lastCopy: Double = 0
+    private(set) var lastRuns = 0
 
     private static let source = """
     #include <metal_stdlib>
@@ -179,23 +180,51 @@ final class InkGPU {
         DebugLog.write("gpu: \(device.name)")
     }
 
-    /// The lines to draw into one picture: every stretch as six numbers (where it begins and ends, and
-    /// half its width at either end), and the runs of stretches that are of one colour.
-    private struct Batch {
+    /// Lines of one colour that are painted together: every stretch of them as six numbers (where it
+    /// begins and ends, and half its width at either end), and which parts of the picture they reach.
+    private struct Run {
+        var colour: SIMD4<Float>
         var numbers: [Float] = []
-        var runs: [(first: Int, count: Int, colour: SIMD4<Float>)] = []
-        var pieces: Int { numbers.count / 6 }
+        /// The picture as thirty-two squares by thirty-two: a bit for each square a line of the run reaches.
+        var cells = [UInt64](repeating: 0, count: 16)
+    }
 
-        private mutating func piece(_ a: CGPoint, _ b: CGPoint, _ ra: CGFloat, _ rb: CGFloat) {
-            numbers.append(Float(a.x))
-            numbers.append(Float(a.y))
-            numbers.append(Float(b.x))
-            numbers.append(Float(b.y))
-            numbers.append(Float(ra))
-            numbers.append(Float(rb))
+    /// The lines to draw into one picture, as runs to be painted one after the other.
+    ///
+    /// A line goes into the last run of its colour unless a run after that one has ink where the line
+    /// is: lines that do not meet can be painted in any order. A page written in black with words in red
+    /// here and there is then two runs, and not a run for every time the colour changes. (The first
+    /// comparison on the build server had a page of two thousand lines, every seventh red: five hundred
+    /// and seventy runs, each two passes of the graphics processor.)
+    private struct Batch {
+        let rect: CGRect
+        var runs: [Run] = []
+        var pieces = 0
+
+        init(rect: CGRect) {
+            self.rect = rect
         }
 
-        mutating func add(_ line: InkPaint.Line, colour: SIMD4<Float>, wide: Bool) {
+        private func cells(of box: CGRect) -> [UInt64] {
+            var cells = [UInt64](repeating: 0, count: 16)
+            guard rect.width > 0, rect.height > 0 else { return cells }
+            func square(_ share: CGFloat) -> Int { min(31, max(0, Int((share * 32).rounded(.down)))) }
+            let left = square((box.minX - rect.minX) / rect.width), right = square((box.maxX - rect.minX) / rect.width)
+            let top = square((box.minY - rect.minY) / rect.height), bottom = square((box.maxY - rect.minY) / rect.height)
+            var row = top
+            while row <= bottom {
+                var column = left
+                while column <= right {
+                    let bit = row * 32 + column
+                    cells[bit / 64] |= UInt64(1) << UInt64(bit % 64)
+                    column += 1
+                }
+                row += 1
+            }
+            return cells
+        }
+
+        mutating func add(_ line: InkPaint.Line, colour: SIMD4<Float>, wide: Bool, box: CGRect) {
             var points = line.points
             var widths = line.widths
             // (A highlighter's line needs only some of its points, as in InkPaint.)
@@ -205,7 +234,16 @@ final class InkGPU {
             }
             let count = points.count
             guard count > 0, widths.count == count else { return }
-            let before = pieces
+            var made: [Float] = []
+            made.reserveCapacity(count * 6)
+            func piece(_ a: CGPoint, _ b: CGPoint, _ ra: CGFloat, _ rb: CGFloat) {
+                made.append(Float(a.x))
+                made.append(Float(a.y))
+                made.append(Float(b.x))
+                made.append(Float(b.y))
+                made.append(Float(ra))
+                made.append(Float(rb))
+            }
             var index = 0
             while index < count {
                 let width = widths[index]
@@ -220,13 +258,38 @@ final class InkGPU {
                 }
                 index += 1
             }
-            let added = pieces - before
-            guard added > 0 else { return }
-            if let last = runs.last, last.colour == colour {
-                runs[runs.count - 1].count += added
-            } else {
-                runs.append((before, added, colour))
+            guard !made.isEmpty else { return }
+            let mine = cells(of: box)
+            var target = -1
+            var at = runs.count - 1
+            while at >= 0 {
+                if runs[at].colour == colour {
+                    target = at
+                    break
+                }
+                var meets = false
+                var word = 0
+                while word < 16 {
+                    if runs[at].cells[word] & mine[word] != 0 {
+                        meets = true
+                        break
+                    }
+                    word += 1
+                }
+                if meets { break }
+                at -= 1
             }
+            if target < 0 {
+                runs.append(Run(colour: colour))
+                target = runs.count - 1
+            }
+            runs[target].numbers.append(contentsOf: made)
+            var word = 0
+            while word < 16 {
+                runs[target].cells[word] |= mine[word]
+                word += 1
+            }
+            pieces += made.count / 6
         }
     }
 
@@ -274,21 +337,22 @@ final class InkGPU {
         guard width > 0, height > 0, width <= 16384, height <= 16384 else { return nil }
         let began = CACurrentMediaTime()
         let strokes = drawing.strokes
-        var pens = Batch()
-        var high = Batch()
+        var pens = Batch(rect: rect)
+        var high = Batch(rect: rect)
         var anyHigh = false
         let step = max(0.02, 1.2 / scale)
         let highStep = max(0.6, 1.2 / scale)
         for stroke in strokes {
             let isHigh = InkPaint.isHighlighter(stroke)
             if isHigh { anyHigh = true }
-            guard stroke.renderBounds.intersects(rect) else { continue }
+            let box = stroke.renderBounds
+            guard box.intersects(rect) else { continue }
             guard InkPaint.isPlain(stroke) else { return nil }
             let colour = Self.colour(InkPaint.color(of: stroke, dark: dark, solid: isHigh))
             if isHigh {
-                high.add(line(of: stroke, step: highStep), colour: colour, wide: true)
+                high.add(line(of: stroke, step: highStep), colour: colour, wide: true, box: box)
             } else {
-                pens.add(line(of: stroke, step: step), colour: colour, wide: false)
+                pens.add(line(of: stroke, step: step), colour: colour, wide: false, box: box)
             }
             if pens.runs.count > 96 || high.runs.count > 96 { return nil }
         }
@@ -296,6 +360,7 @@ final class InkGPU {
         lastLines = (CACurrentMediaTime() - began) * 1000
         lastDrawing = 0
         lastCopy = 0
+        lastRuns = pens.runs.count
         guard let pensPicture = draw(pens, rect: rect, scale: scale, width: width, height: height) else { return nil }
         var made = InkPaint.Made(pens: pensPicture, strokes: strokes.count)
         made.byGPU = true
@@ -318,12 +383,22 @@ final class InkGPU {
         share.storageMode = .private
         guard let picture = device.makeTexture(descriptor: wanted), let covered = device.makeTexture(descriptor: share),
               let commands = queue.makeCommandBuffer() else { return nil }
-        var page: [Float] = [Float(rect.minX), Float(rect.minY), Float(rect.width), Float(rect.height), Float(scale), 0, 0, 0]
+        // (The picture is so many whole pixels, and the part asked for seldom is: a point of the page is
+        // aimed at the pixel InkPaint puts it on. The first comparison on the build server, at 4.54
+        // pixels a point, had the two pictures a third of a pixel apart at the far side of the page.)
+        var page: [Float] = [Float(rect.minX), Float(rect.minY), Float(CGFloat(width) / scale), Float(CGFloat(height) / scale), Float(scale), 0, 0, 0]
         guard let pageBuffer = device.makeBuffer(bytes: &page, length: page.count * MemoryLayout<Float>.stride, options: .storageModeShared) else { return nil }
         var pieces: MTLBuffer?
         var tints: MTLBuffer?
-        if !batch.numbers.isEmpty {
-            pieces = batch.numbers.withUnsafeBytes { bytes in
+        var numbers: [Float] = []
+        numbers.reserveCapacity(batch.pieces * 6)
+        var firsts: [Int] = []
+        for run in batch.runs {
+            firsts.append(numbers.count / 6)
+            numbers.append(contentsOf: run.numbers)
+        }
+        if !numbers.isEmpty {
+            pieces = numbers.withUnsafeBytes { bytes in
                 bytes.baseAddress.flatMap { device.makeBuffer(bytes: $0, length: bytes.count, options: .storageModeShared) }
             }
             var colours: [Float] = []
@@ -359,10 +434,10 @@ final class InkGPU {
             first.colorAttachments[0].storeAction = .store
             guard let covering = commands.makeRenderCommandEncoder(descriptor: first) else { return nil }
             covering.setRenderPipelineState(cover)
-            covering.setVertexBuffer(pieces, offset: run.first * 6 * MemoryLayout<Float>.stride, index: 0)
+            covering.setVertexBuffer(pieces, offset: firsts[number] * 6 * MemoryLayout<Float>.stride, index: 0)
             covering.setVertexBuffer(pageBuffer, offset: 0, index: 1)
             covering.setFragmentBuffer(pageBuffer, offset: 0, index: 1)
-            covering.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: run.count)
+            covering.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: run.numbers.count / 6)
             covering.endEncoding()
             // That, in the run's colour, over what is in the picture already.
             let second = MTLRenderPassDescriptor()
@@ -541,6 +616,7 @@ enum InkGPUCheck {
                         DebugLog.write("gpu check: \(name) at \(scale): a picture did not come (InkPaint \(byHand != nil), GPU \(cold != nil))")
                         continue
                     }
+                    DebugLog.write("gpu check: " + name + " at " + String(describing: scale) + ": runs of one colour, pens " + String(gpu.lastRuns))
                     DebugLog.write(String(format: "gpu check: %@ at %.2f, %d x %d: InkPaint %.1f ms; GPU %.1f ms the first time (%@), %.1f ms again (%@)", name, Double(scale), cold.pens.width, cold.pens.height, slow, first, firstParts, second, secondParts))
                     DebugLog.write("gpu check: \(name) at \(scale): pens: " + apart(byHand.pens, cold.pens))
                     if let a = byHand.high, let b = cold.high {

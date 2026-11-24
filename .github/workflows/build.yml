@@ -402,10 +402,13 @@ jobs:
           cp -R "$DATA/Documents/gpu-out/." gpu/ 2>/dev/null || true
           grep -E "^gpu" gpu/app-debug.log || true
           # The app itself with a page of writing, drawn by the graphics processor and then by the processor.
-          xcrun simctl launch --terminate-running-process "$UDID" app.aipencil.ios -noRestore -sample -demoInk -demoZoom 2.5
+          # (Lines written with the app's own pen first: those are the ones the graphics processor draws.)
+          xcrun simctl launch --terminate-running-process "$UDID" app.aipencil.ios -noRestore -sample -demoPage 5 -demoPen
+          sleep 12
+          xcrun simctl launch --terminate-running-process "$UDID" app.aipencil.ios -noRestore -sample -demoPage 5 -demoZoom 2.5
           sleep 14
           xcrun simctl io "$UDID" screenshot gpu/reader-gpu.png || true
-          xcrun simctl launch --terminate-running-process "$UDID" app.aipencil.ios -noRestore -sample -demoInk -demoZoom 2.5 -noGPU
+          xcrun simctl launch --terminate-running-process "$UDID" app.aipencil.ios -noRestore -sample -demoPage 5 -demoZoom 2.5 -noGPU
           sleep 14
           xcrun simctl io "$UDID" screenshot gpu/reader-cpu.png || true
           cp "$DATA/Documents/debug.log" gpu/app-debug-reader.log 2>/dev/null || true
