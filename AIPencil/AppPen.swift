@@ -357,6 +357,11 @@ struct PenLine {
         }
         // The pen has not left the place it landed on: the dot under it fills out as it rests there.
         if taper > 0, knots.count == 1 {
+            // (The place the first knot was made of is told how far along the dot now counts as being:
+            // a force made good later reckons its width from there, and not from a bare point again.
+            // In 0.15.7 and 0.15.8 it did, once the line had a second knot: the round head a line
+            // began with shrank to a point a moment after it was drawn.)
+            if let first = heard.firstIndex(where: { $0.knot == 0 }) { heard[first].run = lingered }
             let wide = max(0.2, heldWidth * pointed(lingered))
             if wide > knots[0].width {
                 knots[0].width = wide
@@ -400,8 +405,7 @@ struct PenLine {
             let place = heard[index]
             held = widened(place, press: &pressure, held: held)
             guard let knot = place.knot, knot < knots.count else { continue }
-            let far = knot == 0 && knots.count == 1 ? max(place.run, lingered) : place.run
-            let wide = max(0.2, held * pointed(far))
+            let wide = max(0.2, held * pointed(place.run))
             if knot == 0, stretches == 0 {
                 knots[0].width = wide
                 if !widths.isEmpty { widths[0] = wide }

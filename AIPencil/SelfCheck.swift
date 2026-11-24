@@ -347,6 +347,18 @@ enum SelfCheck {
         var apartMost: CGFloat = 0
         for (after, before) in zip(short.widths, shown) { apartMost = max(apartMost, abs(after - before)) }
         note("a short pointed line is not changed by the lift", short.widths.count <= shown.count && apartMost < 0.001, "changed by \(apartMost)")
+        // A pen that rested where it landed and then set off: its true force, come late, leaves the head as it is.
+        var landed = PenLine(width: 1.42, sense: 0, steady: 0, spacing: 0.3, taper: 0.5)
+        for step in 0..<14 {
+            landed.add(PenSample(
+                point: CGPoint(x: 100, y: 100), force: 0.3, time: Double(step) * 0.004, most: PenLine.fullForce, id: step == 0 ? 21 : nil
+            ))
+        }
+        landed.add(PenSample(point: CGPoint(x: 100, y: 100.5), force: 0.3, time: 14 * 0.004, most: PenLine.fullForce))
+        let headBefore = landed.widths.first ?? 0
+        landed.correct(id: 21, force: 0.2, most: PenLine.fullForce)
+        let headAfter = landed.widths.first ?? 0
+        note("a force made good late leaves the dot a line began with", headBefore > 1.4 && abs(headAfter - headBefore) < 0.05, "\(headBefore) to \(headAfter)")
         // A pencil slips sideways as it leaves the paper: those last places are not in the line.
         var hooked = PenLine(width: 1.42, sense: 0, steady: 0, spacing: 0.1)
         for step in 0..<40 {
