@@ -920,8 +920,6 @@ final class ReaderController: ObservableObject {
     /// Called to put a mark back on the page that was taken off it.
     var onShowMark: ((UUID) -> Void)?
     var onDeleteMark: ((UUID) -> Void)?
-    /// Called when the zoom changes.
-    var onZoom: (() -> Void)?
     /// Called when a tool that is to be put down after use has been used.
     var onToolUsed: ((InkTool) -> Void)?
     /// Words were picked out of a page with a finger, and the finger has let go.
@@ -1504,7 +1502,6 @@ struct PDFInkView: UIViewRepresentable {
 
         /// The zoom changed. Once it has settled, the canvases are redrawn as fine as it needs.
         private func scaleChanged() {
-            controller?.onZoom?()
             NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(settleScale), object: nil)
             perform(#selector(settleScale), with: nil, afterDelay: 0.25)
         }

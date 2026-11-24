@@ -31,8 +31,6 @@ struct ReaderView: View {
     var lead = AnyView(EmptyView())
     /// The tool bar floats over the pages, at their top or (dragged down by its handle) at their bottom.
     @AppStorage("toolBarLow") private var toolBarLow = false
-    /// The tool bar was pushed away over its edge; only a handle is left of it.
-    @AppStorage("toolBarHidden") private var toolBarHidden = false
     @State private var barDrag: CGFloat = 0
     @EnvironmentObject private var library: Library
     @Environment(\.colorScheme) private var scheme
@@ -230,8 +228,6 @@ struct ReaderView: View {
             if !placeKept {
                 guard controller.pageIndex == startPage else { return }
                 placeKept = true
-            } else {
-                showBar("page turned")
             }
             Library.notePage(controller.pageIndex, for: doc.id)
         }
@@ -301,34 +297,6 @@ struct ReaderView: View {
         .accessibilityLabel(label)
     }
 
-    /// What is left of the tool bar when it has been pushed away: a short handle at the edge it went over.
-    /// Pulled back in (or touched), it brings the bar back.
-    private var barTab: some View {
-        Capsule()
-            .fill(Tone.pill.opacity(0.6))
-            .overlay(Capsule().stroke(Color.white.opacity(0.4), lineWidth: 0.5))
-            .frame(width: 46, height: 5)
-            .frame(width: 112, height: 24)
-            .contentShape(Rectangle())
-            .onTapGesture { showBar("handle touched") }
-            .gesture(
-                DragGesture(minimumDistance: 6)
-                    .onEnded { value in
-                        let pull = toolBarLow ? -value.translation.height : value.translation.height
-                        if pull > 8 { showBar("handle pulled") }
-                    }
-            )
-            .padding(.bottom, toolBarLow ? 50 : 0)
-            .accessibilityLabel("도구 막대 꺼내기")
-    }
-
-    /// Brings the tool bar back, if it was pushed away.
-    private func showBar(_ why: String) {
-        guard toolBarHidden else { return }
-        withAnimation(.snappy(duration: 0.22)) { toolBarHidden = false }
-        Diagnostics.shared.step("tool bar back: " + why)
-    }
-
     /// The tool bar (or, reading only, a word on what the pen does), afloat over the pages.
     @ViewBuilder
     private func floatingBar(roomy: Bool) -> some View {
@@ -360,18 +328,7 @@ struct ReaderView: View {
                 onQuestions: { showingQuestions = true }, onClearPage: controller.clearPage,
                 onGrip: { moved in barDrag = moved },
                 onGripEnd: { moved in
-                    // Pushed towards the edge it is at, it goes away over that edge. Dragged far enough
-                    // the other way, it goes to the other end of the pages.
-                    let outward = toolBarLow ? moved : -moved
-                    if outward > 24 {
-                        showingOptions = false
-                        withAnimation(.snappy(duration: 0.22)) {
-                            toolBarHidden = true
-                            barDrag = 0
-                        }
-                        Diagnostics.shared.step("tool bar pushed away")
-                        return
-                    }
+                    // Dragged far enough down, it goes to the bottom of the pages; far enough up, back.
                     if !toolBarLow, moved > 110 { toolBarLow = true }
                     if toolBarLow, moved < -110 { toolBarLow = false }
                     withAnimation(.snappy(duration: 0.22)) { barDrag = 0 }
@@ -467,15 +424,10 @@ struct ReaderView: View {
             // popover, a window of its own that sizes itself to what is in it; the app's crashes on an
             // iPad came when the pen was touched to open it.) A touch anywhere else puts it away.
             .overlay(alignment: toolBarLow ? .bottom : .top) {
-                if toolBarHidden, !readOnly {
-                    barTab
-                } else {
-                    floatingBar(roomy: roomy)
-                        .offset(y: barDrag)
-                        .padding(.top, toolBarLow ? 0 : 10)
-                        .padding(.bottom, toolBarLow ? 54 : 0)
-                        .transition(.move(edge: toolBarLow ? .bottom : .top).combined(with: .opacity))
-                }
+                floatingBar(roomy: roomy)
+                    .offset(y: barDrag)
+                    .padding(.top, toolBarLow ? 0 : 10)
+                    .padding(.bottom, toolBarLow ? 54 : 0)
             }
             .overlay(alignment: toolBarLow ? .bottom : .top) {
                 if showingOptions, !readOnly {
@@ -499,7 +451,7 @@ struct ReaderView: View {
                         showingSettings = true
                     }
                     .padding(.horizontal, 16)
-                    .padding(.bottom, toolBarLow && !toolBarHidden ? 114 : 54)
+                    .padding(.bottom, toolBarLow ? 114 : 54)
                 }
             }
             .overlay(alignment: .top) {
@@ -509,7 +461,7 @@ struct ReaderView: View {
                         .padding(.horizontal, 16)
                         .padding(.vertical, 9)
                         .background(.regularMaterial, in: Capsule())
-                        .padding(.top, toolBarLow || toolBarHidden ? 12 : 70)
+                        .padding(.top, toolBarLow ? 12 : 70)
                 }
             }
             .overlay(alignment: .bottom) {
@@ -609,7 +561,6 @@ struct ReaderView: View {
     private func pencil(_ action: PencilAction) {
         // (Reading only, the pen has one tool and nothing to switch to.)
         if readOnly { return }
-        showBar("pencil gesture")
         switch action {
         case .eraser:
             pick(choice.tool == .eraser ? (previousTool == .eraser ? .pen : previousTool) : .eraser)
@@ -666,9 +617,6 @@ struct ReaderView: View {
         }
         controller.onDeleteMark = { id in
             session.delete(id)
-        }
-        controller.onZoom = {
-            showBar("zoom")
         }
         controller.onToolUsed = { tool in
             // A tool set to be put down after use gives way to the one held before it.
@@ -1016,7 +964,7 @@ private struct ToolBar: View {
         .shadow(color: .black.opacity(0.24), radius: 10, y: 4)
     }
 
-    /// The handle the bar is dragged by: to the other end of the pages, or away over the edge it is at.
+    /// The handle the bar is dragged by, to the top of the pages or to their bottom.
     private var grip: some View {
         Image(systemName: "line.3.horizontal")
             .font(.system(size: 12, weight: .semibold))
