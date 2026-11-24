@@ -626,6 +626,21 @@ enum Converter {
                     index += 1
                 }
                 binder.close()
+                // (The printer adds an empty page after some sheets: pages with nothing written on them go.)
+                if let made = PDFDocument(url: target), made.pageCount > 1 {
+                    var at = made.pageCount - 1
+                    var removed = false
+                    while at >= 0, made.pageCount > 1 {
+                        let words = made.page(at: at)?.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        if words.isEmpty {
+                            made.removePage(at: at)
+                            removed = true
+                        }
+                        at -= 1
+                    }
+                    if removed { made.write(to: target) }
+                    return made.pageCount
+                }
                 return binder.pages
             }
         }
@@ -670,11 +685,16 @@ enum Converter {
             at += 900
             steps += 1
         }
+        // Until no more slides come: their number the same four looks running. (The boxes that say a
+        // slide is on its way stay in the page after it has come, so they cannot be waited out.)
         var tries = 0
-        while tries < 60 {
-            let waiting = await pages.run("String(document.querySelectorAll('.loading-slide').length)")
-            if waiting == "0" || waiting.isEmpty { break }
-            await pages.pause(0.25)
+        var seen = ""
+        var same = 0
+        while tries < 60, same < 4 {
+            let now = await pages.run("String(document.querySelectorAll('.slide').length)")
+            same = now == seen ? same + 1 : 0
+            seen = now
+            await pages.pause(0.2)
             tries += 1
         }
         _ = await pages.run("(function(){window.scrollTo(0,0);return 'ok';})()")
