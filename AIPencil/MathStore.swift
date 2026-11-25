@@ -32,6 +32,17 @@ struct MathStore {
         folder.appendingPathComponent("math-\(name).png")
     }
 
+    /// The formula as a drawing, which can be painted at any size. Formulas put in before 0.23.0 have none.
+    func drawingURL(_ name: String) -> URL {
+        folder.appendingPathComponent("math-\(name).pdf")
+    }
+
+    /// The shape of a formula to show at [size] points: painted from its drawing, as fine as that size
+    /// can need, or else the picture taken when it was put in.
+    func shape(_ name: String, size: CGSize) -> UIImage? {
+        MathPicture.shape(drawing: drawingURL(name), size: size) ?? UIImage(contentsOfFile: imageURL(name).path)
+    }
+
     func load() -> [MathItem] {
         guard let data = try? Data(contentsOf: indexURL) else { return [] }
         return (try? JSONDecoder().decode([MathItem].self, from: data)) ?? []
@@ -81,6 +92,33 @@ enum MathSize: String, CaseIterable, Identifiable {
 }
 
 enum MathPicture {
+    /// The shape of the formula drawn in the PDF at [url], for showing at [size] points of the page: ten
+    /// pixels a point (the page five times its size on a screen of two pixels a point), less for a
+    /// formula so large that this would be more than three million pixels.
+    static func shape(drawing url: URL, size: CGSize) -> UIImage? {
+        guard size.width > 0, size.height > 0, let document = CGPDFDocument(url as CFURL), let page = document.page(at: 1) else { return nil }
+        let box = page.getBoxRect(.mediaBox)
+        guard box.width > 0, box.height > 0 else { return nil }
+        let area = Double(size.width * size.height)
+        let density = min(10, (3_000_000 / max(1, area)).squareRoot())
+        let wide = max(1, (Double(size.width) * density).rounded()), high = max(1, (Double(size.height) * density).rounded())
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let whole = CGRect(x: 0, y: 0, width: wide, height: high)
+        let painted = UIGraphicsImageRenderer(size: whole.size, format: format).image { context in
+            UIColor.white.setFill()
+            context.fill(whole)
+            let cg = context.cgContext
+            // (A PDF page is measured from its bottom-left corner.)
+            cg.translateBy(x: 0, y: CGFloat(high))
+            cg.scaleBy(x: CGFloat(wide) / box.width, y: -CGFloat(high) / box.height)
+            cg.translateBy(x: -box.minX, y: -box.minY)
+            cg.drawPDFPage(page)
+        }
+        return inkMask(painted)
+    }
+
     /// The size on the page of a formula that measured [width] x [height] in the preview, where one em of it
     /// measured [em], when an em should be [emPoints] points on the page. A formula too big for the page is
     /// scaled down to fit, keeping its shape.

@@ -3907,9 +3907,38 @@ struct PDFInkView: UIViewRepresentable {
             hold(view)
         }
 
+        /// Makes [new] the document's formulas, shows them, and lets the change be undone.
+        private func changeMath(to new: [MathItem]) {
+            let old = math
+            guard new != old else { return }
+            undoManager?.registerUndo(withTarget: self) { me in
+                me.changeMath(to: old)
+            }
+            dropMath()
+            math = new
+            saveMath()
+            for overlay in overlays.values {
+                for view in overlay.mathViews { view.removeFromSuperview() }
+                for item in math where item.page == overlay.canvas.pageIndex {
+                    install(item, in: overlay)
+                }
+            }
+            tellUndo()
+        }
+
+        /// Takes hold of the formula [id], if it is on a page that is laid out.
+        private func holdMath(_ id: UUID) {
+            for overlay in overlays.values {
+                if let view = overlay.mathViews.first(where: { $0.item.id == id }) {
+                    hold(view)
+                    return
+                }
+            }
+        }
+
         @discardableResult
         private func install(_ item: MathItem, in overlay: PageOverlay) -> MathView {
-            let picture = UIImage(contentsOfFile: mathStore.imageURL(item.image).path)
+            let picture = mathStore.shape(item.image, size: CGSize(width: item.width, height: item.height))
             let view = MathView(item: item, picture: picture, quarterTurns: overlay.quarterTurns, dark: darkPaper)
             view.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(dragMath(_:))))
             view.addInteraction(UIContextMenuInteraction(delegate: self))
@@ -3954,10 +3983,9 @@ struct PDFInkView: UIViewRepresentable {
                 width: Double(size.width), height: Double(size.height),
                 red: Double(red), green: Double(green), blue: Double(blue)
             )
-            math.append(item)
-            saveMath()
+            changeMath(to: math + [item])
             // (Held: it is dragged into place next, with the pen still in hand.)
-            hold(install(item, in: overlay))
+            holdMath(item.id)
         }
 
         /// Swaps a formula for an edited one, keeping its middle where it was, and its colour.
@@ -3971,11 +3999,10 @@ struct PDFInkView: UIViewRepresentable {
             item.height = Double(result.size.height)
             item.x = Double(middle.x) - item.width / 2
             item.y = Double(middle.y) - item.height / 2
-            math[at] = item
-            saveMath()
-            guard let overlay = overlay(forPage: item.page) else { return }
-            overlay.mathViews.first { $0.item.id == item.id }?.removeFromSuperview()
-            hold(install(item, in: overlay))
+            var new = math
+            new[at] = item
+            changeMath(to: new)
+            holdMath(item.id)
         }
 
         private func duplicate(_ source: MathItem) {
@@ -3986,15 +4013,12 @@ struct PDFInkView: UIViewRepresentable {
             let center = Self.keepInside(CGPoint(x: source.frame.midX + 14, y: source.frame.midY + 14), size: size, overlay: overlay)
             copy.x = Double(center.x) - source.width / 2
             copy.y = Double(center.y) - source.height / 2
-            math.append(copy)
-            saveMath()
-            hold(install(copy, in: overlay))
+            changeMath(to: math + [copy])
+            holdMath(copy.id)
         }
 
         private func remove(_ item: MathItem) {
-            math.removeAll { $0.id == item.id }
-            saveMath()
-            overlay(forPage: item.page)?.mathViews.first { $0.item.id == item.id }?.removeFromSuperview()
+            changeMath(to: math.filter { $0.id != item.id })
         }
 
         /// Dragging a formula moves it about its page; it cannot be dragged off the page.
@@ -4029,10 +4053,14 @@ struct PDFInkView: UIViewRepresentable {
                 view.sizingFrom = nil
                 view.item.x = Double(view.center.x) - view.item.width / 2
                 view.item.y = Double(view.center.y) - view.item.height / 2
-                if let at = math.firstIndex(where: { $0.id == view.item.id }) {
-                    math[at] = view.item
+                // (Shown anew from the list: at its new size the formula is painted anew from its drawing.)
+                let moved = view.item
+                if let at = math.firstIndex(where: { $0.id == moved.id }) {
+                    var new = math
+                    new[at] = moved
+                    changeMath(to: new)
+                    holdMath(moved.id)
                 }
-                saveMath()
             }
         }
 

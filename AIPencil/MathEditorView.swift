@@ -69,6 +69,30 @@ final class MathTypesetter: NSObject, ObservableObject, WKNavigationDelegate {
         webView.evaluateJavaScript("box.textContent = ''", completionHandler: nil)
     }
 
+    /// The formula as the preview is showing it, as a PDF: the same part of the preview the picture is
+    /// taken of. None when the PDF made is not of that part alone.
+    func drawing(of layout: Layout, completion: @escaping (Data?) -> Void) {
+        guard let x = layout.x, let y = layout.y, let w = layout.w, let h = layout.h else {
+            completion(nil)
+            return
+        }
+        let wanted = CGRect(x: x - 2, y: y - 2, width: w + 4, height: h + 4)
+        let configuration = WKPDFConfiguration()
+        configuration.rect = wanted
+        webView.createPDF(configuration: configuration) { result in
+            guard case .success(let data) = result, let provider = CGDataProvider(data: data as CFData),
+                  let document = CGPDFDocument(provider), document.numberOfPages == 1, let page = document.page(at: 1)
+            else {
+                completion(nil)
+                return
+            }
+            let box = page.getBoxRect(.mediaBox)
+            let fits = abs(box.width - wanted.width) <= 1.5 && abs(box.height - wanted.height) <= 1.5
+            if !fits { DebugLog.write("math: the PDF of the formula is " + String(format: "%.1f x %.1f", box.width, box.height) + ", not " + String(format: "%.1f x %.1f", wanted.width, wanted.height) + "; not kept") }
+            completion(fits ? data : nil)
+        }
+    }
+
     /// A picture of the formula as the preview is showing it, with a little air round it.
     func snapshot(of layout: Layout, completion: @escaping (UIImage?) -> Void) {
         guard let x = layout.x, let y = layout.y, let w = layout.w, let h = layout.h else {
@@ -302,12 +326,27 @@ struct MathEditorView: View {
             return
         }
         DebugLog.write("math: picture of a formula " + String(format: "%.0f x %.0f", w, h) + " points in the preview, an em " + String(format: "%.1f", em) + ", preview " + String(format: "%.0f", Double(typesetter.webView.bounds.width)) + " wide")
+        let name = UUID().uuidString
+        // The formula as a drawing, which is what the page paints it from at any size. (The picture below
+        // is for where the drawing cannot be had, and for what reads pictures.)
+        typesetter.drawing(of: layout) { drawing in
+            if let drawing { try? drawing.write(to: store.drawingURL(name), options: .atomic) }
+            DebugLog.write("math: the formula kept as a drawing: " + (drawing == nil ? "no" : "yes, " + String(drawing?.count ?? 0) + " bytes"))
+            picture(layout, name: name, latex: latex)
+        }
+    }
+
+    /// The picture of the formula, taken once its drawing is kept (or could not be), and the formula handed on.
+    private func picture(_ layout: MathTypesetter.Layout, name: String, latex: String) {
+        guard let w = layout.w, let h = layout.h, let em = layout.em else {
+            saving = false
+            return
+        }
         typesetter.snapshot(of: layout) { image in
             guard let image, let shape = MathPicture.inkMask(image), let data = shape.pngData() else {
                 saving = false
                 return
             }
-            let name = UUID().uuidString
             do {
                 try data.write(to: store.imageURL(name), options: .atomic)
             } catch {
