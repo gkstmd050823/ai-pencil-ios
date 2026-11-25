@@ -2221,6 +2221,15 @@ struct PDFInkView: UIViewRepresentable {
                     force: 0, time: Double(step) * 0.004
                 ))
             }
+            // (The line ends where it is shown to end. Since 0.15.8 the last moments of a touch are taken
+            // out of a line as the pencil's way off the paper; this line is not the pencil's way but one
+            // laid out here, and lost its last three places to that as the pen lifted: it was written
+            // some nine page points shorter than it had been shown, and the build server's second
+            // straight line no longer found the first one's end to be put on. So it rests at its end
+            // for as long as is taken out.)
+            for rest in 1...4 {
+                line.add(PenSample(point: end.point, force: 0, time: Double(steps + rest) * 0.004))
+            }
             penLine = line
             overlay.drawLive(line, ahead: [], color: liveColor(penTool), fineness: fineness, grid: penGrid, under: penTool == .highlighter, afresh: true)
             if end.snapped, !made.snapped { tapHand(at: end.point, in: overlay, finished: false) }
