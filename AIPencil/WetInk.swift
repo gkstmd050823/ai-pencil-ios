@@ -151,7 +151,7 @@ final class WetInk: UIView {
         }
         freshen()
         if let open { invalidate(open.box, live: true) }
-        if fast { renderFast() }
+        if fast { askFast() }
     }
 
     // MARK: drawing
@@ -441,7 +441,7 @@ final class WetInk: UIView {
         if fast {
             if fastLive != nil {
                 fastLive = nil
-                renderFast()
+                askFast()
             }
             return
         }
@@ -499,7 +499,7 @@ final class WetInk: UIView {
             line.version = version
             line.date = date
             fastLines.append(line)
-            renderFast()
+            askFast()
             return
         }
         let path = InkPaint.shape(points: points, widths: widths ?? [CGFloat](repeating: width, count: points.count), from: 0, fineness: scale)
@@ -624,8 +624,9 @@ final class WetInk: UIView {
     /// For the test notes: what showing lines by the graphics processor cost the main thread since last asked.
     static func takeTimes() -> String? {
         guard shows > 0 else { return nil }
-        let text = String(format: "pen: shown by the GPU %d times, %.2f ms of the main thread each on average, %.2f at most", shows, showSum / Double(shows), showMost)
+        let text = String(format: "pen: shown by the GPU %d times (asked %d times), %.2f ms of the main thread each on average, %.2f at most", shows, asks, showSum / Double(shows), showMost)
         shows = 0
+        asks = 0
         showSum = 0
         showMost = 0
         return text
@@ -739,7 +740,7 @@ final class WetInk: UIView {
             let tail = Self.stretches(points, widths, from: fastDone, to: count, into: &current.numbers)
             current.box = fastDoneBox.union(tail)
         }
-        renderFast()
+        askFast()
     }
 
     private func restartFast(from: Int) {
@@ -754,7 +755,7 @@ final class WetInk: UIView {
     private func removeFast(where gone: (FastLine) -> Bool) {
         let before = fastLines.count
         fastLines.removeAll(where: gone)
-        if fastLines.count != before { renderFast() }
+        if fastLines.count != before { askFast() }
     }
 
     /// Lets the layer go, and the pixels it holds.
@@ -813,6 +814,57 @@ final class WetInk: UIView {
     }
 
     /// Draws every line there is, whole.
+    /// The views with lines to draw before the screen is next brought up to date, and what tells of that moment.
+    private static var asking: [WetInk] = []
+    private static var watcher: CFRunLoopObserver?
+    private static var asks = 0
+    private var fastAsked = false
+
+    /// Has the lines drawn once, just before the app's changes go to the screen, however often it is
+    /// asked until then.
+    ///
+    /// (In 0.18.0 the lines were drawn there and then, each time anything about them changed: several
+    /// times between two looks of the screen, each drawing handed over as part of the same change. Of
+    /// those the screen did not always take the last. A recording had a line keep the blunt end it was
+    /// written with after the pen had lifted and its end had been pointed, until the next line began or
+    /// the page's picture took it over. And handing over more drawings than the screen takes had the
+    /// main thread wait for room, sixteen milliseconds at worst in a test's notes.)
+    private func askFast() {
+        Self.asks += 1
+        guard !fastAsked else { return }
+        fastAsked = true
+        Self.asking.append(self)
+        // (So that there is a change of the app's on its way to the screen, which this goes with.)
+        layer.setNeedsLayout()
+        if Self.watcher == nil {
+            let moments = CFRunLoopActivity.beforeWaiting.rawValue | CFRunLoopActivity.exit.rawValue
+            // (Before Core Animation's own look at what has changed, which comes at 2,000,000.)
+            let made = CFRunLoopObserverCreateWithHandler(kCFAllocatorDefault, moments, true, 1_999_000) { _, _ in
+                WetInk.drawAsked()
+            }
+            if let made {
+                CFRunLoopAddObserver(CFRunLoopGetMain(), made, CFRunLoopMode.commonModes)
+                Self.watcher = made
+            }
+        }
+        if Self.watcher == nil {
+            // (No telling of the moment to be had: once this turn of the main thread is over.)
+            DispatchQueue.main.async { WetInk.drawAsked() }
+        }
+    }
+
+    private static func drawAsked() {
+        guard !asking.isEmpty else { return }
+        let all = asking
+        asking = []
+        for ink in all {
+            ink.fastAsked = false
+            ink.renderFast()
+        }
+        // (What was drawn goes to the screen now, with everything else the app has changed.)
+        CATransaction.flush()
+    }
+
     private func renderFast() {
         guard let gpu = InkGPU.shared else { return }
         var all = fastLines
@@ -850,7 +902,7 @@ final class WetInk: UIView {
         } else if fastTries < 3 {
             // (Nothing to draw into this moment: once more, right after.)
             fastTries += 1
-            DispatchQueue.main.async { [weak self] in self?.renderFast() }
+            DispatchQueue.main.async { [weak self] in self?.askFast() }
         }
     }
 
@@ -860,6 +912,6 @@ final class WetInk: UIView {
         guard fast, !fastLines.isEmpty || fastLive != nil, let host = fastHost, let window else { return }
         let seen = convert(window.bounds, from: nil).intersection(bounds)
         guard !seen.isNull, !seen.isEmpty else { return }
-        if host.isHidden || !host.frame.insetBy(dx: -1 / scale, dy: -1 / scale).contains(seen) { renderFast() }
+        if host.isHidden || !host.frame.insetBy(dx: -1 / scale, dy: -1 / scale).contains(seen) { askFast() }
     }
 }
