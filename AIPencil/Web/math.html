@@ -10,6 +10,9 @@
   /* Shrinks to the formula, so that measuring the box measures the formula. */
   #box { display: inline-block; white-space: nowrap; padding: 10px 14px; }
   .katex-display { margin: 0; }
+  /* As wide as what is in it on one line: letters to be read (verb) have spaces, and KaTeX's own width
+     for a piece is that of its longest word, so the rest would hang out of the box and not be measured. */
+  #box .katex .base { width: max-content; }
 </style>
 </head>
 <body>
