@@ -33,6 +33,7 @@ struct SettingsView: View {
     @AppStorage("pageLayout") private var layoutMode = PageLayoutMode.vertical
     @AppStorage("darkPaper") private var darkPaper = true
     @AppStorage("gpuInk") private var gpuInk = true
+    @AppStorage("gpuLive") private var gpuLive = true
     @State private var diagnosticsCopied = false
     @State private var diagnosticsCleared = 0
     @State private var typedKey = ""
@@ -180,6 +181,8 @@ struct SettingsView: View {
             Toggle("손가락으로도 필기", isOn: $fingerDraws)
             // (The pictures of the handwriting are made by the graphics processor; off, by the processor as before.)
             Toggle("GPU로 필기 그리기", isOn: $gpuInk)
+            // (The line being written and the lines just written too; off, they are drawn as before 0.18.0.)
+            Toggle("쓰는 중인 선도 GPU로", isOn: $gpuLive)
             Picker("펜슬 두 번 탭", selection: $pencilTap) {
                 ForEach(PencilChoice.all) { item in
                     Text(item.label).tag(item.id)

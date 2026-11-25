@@ -110,7 +110,7 @@ final class WetInk: UIView {
     private static let side: CGFloat = 384
 
     /// How many lines are waiting for the picture to have them.
-    var count: Int { lines.count }
+    var count: Int { lines.count + fastLines.count }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -151,6 +151,7 @@ final class WetInk: UIView {
         }
         freshen()
         if let open { invalidate(open.box, live: true) }
+        if fast { renderFast() }
     }
 
     // MARK: drawing
@@ -380,6 +381,11 @@ final class WetInk: UIView {
 
     /// Shows the line being written as it stands now.
     func write(_ line: PenLine, color: CGColor) {
+        chooseWay()
+        if fast {
+            writeFast(line, color: color)
+            return
+        }
         let current: Line
         if let live {
             current = live
@@ -416,6 +422,10 @@ final class WetInk: UIView {
     /// it was made a straight line): what was made of it from there on is let go, and the next writing
     /// of it makes that anew. What was made of it before that point stays as it is.
     func restart(from: Int = 0) {
+        if fast {
+            restartFast(from: from)
+            return
+        }
         guard let live else { return }
         if let open { invalidate(open.box, live: true) }
         open = nil
@@ -428,6 +438,13 @@ final class WetInk: UIView {
 
     /// The line being written came to nothing.
     func drop() {
+        if fast {
+            if fastLive != nil {
+                fastLive = nil
+                renderFast()
+            }
+            return
+        }
         guard let gone = live else { return }
         live = nil
         for piece in gone.pieces { invalidate(piece.box, live: false) }
@@ -445,6 +462,15 @@ final class WetInk: UIView {
     /// It stays on show until the picture has it. Its settled pieces are in the lower tiles already; its
     /// end joins them now.
     func keep(version: Int, date: Date?) {
+        if fast {
+            // (It is on show already, whole: nothing is drawn.)
+            guard let done = fastLive else { return }
+            done.version = version
+            done.date = date
+            fastLines.append(done)
+            fastLive = nil
+            return
+        }
         guard let done = live else { return }
         let end = open
         if let end {
@@ -465,6 +491,17 @@ final class WetInk: UIView {
     /// goes through and how wide it is.
     func add(points: [CGPoint], width: CGFloat, widths: [CGFloat]? = nil, color: CGColor, version: Int, date: Date?) {
         guard points.count > 1 else { return }
+        chooseWay()
+        if fast {
+            let line = FastLine(colour: InkGPU.colour(color))
+            let wide = widths ?? [CGFloat](repeating: width, count: points.count)
+            line.box = Self.stretches(points, wide, from: 0, to: points.count, into: &line.numbers)
+            line.version = version
+            line.date = date
+            fastLines.append(line)
+            renderFast()
+            return
+        }
         let path = InkPaint.shape(points: points, widths: widths ?? [CGFloat](repeating: width, count: points.count), from: 0, fineness: scale)
         let line = Line(color: color)
         line.pieces = [Piece(path: path, box: path.boundingBoxOfPath, from: 0, to: points.count)]
@@ -493,12 +530,20 @@ final class WetInk: UIView {
 
     /// The picture has every line up to [version]: those are taken down.
     func settle(upTo version: Int) {
+        if fast {
+            removeFast { $0.version <= version }
+            return
+        }
         guard !lines.isEmpty else { return }
         remove { $0.version <= version }
     }
 
     /// Takes down every line (but the one being written).
     func clear() {
+        if fast {
+            removeFast { _ in true }
+            return
+        }
         guard !lines.isEmpty else { return }
         remove { _ in true }
     }
@@ -506,10 +551,315 @@ final class WetInk: UIView {
     /// The handwriting has changed some other way (a line rubbed out, undone): the lines whose strokes
     /// are no longer in it are taken down at once, without waiting for the picture.
     func keepOnly(strokesMadeAt dates: Set<Date>) {
+        if fast {
+            removeFast { line in
+                guard let date = line.date else { return true }
+                return !dates.contains(date)
+            }
+            return
+        }
         guard !lines.isEmpty else { return }
         remove { line in
             guard let date = line.date else { return true }
             return !dates.contains(date)
         }
+    }
+
+    // MARK: by the graphics processor
+
+    // Since 0.18.0 the lines here are drawn by the graphics processor where there is one (see InkGPU):
+    // one layer over the part of the page in view, into which every line not in the picture yet is drawn
+    // whole each time the pen moves. Nothing is cut into pieces, no tiles are kept, and what a move of
+    // the pen costs the main thread does not grow with the line or with the lines beside it. The tiles
+    // above are what draws where there is no graphics processor, or with the setting switched off.
+
+    /// The view whose layer the graphics processor draws into. (A view, so that nothing done to it is animated.)
+    private final class MetalHost: UIView {
+        override class var layerClass: AnyClass { CAMetalLayer.self }
+    }
+
+    private final class FastLine {
+        /// Every stretch of the line as six numbers (see InkGPU).
+        var numbers: [Float] = []
+        var colour: SIMD4<Float>
+        var version = Int.max
+        var date: Date?
+        var box = CGRect.null
+
+        init(colour: SIMD4<Float>) {
+            self.colour = colour
+        }
+    }
+
+    /// Whether lines are drawn that way (설정 → "쓰는 중인 선도 GPU로"; on unless switched off).
+    static var wantsFast: Bool {
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("-noGPU") || arguments.contains("-noGPULive") { return false }
+        let defaults = UserDefaults.standard
+        return defaults.object(forKey: "gpuLive") == nil ? true : defaults.bool(forKey: "gpuLive")
+    }
+
+    /// Set while the lines on show are the graphics processor's. It changes only while nothing is on show.
+    private var fast = false
+    private var fastHost: MetalHost?
+    private var fastLines: [FastLine] = []
+    private var fastLive: FastLine?
+    /// Of the line being written: how many of its points have their stretches made for good, how many
+    /// numbers those are, and the room they take.
+    private var fastDone = 0
+    private var fastKept = 0
+    private var fastDoneBox = CGRect.null
+    /// What the layer was last placed for.
+    private var fastScale: CGFloat = 0
+    private var fastGrid = CGPoint.zero
+    private var fastTries = 0
+    /// How long the main thread spent on showing lines this way since last asked: how often, in all, at most (ms).
+    private static var shows = 0
+    private static var showSum: Double = 0
+    private static var showMost: Double = 0
+    /// The views that have a layer of the graphics processor's, the latest last. A layer holds the
+    /// pixels of a screen three times over: only the two last used keep theirs while empty.
+    private static var holders: [() -> WetInk?] = []
+
+    /// For the test notes: what showing lines by the graphics processor cost the main thread since last asked.
+    static func takeTimes() -> String? {
+        guard shows > 0 else { return nil }
+        let text = String(format: "pen: shown by the GPU %d times, %.2f ms of the main thread each on average, %.2f at most", shows, showSum / Double(shows), showMost)
+        shows = 0
+        showSum = 0
+        showMost = 0
+        return text
+    }
+
+    private func chooseWay() {
+        guard lines.isEmpty, live == nil, fastLines.isEmpty, fastLive == nil else { return }
+        fast = Self.wantsFast && InkGPU.shared != nil
+    }
+
+    /// Stretches for the points from [from] up to [to] of a line, added to [numbers]; the room they take.
+    private static func stretches(_ points: [CGPoint], _ widths: [CGFloat], from: Int, to: Int, into numbers: inout [Float]) -> CGRect {
+        let count = min(points.count, widths.count)
+        var left = CGFloat.infinity, top = CGFloat.infinity, right = -CGFloat.infinity, bottom = -CGFloat.infinity
+        var any = false
+        func reach(_ point: CGPoint, _ radius: CGFloat) {
+            left = min(left, point.x - radius)
+            right = max(right, point.x + radius)
+            top = min(top, point.y - radius)
+            bottom = max(bottom, point.y + radius)
+            any = true
+        }
+        var index = max(0, from)
+        let end = min(to, count)
+        while index < end {
+            let width = widths[index]
+            if width > 0 {
+                let here = points[index]
+                let joinsAfter = index + 1 < count && widths[index + 1] > 0
+                if joinsAfter {
+                    let next = points[index + 1]
+                    numbers.append(Float(here.x))
+                    numbers.append(Float(here.y))
+                    numbers.append(Float(next.x))
+                    numbers.append(Float(next.y))
+                    numbers.append(Float(width / 2))
+                    numbers.append(Float(widths[index + 1] / 2))
+                    reach(here, width / 2)
+                    reach(next, widths[index + 1] / 2)
+                } else if index == 0 || widths[index - 1] <= 0 {
+                    // (A place with nothing inked on either side of it: a dot.)
+                    numbers.append(Float(here.x))
+                    numbers.append(Float(here.y))
+                    numbers.append(Float(here.x))
+                    numbers.append(Float(here.y))
+                    numbers.append(Float(width / 2))
+                    numbers.append(Float(width / 2))
+                    reach(here, width / 2)
+                }
+            }
+            index += 1
+        }
+        guard any else { return .null }
+        return CGRect(x: left, y: top, width: right - left, height: bottom - top)
+    }
+
+    private func writeFast(_ line: PenLine, color: CGColor) {
+        let current: FastLine
+        if let fastLive {
+            current = fastLive
+        } else {
+            current = FastLine(colour: InkGPU.colour(color))
+            fastLive = current
+            fastDone = 0
+            fastKept = 0
+            fastDoneBox = .null
+        }
+        if asLines {
+            // A highlighter's line: one width all along, through some of its points. Made anew each time.
+            var whole = InkPaint.Line()
+            whole.points = line.points
+            whole.widths = [CGFloat](repeating: line.width, count: line.points.count)
+            whole.even = true
+            current.numbers = InkGPU.numbers(of: whole, wide: true)
+            var room = CGRect.null
+            if let first = line.points.first {
+                var left = first.x, right = first.x, top = first.y, bottom = first.y
+                for point in line.points {
+                    left = min(left, point.x)
+                    right = max(right, point.x)
+                    top = min(top, point.y)
+                    bottom = max(bottom, point.y)
+                }
+                room = CGRect(x: left, y: top, width: right - left, height: bottom - top).insetBy(dx: -line.width / 2, dy: -line.width / 2)
+            }
+            current.box = room
+        } else if let dash = line.dash {
+            // A dashed line is cut to its pattern, whole, each time.
+            let cut = dash.cut(points: line.points, widths: line.widths, along: line.along)
+            var made: [Float] = []
+            current.box = Self.stretches(cut.points, cut.widths, from: 0, to: cut.points.count, into: &made)
+            current.numbers = made
+        } else {
+            // The stretches between points that will stay as they are are made once; only the end of
+            // the line, which changes with every move of the pen, is made again.
+            let points = line.points, widths = line.widths
+            let count = min(points.count, widths.count)
+            let stable = max(0, min(line.settled, count) - 2)
+            if stable < fastDone {
+                fastDone = 0
+                fastKept = 0
+                fastDoneBox = .null
+            }
+            if current.numbers.count > fastKept { current.numbers.removeSubrange(fastKept...) }
+            if stable > fastDone {
+                let room = Self.stretches(points, widths, from: fastDone, to: stable, into: &current.numbers)
+                fastDoneBox = fastDoneBox.union(room)
+                fastKept = current.numbers.count
+                fastDone = stable
+            }
+            let tail = Self.stretches(points, widths, from: fastDone, to: count, into: &current.numbers)
+            current.box = fastDoneBox.union(tail)
+        }
+        renderFast()
+    }
+
+    private func restartFast(from: Int) {
+        guard fastLive != nil else { return }
+        if from - 2 < fastDone {
+            fastDone = 0
+            fastKept = 0
+            fastDoneBox = .null
+        }
+    }
+
+    private func removeFast(where gone: (FastLine) -> Bool) {
+        let before = fastLines.count
+        fastLines.removeAll(where: gone)
+        if fastLines.count != before { renderFast() }
+    }
+
+    /// Lets the layer go, and the pixels it holds.
+    private func dropHost() {
+        fastHost?.removeFromSuperview()
+        fastHost = nil
+        fastScale = 0
+    }
+
+    private func makeHost() -> MetalHost? {
+        if let fastHost { return fastHost }
+        guard let gpu = InkGPU.shared else { return nil }
+        let made = MetalHost(frame: .zero)
+        made.isUserInteractionEnabled = false
+        made.backgroundColor = .clear
+        made.isOpaque = false
+        made.isHidden = true
+        guard let metal = made.layer as? CAMetalLayer else { return nil }
+        gpu.ready(metal)
+        addSubview(made)
+        fastHost = made
+        // (This one is the latest; of the others, those with nothing to show beyond the two last give theirs up.)
+        var kept: [() -> WetInk?] = []
+        for holder in Self.holders {
+            if let other = holder(), other !== self, other.fastHost != nil { kept.append(holder) }
+        }
+        kept.append { [weak self] in self }
+        var index = 0
+        while index < kept.count - 2 {
+            if let other = kept[index](), other.fastLines.isEmpty, other.fastLive == nil { other.dropHost() }
+            index += 1
+        }
+        Self.holders = kept
+        return made
+    }
+
+    /// Puts the layer over the part of the page in view (and a little round it), on the screen's pixels.
+    /// False when none of the page is in view.
+    private func placeFast(_ host: MetalHost) -> Bool {
+        guard let window, let metal = host.layer as? CAMetalLayer, scale > 0 else { return false }
+        let seen = convert(window.bounds, from: nil).intersection(bounds)
+        guard !seen.isNull, seen.width > 0.5, seen.height > 0.5 else { return false }
+        let same = abs(fastScale - scale) < 0.0005 * scale && abs(fastGrid.x - grid.x) * scale < 0.05 && abs(fastGrid.y - grid.y) * scale < 0.05
+        if same, host.frame.insetBy(dx: -1 / scale, dy: -1 / scale).contains(seen) { return true }
+        var want = seen.insetBy(dx: -seen.width * 0.1, dy: -seen.height * 0.1).intersection(bounds)
+        if want.width * scale > 4096 || want.height * scale > 4096 { want = seen }
+        let rect = InkPaint.whole(want, scale: scale, origin: grid)
+        let wide = min(4096, max(1, Int((rect.width * scale).rounded())))
+        let high = min(4096, max(1, Int((rect.height * scale).rounded())))
+        host.frame = CGRect(x: rect.minX, y: rect.minY, width: CGFloat(wide) / scale, height: CGFloat(high) / scale)
+        metal.contentsScale = scale
+        metal.drawableSize = CGSize(width: wide, height: high)
+        fastScale = scale
+        fastGrid = grid
+        return true
+    }
+
+    /// Draws every line there is, whole.
+    private func renderFast() {
+        guard let gpu = InkGPU.shared else { return }
+        var all = fastLines
+        if let fastLive { all.append(fastLive) }
+        if all.isEmpty {
+            fastHost?.isHidden = true
+            return
+        }
+        guard let host = makeHost(), let metal = host.layer as? CAMetalLayer else { return }
+        guard placeFast(host) else {
+            host.isHidden = true
+            return
+        }
+        let began = CACurrentMediaTime()
+        var numbers: [Float] = []
+        var runs: [InkGPU.LiveRun] = []
+        for line in all where !line.numbers.isEmpty {
+            let first = numbers.count / 6
+            let count = line.numbers.count / 6
+            numbers.append(contentsOf: line.numbers)
+            if let last = runs.last, last.colour == line.colour {
+                runs[runs.count - 1].count = last.count + count
+                runs[runs.count - 1].box = last.box.union(line.box)
+            } else {
+                runs.append(InkGPU.LiveRun(colour: line.colour, first: first, count: count, box: line.box))
+            }
+        }
+        if gpu.show(numbers, runs: runs, on: metal, origin: host.frame.origin, scale: scale) {
+            host.isHidden = false
+            fastTries = 0
+            let took = (CACurrentMediaTime() - began) * 1000
+            Self.shows += 1
+            Self.showSum += took
+            if took > Self.showMost { Self.showMost = took }
+        } else if fastTries < 3 {
+            // (Nothing to draw into this moment: once more, right after.)
+            fastTries += 1
+            DispatchQueue.main.async { [weak self] in self?.renderFast() }
+        }
+    }
+
+    /// The page has moved on screen, perhaps: lines waiting here are drawn again where the layer no
+    /// longer reaches as far as the page is in view.
+    func tend() {
+        guard fast, !fastLines.isEmpty || fastLive != nil, let host = fastHost, let window else { return }
+        let seen = convert(window.bounds, from: nil).intersection(bounds)
+        guard !seen.isNull, !seen.isEmpty else { return }
+        if host.isHidden || !host.frame.insetBy(dx: -1 / scale, dy: -1 / scale).contains(seen) { renderFast() }
     }
 }

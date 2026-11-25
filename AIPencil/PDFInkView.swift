@@ -275,15 +275,31 @@ final class PagePicture: UIView {
         image.frame = extent.rect
         image.contents = picture
         self.picture = picture
+        straight = nil
         shown = extent
         asked = nil
     }
+
+    /// The same with a picture the graphics processor made for the screen to show as it is (see
+    /// InkGPU.surfaces): the app has no copy of it.
+    func show(straight surface: AnyObject, _ extent: Extent, width: Int, height: Int) {
+        image.frame = extent.rect
+        image.contents = surface
+        picture = nil
+        straight = (width, height)
+        shown = extent
+        asked = nil
+    }
+
+    /// The size of a picture shown that way; nil while the picture on show is one the app has.
+    private(set) var straight: (width: Int, height: Int)?
 
     /// Lets the picture go, to give its memory back.
     func clear() {
         ticket.next()
         image.contents = nil
         picture = nil
+        straight = nil
         shown = nil
         asked = nil
     }
@@ -777,6 +793,12 @@ final class PageOverlay: UIView {
     }
 
     /// Takes down the lines the picture now has (those up to [version]; all of them when none is given).
+    /// Has the lines waiting drawn again where the page has moved (see WetInk.tend).
+    func tendPreviews() {
+        wetPens.tend()
+        wetHigh.tend()
+    }
+
     func dropPreviews(upTo version: Int = .max) {
         wetPens.settle(upTo: version)
         wetHigh.settle(upTo: version)
@@ -2224,6 +2246,7 @@ struct PDFInkView: UIViewRepresentable {
         private func penDone(kept: Bool, in overlay: PageOverlay) {
             guard let line = penLine else { return }
             DebugLog.write(String(format: "pen: shown at %.3f pixels a point while written", Double(fineness)))
+            if let times = WetInk.takeTimes() { DebugLog.write(times) }
             DebugLog.write("pen: up, \(line.points.count) points, \(kept ? "kept" : "let go")\(straight != nil ? ", made straight" : "")\(shaped != nil ? ", made a shape" : "")")
             penLine = nil
             holdTimer?.invalidate()
@@ -3126,6 +3149,7 @@ struct PDFInkView: UIViewRepresentable {
                 if !overlay.convert(around, from: view).intersection(overlay.bounds).isEmpty {
                     // (Once the hand has rested a moment: lines written one after another are on show
                     // as their own shapes, and go into the picture together.)
+                    overlay.tendPreviews()
                     if now - overlay.inkTouched > 0.4 { askInk(for: overlay) }
                     settleInk(overlay)
                     // The hand has rested: a canvas that is behind is handed the handwriting now, so that
@@ -3293,13 +3317,18 @@ struct PDFInkView: UIViewRepresentable {
                 // which costs it less than finding out what to keep. Where it cannot (a stroke of
                 // PencilKit's in view, no graphics processor, switched off), InkPaint draws as before.
                 var made: InkPaint.Made?
+                var straight: InkGPU.Shown?
                 if InkGPU.wanted, let gpu = InkGPU.shared {
-                    made = gpu.pictures(of: drawing, rect: extent.rect, scale: extent.scale, dark: dark, still: { ticket.current == number })
+                    // (As the screen takes it, where that can be had; brought back into the app where not.)
+                    straight = gpu.surfaces(of: drawing, rect: extent.rect, scale: extent.scale, dark: dark, still: { ticket.current == number })
+                    if straight == nil, ticket.current == number {
+                        made = gpu.pictures(of: drawing, rect: extent.rect, scale: extent.scale, dark: dark, still: { ticket.current == number })
+                    }
                     if made != nil {
                         made?.spent = String(format: "lines %.1f, drawing %.1f, copy %.1f", gpu.lastLines, gpu.lastDrawing, gpu.lastCopy)
                     }
                 }
-                if made == nil {
+                if made == nil, straight == nil {
                     made = InkPaint.pictures(
                         of: drawing, rect: extent.rect, scale: extent.scale, dark: dark, over: base, redoing: dirty, highOver: highBase,
                         still: { ticket.current == number }
@@ -3316,18 +3345,18 @@ struct PDFInkView: UIViewRepresentable {
                         // line, had every picture made for nothing, and the lines waiting for one piled up.)
                         overlay.inkLanding = { [weak self, weak overlay] in
                             guard let self, let overlay else { return }
-                            self.land(made, on: overlay, extent: extent, version: version, ticket: ticket, number: number, breaks: breaks, dirty: dirty, index: index, took: took)
+                            self.land(made, straight, on: overlay, extent: extent, version: version, ticket: ticket, number: number, breaks: breaks, dirty: dirty, index: index, took: took)
                         }
                         return
                     }
-                    self.land(made, on: overlay, extent: extent, version: version, ticket: ticket, number: number, breaks: breaks, dirty: dirty, index: index, took: took)
+                    self.land(made, straight, on: overlay, extent: extent, version: version, ticket: ticket, number: number, breaks: breaks, dirty: dirty, index: index, took: took)
                 }
             }
         }
 
         /// Puts pictures of a page's handwriting, made at [version] of it, on show.
         private func land(
-            _ made: InkPaint.Made?, on overlay: PageOverlay, extent: PagePicture.Extent, version: Int, ticket: Ticket, number: Int,
+            _ made: InkPaint.Made?, _ straight: InkGPU.Shown?, on overlay: PageOverlay, extent: PagePicture.Extent, version: Int, ticket: Ticket, number: Int,
             breaks: Int, dirty: CGRect?, index: Int, took: Double
         ) {
                 do {
@@ -3346,12 +3375,21 @@ struct PDFInkView: UIViewRepresentable {
                         }
                         return
                     }
-                    if let made {
-                        overlay.inkPicture.show(made.pens, extent)
-                        if let high = made.high {
-                            overlay.highPicture.show(high, PagePicture.Extent(rect: made.highRect, scale: extent.scale))
-                        } else if overlay.highPicture.shown != nil {
-                            overlay.highPicture.clear()
+                    if made != nil || straight != nil {
+                        if let straight {
+                            overlay.inkPicture.show(straight: straight.pens, extent, width: straight.width, height: straight.height)
+                            if let high = straight.high {
+                                overlay.highPicture.show(straight: high, extent, width: straight.width, height: straight.height)
+                            } else if overlay.highPicture.shown != nil {
+                                overlay.highPicture.clear()
+                            }
+                        } else if let made {
+                            overlay.inkPicture.show(made.pens, extent)
+                            if let high = made.high {
+                                overlay.highPicture.show(high, PagePicture.Extent(rect: made.highRect, scale: extent.scale))
+                            } else if overlay.highPicture.shown != nil {
+                                overlay.highPicture.clear()
+                            }
                         }
                         overlay.inkPictureVersion = version
                         overlay.inkEmpty = false
@@ -3371,8 +3409,12 @@ struct PDFInkView: UIViewRepresentable {
                             overlay.inkDirtyAll = true
                         }
                         var how = dirty.map { "part \(Int($0.width)) x \(Int($0.height)) redrawn" } ?? "drawn whole"
-                        if made.byGPU { how = "drawn whole by the GPU (\(made.spent))" }
-                        DebugLog.write(String(format: "ink picture: page %d, %d lines, %d x %d at %.3f pixels a point, %@ in %.1f ms", index, made.strokes, made.pens.width, made.pens.height, Double(extent.scale), how, took))
+                        if let made, made.byGPU { how = "drawn whole by the GPU (" + made.spent + ")" }
+                        if let straight { how = "drawn whole by the GPU for the screen (" + straight.spent + ")" }
+                        let lines = straight?.strokes ?? made?.strokes ?? 0
+                        let wide = straight?.width ?? made?.pens.width ?? 0
+                        let high = straight?.height ?? made?.pens.height ?? 0
+                        DebugLog.write(String(format: "ink picture: page %d, %d lines, %d x %d at %.3f pixels a point, %@ in %.1f ms", index, lines, wide, high, Double(extent.scale), how, took))
                     } else {
                         overlay.inkPicture.gaveUp = true
                         overlay.inkTrusted = false
@@ -3476,6 +3518,9 @@ struct PDFInkView: UIViewRepresentable {
             var ink = "handwriting shown as \(overlay.showsInkPicture ? "the app's pictures" : "the canvas"), trusted \(overlay.inkTrusted), empty \(overlay.inkEmpty), \(overlay.keptCount) lines waiting as shapes"
             if let shown = overlay.inkPicture.shown, let image = overlay.inkPicture.picture {
                 ink += "; picture \(image.width) x \(image.height) of \(Int(shown.rect.width)) x \(Int(shown.rect.height)) points at \(shown.scale)"
+            }
+            if let shown = overlay.inkPicture.shown, let size = overlay.inkPicture.straight {
+                ink += "; picture " + String(size.width) + " x " + String(size.height) + " straight from the GPU at " + String(describing: shown.scale)
             }
             if let high = overlay.highPicture.picture { ink += "; highlighter \(high.width) x \(high.height)" }
             lines.append(ink)

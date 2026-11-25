@@ -1,3 +1,4 @@
+import IOSurface
 import Metal
 import PencilKit
 import UIKit
@@ -300,7 +301,7 @@ final class InkGPU {
     }
 
     /// A line as numbers: six for every stretch of it.
-    private static func numbers(of line: InkPaint.Line, wide: Bool) -> [Float] {
+    static func numbers(of line: InkPaint.Line, wide: Bool) -> [Float] {
         var points = line.points
         var widths = line.widths
         // (A highlighter's line needs only some of its points, as in InkPaint.)
@@ -337,7 +338,7 @@ final class InkGPU {
         return made
     }
 
-    private static func colour(_ colour: CGColor) -> SIMD4<Float> {
+    static func colour(_ colour: CGColor) -> SIMD4<Float> {
         var parts: [CGFloat] = [0, 0, 0, 1]
         if let space = CGColorSpace(name: CGColorSpace.sRGB),
            let same = colour.converted(to: space, intent: .defaultIntent, options: nil), let found = same.components, found.count >= 4 {
@@ -378,6 +379,73 @@ final class InkGPU {
     /// PencilKit's in view, too many colours taking turns, a picture too large), when it is no longer
     /// wanted, or when something went wrong; the caller then has InkPaint draw it.
     func pictures(of drawing: PKDrawing, rect: CGRect, scale: CGFloat, dark: Bool, still: (() -> Bool)? = nil) -> InkPaint.Made? {
+        guard let plan = plan(of: drawing, rect: rect, scale: scale, dark: dark, still: still) else { return nil }
+        guard let pensTexture = render(plan.pens, rect: rect, scale: scale, width: plan.width, height: plan.height, onto: nil),
+              let pensPicture = image(of: pensTexture) else { return nil }
+        var made = InkPaint.Made(pens: pensPicture, strokes: plan.strokes)
+        made.byGPU = true
+        if plan.anyHigh {
+            guard let highTexture = render(plan.high, rect: rect, scale: scale, width: plan.width, height: plan.height, onto: nil),
+                  let highPicture = image(of: highTexture) else { return nil }
+            made.high = highPicture
+            made.highRect = rect
+        }
+        if let still, !still() { return nil }
+        return made
+    }
+
+    /// The same pictures as the screen takes them straight from the graphics processor: nothing is
+    /// brought back into the app's own memory, which was two thirds of what a picture cost on an iPad
+    /// (a test's notes of 0.17.0: drawing 11 ms, bringing back 21 ms, for 3705 x 2779 pixels).
+    struct Shown {
+        var pens: IOSurfaceRef
+        var high: IOSurfaceRef?
+        var width: Int
+        var height: Int
+        var strokes: Int
+        var spent = ""
+    }
+
+    /// Nil where pictures() would be nil, and where the screen's kind of picture cannot be had (the
+    /// caller then asks pictures(), and after that InkPaint).
+    func surfaces(of drawing: PKDrawing, rect: CGRect, scale: CGFloat, dark: Bool, still: (() -> Bool)? = nil) -> Shown? {
+        #if targetEnvironment(simulator)
+        return nil
+        #else
+        guard let plan = plan(of: drawing, rect: rect, scale: scale, dark: dark, still: still) else { return nil }
+        guard let pens = Self.surface(width: plan.width, height: plan.height),
+              render(plan.pens, rect: rect, scale: scale, width: plan.width, height: plan.height, onto: pens) != nil else { return nil }
+        var shown = Shown(pens: pens, high: nil, width: plan.width, height: plan.height, strokes: plan.strokes)
+        if plan.anyHigh {
+            guard let high = Self.surface(width: plan.width, height: plan.height),
+                  render(plan.high, rect: rect, scale: scale, width: plan.width, height: plan.height, onto: high) != nil else { return nil }
+            shown.high = high
+        }
+        if let still, !still() { return nil }
+        shown.spent = String(format: "lines %.1f, drawing %.1f, nothing brought back", lastLines, lastDrawing)
+        return shown
+        #endif
+    }
+
+    /// Pixels the screen can show as they are: blue first, colour times strength.
+    private static func surface(width: Int, height: Int) -> IOSurfaceRef? {
+        let wanted: [CFString: Any] = [
+            kIOSurfaceWidth: width, kIOSurfaceHeight: height, kIOSurfaceBytesPerElement: 4, kIOSurfacePixelFormat: UInt32(0x42475241),
+        ]
+        return IOSurfaceCreate(wanted as CFDictionary)
+    }
+
+    private struct Plan {
+        var pens: Batch
+        var high: Batch
+        var anyHigh: Bool
+        var strokes: Int
+        var width: Int
+        var height: Int
+    }
+
+    /// What is to be drawn for a picture: the lines in view, as runs.
+    private func plan(of drawing: PKDrawing, rect: CGRect, scale: CGFloat, dark: Bool, still: (() -> Bool)?) -> Plan? {
         let width = Int((rect.width * scale).rounded())
         let height = Int((rect.height * scale).rounded())
         guard width > 0, height > 0, width <= 16384, height <= 16384 else {
@@ -455,16 +523,7 @@ final class InkGPU {
         lastDrawing = 0
         lastCopy = 0
         lastRuns = pens.runs.count
-        guard let pensPicture = draw(pens, rect: rect, scale: scale, width: width, height: height) else { return nil }
-        var made = InkPaint.Made(pens: pensPicture, strokes: strokes.count)
-        made.byGPU = true
-        if anyHigh {
-            guard let highPicture = draw(high, rect: rect, scale: scale, width: width, height: height) else { return nil }
-            made.high = highPicture
-            made.highRect = rect
-        }
-        if let still, !still() { return nil }
-        return made
+        return Plan(pens: pens, high: high, anyHigh: anyHigh, strokes: strokes.count, width: width, height: height)
     }
 
     /// A picture as something the graphics processor can lay in: its pixels, blue first, colour times strength.
@@ -492,15 +551,32 @@ final class InkGPU {
         return made
     }
 
-    private func draw(_ batch: Batch, rect: CGRect, scale: CGFloat, width: Int, height: Int) -> CGImage? {
+    /// The picture of how much is covered, kept from one drawing to the next of the same size.
+    private var coveredKept: MTLTexture?
+
+    private func coveredPicture(width: Int, height: Int) -> MTLTexture? {
+        if let have = coveredKept, have.width == width, have.height == height { return have }
+        let share = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm, width: width, height: height, mipmapped: false)
+        share.usage = [.renderTarget, .shaderRead]
+        share.storageMode = .private
+        coveredKept = device.makeTexture(descriptor: share)
+        return coveredKept
+    }
+
+    /// Draws [batch] into a picture of the graphics processor's: one of its own, or with [surface] the
+    /// pixels the screen will show.
+    private func render(_ batch: Batch, rect: CGRect, scale: CGFloat, width: Int, height: Int, onto surface: IOSurfaceRef?) -> MTLTexture? {
         let began = CACurrentMediaTime()
         let wanted = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
         wanted.usage = [.renderTarget]
         wanted.storageMode = .shared
-        let share = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm, width: width, height: height, mipmapped: false)
-        share.usage = [.renderTarget, .shaderRead]
-        share.storageMode = .private
-        guard let picture = device.makeTexture(descriptor: wanted), let covered = device.makeTexture(descriptor: share),
+        var target: MTLTexture?
+        if let surface {
+            target = device.makeTexture(descriptor: wanted, iosurface: surface, plane: 0)
+        } else {
+            target = device.makeTexture(descriptor: wanted)
+        }
+        guard let picture = target, let covered = coveredPicture(width: width, height: height),
               let commands = queue.makeCommandBuffer() else { return nil }
         // (The picture is so many whole pixels, and the part asked for seldom is: a point of the page is
         // aimed at the pixel InkPaint puts it on. The first comparison on the build server, at 4.54
@@ -600,8 +676,14 @@ final class InkGPU {
             DebugLog.write("gpu: the drawing did not come through (\(commands.error.map { String(describing: $0) } ?? "no word why"))")
             return nil
         }
+        lastDrawing += (CACurrentMediaTime() - began) * 1000
+        return picture
+    }
+
+    /// A picture of the graphics processor's brought back as one Core Graphics has.
+    private func image(of picture: MTLTexture) -> CGImage? {
         let drawn = CACurrentMediaTime()
-        lastDrawing += (drawn - began) * 1000
+        let width = picture.width, height = picture.height
         // The picture's pixels, as Core Graphics keeps them: blue first, colour times strength.
         let row = width * 4
         guard let data = NSMutableData(length: row * height) else { return nil }
@@ -614,6 +696,129 @@ final class InkGPU {
         )
         lastCopy += (CACurrentMediaTime() - drawn) * 1000
         return image
+    }
+
+    // MARK: the lines that are not in a picture yet (on the main thread)
+
+    /// Lines of one colour among those shown as they are written: which of the numbers are theirs, and
+    /// the room they take on the page.
+    struct LiveRun {
+        var colour: SIMD4<Float>
+        var first: Int
+        var count: Int
+        var box: CGRect
+    }
+
+    /// The picture of how much is covered, for show(): the main thread's own.
+    private var liveCovered: MTLTexture?
+
+    /// Sets a layer up for show(). What is drawn into it goes on screen together with whatever else the
+    /// app changes on screen at that moment (a line handed over to the page's picture leaves the one as
+    /// it comes up in the other).
+    func ready(_ layer: CAMetalLayer) {
+        layer.device = device
+        layer.pixelFormat = .bgra8Unorm
+        layer.framebufferOnly = true
+        layer.isOpaque = false
+        layer.presentsWithTransaction = true
+        layer.maximumDrawableCount = 3
+        layer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
+    }
+
+    /// Draws the lines of [runs] (their stretches are in [numbers], six each) into [layer], whose top
+    /// left corner is at [origin] on the page, at [scale] pixels a point. Every line is drawn whole each
+    /// time: to the graphics processor a line of ten thousand stretches is no more than a short one is.
+    /// False when nothing could be drawn.
+    func show(_ numbers: [Float], runs: [LiveRun], on layer: CAMetalLayer, origin: CGPoint, scale: CGFloat) -> Bool {
+        let width = Int(layer.drawableSize.width), height = Int(layer.drawableSize.height)
+        guard width > 0, height > 0, scale > 0 else { return false }
+        if liveCovered == nil || liveCovered?.width != width || liveCovered?.height != height {
+            let share = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm, width: width, height: height, mipmapped: false)
+            share.usage = [.renderTarget, .shaderRead]
+            share.storageMode = .private
+            liveCovered = device.makeTexture(descriptor: share)
+        }
+        guard let covered = liveCovered, let drawable = layer.nextDrawable(), let commands = queue.makeCommandBuffer() else { return false }
+        var page: [Float] = [Float(origin.x), Float(origin.y), Float(CGFloat(width) / scale), Float(CGFloat(height) / scale), Float(scale), 0, 0, 0]
+        guard let pageBuffer = device.makeBuffer(bytes: &page, length: page.count * MemoryLayout<Float>.stride, options: .storageModeShared) else { return false }
+        var pieces: MTLBuffer?
+        if !numbers.isEmpty {
+            pieces = numbers.withUnsafeBytes { bytes in
+                bytes.baseAddress.flatMap { device.makeBuffer(bytes: $0, length: bytes.count, options: .storageModeShared) }
+            }
+        }
+        var tints: MTLBuffer?
+        if !runs.isEmpty {
+            var colours: [Float] = []
+            for run in runs {
+                colours.append(run.colour.x)
+                colours.append(run.colour.y)
+                colours.append(run.colour.z)
+                colours.append(run.colour.w)
+            }
+            tints = colours.withUnsafeBytes { bytes in
+                bytes.baseAddress.flatMap { device.makeBuffer(bytes: $0, length: bytes.count, options: .storageModeShared) }
+            }
+        }
+        let target = drawable.texture
+        var painted = false
+        var number = -1
+        for run in runs {
+            number += 1
+            guard run.count > 0, !run.box.isNull, let pieces, let tints else { continue }
+            // (Only the pixels the run reaches are worked on.)
+            func pixel(_ value: CGFloat, _ most: Int) -> Int {
+                guard value.isFinite else { return 0 }
+                return Int(max(0, min(CGFloat(most), value)))
+            }
+            let left = pixel(((run.box.minX - origin.x) * scale).rounded(.down) - 2, width)
+            let top = pixel(((run.box.minY - origin.y) * scale).rounded(.down) - 2, height)
+            let right = pixel(((run.box.maxX - origin.x) * scale).rounded(.up) + 2, width)
+            let bottom = pixel(((run.box.maxY - origin.y) * scale).rounded(.up) + 2, height)
+            guard right > left, bottom > top else { continue }
+            let part = MTLScissorRect(x: left, y: top, width: right - left, height: bottom - top)
+            let first = MTLRenderPassDescriptor()
+            first.colorAttachments[0].texture = covered
+            first.colorAttachments[0].loadAction = .clear
+            first.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+            first.colorAttachments[0].storeAction = .store
+            guard let covering = commands.makeRenderCommandEncoder(descriptor: first) else { return false }
+            covering.setRenderPipelineState(cover)
+            covering.setScissorRect(part)
+            covering.setVertexBuffer(pieces, offset: run.first * 6 * MemoryLayout<Float>.stride, index: 0)
+            covering.setVertexBuffer(pageBuffer, offset: 0, index: 1)
+            covering.setFragmentBuffer(pageBuffer, offset: 0, index: 1)
+            covering.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: run.count)
+            covering.endEncoding()
+            let second = MTLRenderPassDescriptor()
+            second.colorAttachments[0].texture = target
+            second.colorAttachments[0].loadAction = painted ? .load : .clear
+            second.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+            second.colorAttachments[0].storeAction = .store
+            guard let painting = commands.makeRenderCommandEncoder(descriptor: second) else { return false }
+            painting.setRenderPipelineState(paint)
+            painting.setScissorRect(part)
+            painting.setFragmentTexture(covered, index: 0)
+            painting.setFragmentBuffer(tints, offset: number * 4 * MemoryLayout<Float>.stride, index: 0)
+            painting.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            painting.endEncoding()
+            painted = true
+        }
+        if !painted {
+            // Nothing in view: a clear picture.
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = target
+            pass.colorAttachments[0].loadAction = .clear
+            pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+            pass.colorAttachments[0].storeAction = .store
+            guard let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return false }
+            encoder.endEncoding()
+        }
+        commands.commit()
+        // (Handed to the screen as part of what the app is changing on screen now.)
+        commands.waitUntilScheduled()
+        drawable.present()
+        return true
     }
 }
 
