@@ -367,7 +367,10 @@ final class MathView: UIImageView {
 
     /// Whether [point], in this view's own frame, is on the knob.
     func onKnob(_ point: CGPoint) -> Bool {
-        held && hypot(point.x - bounds.maxX, point.y - bounds.maxY) <= 16
+        // (Nearer the knob than the middle: on a small formula the knob's reach covers most of it, and a
+        // drag begun on the formula itself is to move it.)
+        let toKnob = hypot(point.x - bounds.maxX, point.y - bounds.maxY)
+        return held && toKnob <= 16 && toKnob < hypot(point.x - bounds.midX, point.y - bounds.midY)
     }
 
     override func layoutSubviews() {
