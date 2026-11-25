@@ -49,6 +49,12 @@ enum SelfCheck {
             for step in 0...31 {
                 line.add(PenSample(point: CGPoint(x: 100 + 2 * CGFloat(step), y: 300), force: 0, time: Double(step) * 0.004))
             }
+            // (The pen rests where the line ends before it lifts. Since 0.15.8 the last moments of a
+            // touch are taken out of the line as the pencil's way off the paper: without the rest, this
+            // line lost its last six points to that, and the counts below were of a shorter line.)
+            for rest in 1...5 {
+                line.add(PenSample(point: CGPoint(x: 162, y: 300), force: 0, time: (31 + Double(rest)) * 0.004))
+            }
             line.finish()
             return line
         }
