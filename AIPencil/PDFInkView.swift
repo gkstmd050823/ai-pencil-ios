@@ -1487,6 +1487,8 @@ struct PDFInkView: UIViewRepresentable {
             })
             watching.append(center.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main) { [weak self] _ in
                 self?.dropUnseenPictures()
+                WetInk.letGoIdle()
+                InkGPU.shared?.forget()
             })
             startPictures()
             DispatchQueue.main.async { [weak self] in
@@ -3321,7 +3323,7 @@ struct PDFInkView: UIViewRepresentable {
                 if InkGPU.wanted, let gpu = InkGPU.shared {
                     // (As the screen takes it, where that can be had; brought back into the app where not.)
                     straight = gpu.surfaces(of: drawing, rect: extent.rect, scale: extent.scale, dark: dark, still: { ticket.current == number })
-                    if straight == nil, ticket.current == number {
+                    if straight == nil, !gpu.leftToInkPaint, ticket.current == number {
                         made = gpu.pictures(of: drawing, rect: extent.rect, scale: extent.scale, dark: dark, still: { ticket.current == number })
                     }
                     if made != nil {

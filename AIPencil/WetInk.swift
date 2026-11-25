@@ -632,9 +632,28 @@ final class WetInk: UIView {
         return text
     }
 
+    /// Set when the graphics processor would not draw, time after time: lines are drawn in tiles from
+    /// then on, until the app is next started.
+    private static var fastFailed = false
+
     private func chooseWay() {
         guard lines.isEmpty, live == nil, fastLines.isEmpty, fastLive == nil else { return }
-        fast = Self.wantsFast && InkGPU.shared != nil
+        fast = !Self.fastFailed && Self.wantsFast && InkGPU.shared != nil
+    }
+
+    /// The app is short of memory: layers with nothing to show give up the pixels they hold.
+    static func letGoIdle() {
+        var kept: [() -> WetInk?] = []
+        for holder in holders {
+            guard let ink = holder(), ink.fastHost != nil else { continue }
+            if ink.fastLines.isEmpty, ink.fastLive == nil {
+                ink.dropHost()
+            } else {
+                kept.append(holder)
+            }
+        }
+        holders = kept
+        InkGPU.shared?.forgetLive()
     }
 
     /// Stretches for the points from [from] up to [to] of a line, added to [numbers]; the room they take.
@@ -867,6 +886,8 @@ final class WetInk: UIView {
 
     private func renderFast() {
         guard let gpu = InkGPU.shared else { return }
+        // (Off screen the graphics processor is not the app's to use; what is on show stays as it is.)
+        guard UIApplication.shared.applicationState != .background else { return }
         var all = fastLines
         if let fastLive { all.append(fastLive) }
         if all.isEmpty {
@@ -899,7 +920,12 @@ final class WetInk: UIView {
             Self.shows += 1
             Self.showSum += took
             if took > Self.showMost { Self.showMost = took }
-        } else if fastTries < 3 {
+        } else if fastTries >= 3 {
+            if !Self.fastFailed {
+                Self.fastFailed = true
+                DebugLog.write("pen: the graphics processor would not draw the lines, four times running; lines are drawn in tiles from here on")
+            }
+        } else {
             // (Nothing to draw into this moment: once more, right after.)
             fastTries += 1
             DispatchQueue.main.async { [weak self] in self?.askFast() }

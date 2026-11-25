@@ -24,7 +24,9 @@ import UIKit
 /// are PencilKit's to draw (its pencil, a line the part eraser has cut) are drawn by PencilKit, as
 /// InkPaint has them drawn, and its picture of them is laid in where they come in the order of things.
 ///
-/// Used from one queue at a time.
+/// The pictures are made by one caller at a time (each reader has a queue of its own for them, and two
+/// readers may be open side by side: they take turns here). The lines not in a picture yet are drawn
+/// on the main thread, with nothing of the pictures' but the programs, which are safe to share.
 final class InkGPU {
     /// Nil where there is no graphics processor to be had, or its programs could not be made.
     static let shared: InkGPU? = InkGPU()
@@ -54,6 +56,11 @@ final class InkGPU {
     }
 
     private var kept: [Date: Kept] = [:]
+    /// Held while a picture is being made.
+    private let turn = NSLock()
+    /// Set when the last picture asked for was not for the graphics processor to draw at all (too
+    /// large, too many colours taking turns): asking again another way would come to the same.
+    private(set) var leftToInkPaint = false
     /// How long the last picture's parts took, in milliseconds: working out the lines, the graphics
     /// processor's drawing, and bringing the picture back.
     private(set) var lastLines: Double = 0
@@ -371,7 +378,16 @@ final class InkGPU {
 
     /// Lets go of the lines kept (the app is short of memory, or a test wants to start from nothing).
     func forget() {
+        // (Not while a picture is being made: that may be a while, and this is asked on the main thread.)
+        guard turn.try() else { return }
         kept = [:]
+        coveredKept = nil
+        turn.unlock()
+    }
+
+    /// The same for what the main thread keeps for drawing the lines not in a picture yet.
+    func forgetLive() {
+        liveCovered = nil
     }
 
     /// The pictures of [drawing] for the part [rect] of its page at [scale] pixels a point: what
@@ -379,6 +395,8 @@ final class InkGPU {
     /// PencilKit's in view, too many colours taking turns, a picture too large), when it is no longer
     /// wanted, or when something went wrong; the caller then has InkPaint draw it.
     func pictures(of drawing: PKDrawing, rect: CGRect, scale: CGFloat, dark: Bool, still: (() -> Bool)? = nil) -> InkPaint.Made? {
+        turn.lock()
+        defer { turn.unlock() }
         guard let plan = plan(of: drawing, rect: rect, scale: scale, dark: dark, still: still) else { return nil }
         guard let pensTexture = render(plan.pens, rect: rect, scale: scale, width: plan.width, height: plan.height, onto: nil),
               let pensPicture = image(of: pensTexture) else { return nil }
@@ -412,6 +430,8 @@ final class InkGPU {
         #if targetEnvironment(simulator)
         return nil
         #else
+        turn.lock()
+        defer { turn.unlock() }
         guard let plan = plan(of: drawing, rect: rect, scale: scale, dark: dark, still: still) else { return nil }
         guard let pens = Self.surface(width: plan.width, height: plan.height),
               render(plan.pens, rect: rect, scale: scale, width: plan.width, height: plan.height, onto: pens) != nil else { return nil }
@@ -446,9 +466,11 @@ final class InkGPU {
 
     /// What is to be drawn for a picture: the lines in view, as runs.
     private func plan(of drawing: PKDrawing, rect: CGRect, scale: CGFloat, dark: Bool, still: (() -> Bool)?) -> Plan? {
+        leftToInkPaint = false
         let width = Int((rect.width * scale).rounded())
         let height = Int((rect.height * scale).rounded())
         guard width > 0, height > 0, width <= 16384, height <= 16384 else {
+            leftToInkPaint = true
             DebugLog.write("gpu: left to InkPaint: a picture of \(width) x \(height)")
             return nil
         }
@@ -512,6 +534,7 @@ final class InkGPU {
             }
             if pens.runs.count > 160 || high.runs.count > 160 {
                 DebugLog.write("gpu: left to InkPaint: more than 160 runs of one colour on this page")
+                leftToInkPaint = true
                 return nil
             }
         }
@@ -730,15 +753,17 @@ final class InkGPU {
     /// time: to the graphics processor a line of ten thousand stretches is no more than a short one is.
     /// False when nothing could be drawn.
     func show(_ numbers: [Float], runs: [LiveRun], on layer: CAMetalLayer, origin: CGPoint, scale: CGFloat) -> Bool {
-        let width = Int(layer.drawableSize.width), height = Int(layer.drawableSize.height)
-        guard width > 0, height > 0, scale > 0 else { return false }
+        guard scale > 0, layer.drawableSize.width >= 1, layer.drawableSize.height >= 1, let drawable = layer.nextDrawable() else { return false }
+        // (As large as what is drawn into, whatever the layer is asked for meanwhile.)
+        let width = drawable.texture.width, height = drawable.texture.height
+        guard width > 0, height > 0 else { return false }
         if liveCovered == nil || liveCovered?.width != width || liveCovered?.height != height {
             let share = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm, width: width, height: height, mipmapped: false)
             share.usage = [.renderTarget, .shaderRead]
             share.storageMode = .private
             liveCovered = device.makeTexture(descriptor: share)
         }
-        guard let covered = liveCovered, let drawable = layer.nextDrawable(), let commands = queue.makeCommandBuffer() else { return false }
+        guard let covered = liveCovered, let commands = queue.makeCommandBuffer() else { return false }
         var page: [Float] = [Float(origin.x), Float(origin.y), Float(CGFloat(width) / scale), Float(CGFloat(height) / scale), Float(scale), 0, 0, 0]
         guard let pageBuffer = device.makeBuffer(bytes: &page, length: page.count * MemoryLayout<Float>.stride, options: .storageModeShared) else { return false }
         var pieces: MTLBuffer?
