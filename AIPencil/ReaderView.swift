@@ -148,8 +148,7 @@ struct ReaderView: View {
                 } else {
                     controller.placeMath(result, color: choice.penUIColor)
                 }
-                // The formula tool is what the hand needs next: to drag the formula into place.
-                pick(.formula)
+                // (The formula arrives held: it is dragged into place at once, and the tool in hand stays.)
             }
         }
         .sheet(isPresented: $showingSettings) {

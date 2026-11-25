@@ -122,7 +122,7 @@ final class TouchWatcher: UIGestureRecognizer {
     /// Whether the touch being watched is a pencil's.
     private(set) var pencil = false
     private weak var followed: UITouch?
-    private var last = CGPoint.zero
+    private(set) var last = CGPoint.zero
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
         guard followed == nil, let touch = touches.first else { return }
@@ -331,6 +331,22 @@ final class PagePicture: UIView {
 final class MathView: UIImageView {
     var item: MathItem
 
+    /// Held: lifted above the surface the handwriting is done on and framed, so that it can be dragged
+    /// whatever tool is in hand. The next touch that writes anywhere else lets it go.
+    var held = false {
+        didSet {
+            layer.borderWidth = held ? 1 : 0
+            layer.borderColor = held ? UIColor.tintColor.cgColor : nil
+            layer.cornerRadius = held ? 4 : 0
+            backgroundColor = held ? UIColor.tintColor.withAlphaComponent(0.07) : nil
+        }
+    }
+
+    // (Held, it is easier to take hold of than it looks.)
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        held ? bounds.insetBy(dx: -10, dy: -10).contains(point) : super.point(inside: point, with: event)
+    }
+
     init(item: MathItem, picture: UIImage?, quarterTurns: Int, dark: Bool) {
         self.item = item
         super.init(image: picture?.withRenderingMode(.alwaysTemplate))
@@ -513,6 +529,8 @@ final class PageOverlay: UIView {
     private let highlights = UIView()
     /// Follows the eraser, to take the AI pen's marks off the page where it passes.
     let watcher = TouchWatcher()
+    /// A finger held still on a formula takes hold of it.
+    var mathPress: UILongPressGestureRecognizer?
     /// The drags on the surface below: one draws shapes, one rubs out highlighter, one is the app's own pen.
     var shapeDrag: ShapeGesture?
     var rubDrag: ShapeGesture?
@@ -1306,7 +1324,10 @@ struct PDFInkView: UIViewRepresentable {
 
         func apply(choice: InkChoice, fingerDraws: Bool) {
             guard choice != self.choice || fingerDraws != self.fingerDraws else { return }
-            if choice.tool != self.choice.tool { Diagnostics.shared.step("tool " + choice.tool.rawValue) }
+            if choice.tool != self.choice.tool {
+                Diagnostics.shared.step("tool " + choice.tool.rawValue)
+                dropMath()
+            }
             // (A tool of PencilKit's put down: what it did last may still be on its way.)
             if self.choice.needsCanvas, !choice.needsCanvas { expectNews(for: 4) }
             self.choice = choice
@@ -1367,6 +1388,8 @@ struct PDFInkView: UIViewRepresentable {
             overlay.shapeDrag?.isEnabled = choice.tool == .shape
             overlay.rubDrag?.isEnabled = choice.ownEraser
             overlay.penDrag?.isEnabled = choice.ownPen
+            // (With the formula tool a formula takes its touches itself; fingers that write, write.)
+            overlay.mathPress?.isEnabled = !fingerDraws && choice.tool != .formula
             // A tool that works on the canvas has the canvas show; any other, the app's pictures.
             settleInk(overlay)
             let pencil = NSNumber(value: UITouch.TouchType.pencil.rawValue)
@@ -1711,6 +1734,7 @@ struct PDFInkView: UIViewRepresentable {
             overlay.watcher.onDown = { [weak self, weak overlay] in
                 guard let self, let overlay else { return }
                 DebugLog.write("touch: down on page \(overlay.canvas.pageIndex), \(overlay.watcher.pencil ? "pencil" : "finger"), tool \(self.choice.tool.rawValue)")
+                self.letGoUnlessOn(overlay.watcher.last, in: overlay)
                 guard overlay.canvas.isUserInteractionEnabled else { return }
                 self.canvasInUse(overlay, true)
             }
@@ -1731,6 +1755,12 @@ struct PDFInkView: UIViewRepresentable {
                 guard let self, let overlay, overlay.inkInUse else { return }
                 self.canvasInUse(overlay, false)
             }
+            // A finger held still on a formula takes hold of it (where fingers do not write).
+            let press = UILongPressGestureRecognizer(target: self, action: #selector(pressedMath(_:)))
+            press.minimumPressDuration = 0.4
+            press.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+            overlay.addGestureRecognizer(press)
+            overlay.mathPress = press
             configure(overlay)
             if let found, found.page == canvas.pageIndex {
                 overlay.highlight(found.rects)
@@ -3819,6 +3849,41 @@ struct PDFInkView: UIViewRepresentable {
 
         // MARK: formulas
 
+        /// The formula that is held now, if one is: see MathView.held.
+        private weak var heldMath: MathView?
+
+        private func hold(_ view: MathView) {
+            if heldMath !== view { dropMath() }
+            guard let overlay = view.superview as? PageOverlay else { return }
+            overlay.bringSubviewToFront(view)
+            view.held = true
+            heldMath = view
+            DebugLog.write("math: a formula is held on page " + String(overlay.canvas.pageIndex))
+        }
+
+        /// Lets go of the formula that is held: it goes back under the handwriting.
+        func dropMath() {
+            guard let view = heldMath else { return }
+            heldMath = nil
+            view.held = false
+            (view.superview as? PageOverlay)?.add(view)
+        }
+
+        /// A touch that writes landed at [point] of [overlay]: anywhere but on the formula held, it lets it go.
+        private func letGoUnlessOn(_ point: CGPoint, in overlay: PageOverlay) {
+            guard let view = heldMath else { return }
+            if view.superview === overlay, view.frame.insetBy(dx: -10, dy: -10).contains(point) { return }
+            dropMath()
+        }
+
+        /// A finger held still on a formula takes hold of it, whatever tool is in hand.
+        @objc private func pressedMath(_ gesture: UILongPressGestureRecognizer) {
+            guard gesture.state == .began, let overlay = gesture.view as? PageOverlay else { return }
+            let point = gesture.location(in: overlay)
+            guard let view = overlay.mathViews.last(where: { $0.frame.contains(point) }) else { return }
+            hold(view)
+        }
+
         @discardableResult
         private func install(_ item: MathItem, in overlay: PageOverlay) -> MathView {
             let picture = UIImage(contentsOfFile: mathStore.imageURL(item.image).path)
@@ -3868,7 +3933,8 @@ struct PDFInkView: UIViewRepresentable {
             )
             math.append(item)
             saveMath()
-            install(item, in: overlay)
+            // (Held: it is dragged into place next, with the pen still in hand.)
+            hold(install(item, in: overlay))
         }
 
         /// Swaps a formula for an edited one, keeping its middle where it was, and its colour.
@@ -3886,7 +3952,7 @@ struct PDFInkView: UIViewRepresentable {
             saveMath()
             guard let overlay = overlay(forPage: item.page) else { return }
             overlay.mathViews.first { $0.item.id == item.id }?.removeFromSuperview()
-            install(item, in: overlay)
+            hold(install(item, in: overlay))
         }
 
         private func duplicate(_ source: MathItem) {
@@ -3899,7 +3965,7 @@ struct PDFInkView: UIViewRepresentable {
             copy.y = Double(center.y) - source.height / 2
             math.append(copy)
             saveMath()
-            install(copy, in: overlay)
+            hold(install(copy, in: overlay))
         }
 
         private func remove(_ item: MathItem) {
