@@ -327,6 +327,23 @@ final class PagePicture: UIView {
     }
 }
 
+/// Lies over a page while a formula on it is held, and takes the touches that land beside the formula: a
+/// touch that ends there (a tap, a line drawn) is reported and does nothing else. A finger that goes on to
+/// scroll the pages is not reported: the scrolling takes the touch away.
+final class LetGoSheet: UIView {
+    var onTouched: (() -> Void)?
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {}
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {}
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        onTouched?()
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {}
+}
+
 /// A formula on a page: its shape, filled with its colour.
 final class MathView: UIImageView {
     var item: MathItem
@@ -3874,10 +3891,19 @@ struct PDFInkView: UIViewRepresentable {
 
         /// The formula that is held now, if one is: see MathView.held.
         private weak var heldMath: MathView?
+        private weak var letGoSheet: LetGoSheet?
 
         private func hold(_ view: MathView) {
             if heldMath !== view { dropMath() }
             guard let overlay = view.superview as? PageOverlay else { return }
+            // Over everything else on the page lies a sheet that takes the next touch: beside the formula, a
+            // touch only lets the formula go, there where it is, and writes nothing.
+            letGoSheet?.removeFromSuperview()
+            let sheet = LetGoSheet(frame: overlay.bounds)
+            sheet.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            sheet.onTouched = { [weak self] in self?.dropMath() }
+            overlay.addSubview(sheet)
+            letGoSheet = sheet
             overlay.bringSubviewToFront(view)
             view.held = true
             heldMath = view
@@ -3886,6 +3912,8 @@ struct PDFInkView: UIViewRepresentable {
 
         /// Lets go of the formula that is held: it goes back under the handwriting.
         func dropMath() {
+            letGoSheet?.removeFromSuperview()
+            letGoSheet = nil
             guard let view = heldMath else { return }
             heldMath = nil
             view.held = false
@@ -3895,7 +3923,8 @@ struct PDFInkView: UIViewRepresentable {
         /// A touch that writes landed at [point] of [overlay]: anywhere but on the formula held, it lets it go.
         private func letGoUnlessOn(_ point: CGPoint, in overlay: PageOverlay) {
             guard let view = heldMath else { return }
-            if view.superview === overlay, view.frame.insetBy(dx: -14, dy: -14).contains(point) { return }
+            // (On the formula's own page the sheet over it sees to this.)
+            if view.superview === overlay { return }
             dropMath()
         }
 
@@ -3907,15 +3936,9 @@ struct PDFInkView: UIViewRepresentable {
             hold(view)
         }
 
-        /// Makes [new] the document's formulas, shows them, and lets the change be undone.
-        private func changeMath(to new: [MathItem]) {
-            let old = math
-            guard new != old else { return }
-            undoManager?.registerUndo(withTarget: self) { me in
-                me.changeMath(to: old)
-            }
+        /// Shows the document's formulas anew, after the list of them changed.
+        private func showMath() {
             dropMath()
-            math = new
             saveMath()
             for overlay in overlays.values {
                 for view in overlay.mathViews { view.removeFromSuperview() }
@@ -3924,6 +3947,50 @@ struct PDFInkView: UIViewRepresentable {
                 }
             }
             tellUndo()
+        }
+
+        // What is undone of formulas: one put on the page, one taken off it, one swapped for another (edited).
+        // Each is kept by the formula's name, not as the whole list: a formula moved or made another size
+        // meanwhile is no step of its own, and stays where it is when another step is undone.
+
+        private func addMath(_ item: MathItem) {
+            math.append(item)
+            let id = item.id
+            undoManager?.registerUndo(withTarget: self) { me in
+                me.takeMath(id)
+            }
+            showMath()
+        }
+
+        private func takeMath(_ id: UUID) {
+            guard let at = math.firstIndex(where: { $0.id == id }) else { return }
+            let item = math.remove(at: at)
+            undoManager?.registerUndo(withTarget: self) { me in
+                me.addMath(item)
+            }
+            showMath()
+        }
+
+        /// The formula of [item]'s name becomes [item]: what is typeset and its size. Its middle stays where
+        /// it is now, wherever it was when the step was made.
+        private func swapMath(_ item: MathItem) {
+            guard let at = math.firstIndex(where: { $0.id == item.id }) else { return }
+            let old = math[at]
+            var new = item
+            new.x = old.x + old.width / 2 - new.width / 2
+            new.y = old.y + old.height / 2 - new.height / 2
+            math[at] = new
+            undoManager?.registerUndo(withTarget: self) { me in
+                me.swapMath(old)
+            }
+            showMath()
+        }
+
+        /// The formula of [item]'s name is where and as large as [item] now. No step to undo.
+        private func settleMath(_ item: MathItem) {
+            guard let at = math.firstIndex(where: { $0.id == item.id }) else { return }
+            math[at] = item
+            showMath()
         }
 
         /// Takes hold of the formula [id], if it is on a page that is laid out.
@@ -3983,7 +4050,7 @@ struct PDFInkView: UIViewRepresentable {
                 width: Double(size.width), height: Double(size.height),
                 red: Double(red), green: Double(green), blue: Double(blue)
             )
-            changeMath(to: math + [item])
+            addMath(item)
             // (Held: it is dragged into place next, with the pen still in hand.)
             holdMath(item.id)
         }
@@ -3999,9 +4066,7 @@ struct PDFInkView: UIViewRepresentable {
             item.height = Double(result.size.height)
             item.x = Double(middle.x) - item.width / 2
             item.y = Double(middle.y) - item.height / 2
-            var new = math
-            new[at] = item
-            changeMath(to: new)
+            swapMath(item)
             holdMath(item.id)
         }
 
@@ -4013,12 +4078,12 @@ struct PDFInkView: UIViewRepresentable {
             let center = Self.keepInside(CGPoint(x: source.frame.midX + 14, y: source.frame.midY + 14), size: size, overlay: overlay)
             copy.x = Double(center.x) - source.width / 2
             copy.y = Double(center.y) - source.height / 2
-            changeMath(to: math + [copy])
+            addMath(copy)
             holdMath(copy.id)
         }
 
         private func remove(_ item: MathItem) {
-            changeMath(to: math.filter { $0.id != item.id })
+            takeMath(item.id)
         }
 
         /// Dragging a formula moves it about its page; it cannot be dragged off the page.
@@ -4055,12 +4120,8 @@ struct PDFInkView: UIViewRepresentable {
                 view.item.y = Double(view.center.y) - view.item.height / 2
                 // (Shown anew from the list: at its new size the formula is painted anew from its drawing.)
                 let moved = view.item
-                if let at = math.firstIndex(where: { $0.id == moved.id }) {
-                    var new = math
-                    new[at] = moved
-                    changeMath(to: new)
-                    holdMath(moved.id)
-                }
+                settleMath(moved)
+                holdMath(moved.id)
             }
         }
 
