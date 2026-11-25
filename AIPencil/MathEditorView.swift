@@ -45,7 +45,7 @@ final class MathTypesetter: NSObject, ObservableObject, WKNavigationDelegate {
     }
 
     /// Typesets [tex] in the preview. Hands back nil when the page is not ready or has no size yet.
-    func render(_ tex: String, completion: @escaping (Layout?) -> Void) {
+    func render(_ tex: String, font: Double = MathTypesetter.previewFont, completion: @escaping (Layout?) -> Void) {
         let size = webView.bounds.size
         guard ready, size.width > 0, size.height > 0,
               let data = try? JSONEncoder().encode(tex), let literal = String(data: data, encoding: .utf8)
@@ -53,7 +53,7 @@ final class MathTypesetter: NSObject, ObservableObject, WKNavigationDelegate {
             completion(nil)
             return
         }
-        let script = "render(\(literal), \(Self.previewFont), \(Double(size.width)), \(Double(size.height)))"
+        let script = "render(\(literal), \(font), \(Double(size.width)), \(Double(size.height)))"
         webView.evaluateJavaScript(script) { result, _ in
             guard let json = result as? String,
                   let layout = try? JSONDecoder().decode(Layout.self, from: Data(json.utf8))
@@ -285,9 +285,23 @@ struct MathEditorView: View {
     }
 
     private func insert() {
-        guard let layout, layout.ok, let w = layout.w, let h = layout.h, let em = layout.em, !saving else { return }
+        guard let shown = layout, shown.ok, !saving else { return }
         saving = true
         let latex = trimmed
+        // The picture is taken of the preview, so the formula is first shown as large as the preview has
+        // room for: made larger on the page later, it is still sharp.
+        typesetter.render(put.shown(latex), font: MathTypesetter.previewFont * 5) { large in
+            let fine = (large?.ok == true) ? large : nil
+            take(fine ?? shown, latex: latex)
+        }
+    }
+
+    private func take(_ layout: MathTypesetter.Layout, latex: String) {
+        guard let w = layout.w, let h = layout.h, let em = layout.em else {
+            saving = false
+            return
+        }
+        DebugLog.write("math: picture of a formula " + String(format: "%.0f x %.0f", w, h) + " points in the preview, an em " + String(format: "%.1f", em) + ", preview " + String(format: "%.0f", Double(typesetter.webView.bounds.width)) + " wide")
         typesetter.snapshot(of: layout) { image in
             guard let image, let shape = MathPicture.inkMask(image), let data = shape.pngData() else {
                 saving = false

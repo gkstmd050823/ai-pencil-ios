@@ -339,12 +339,28 @@ final class MathView: UIImageView {
             layer.borderColor = held ? UIColor.tintColor.cgColor : nil
             layer.cornerRadius = held ? 4 : 0
             backgroundColor = held ? UIColor.tintColor.withAlphaComponent(0.07) : nil
+            knob.isHidden = !held
         }
+    }
+
+    /// The knob at the corner of a formula that is held: dragged, it makes the formula larger or smaller.
+    private let knob = UIView(frame: CGRect(x: 0, y: 0, width: 11, height: 11))
+    /// Set while a drag that began on the knob goes on, with the size the formula had when it began.
+    var sizingFrom: CGSize?
+
+    /// Whether [point], in this view's own frame, is on the knob.
+    func onKnob(_ point: CGPoint) -> Bool {
+        held && hypot(point.x - bounds.maxX, point.y - bounds.maxY) <= 16
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        knob.center = CGPoint(x: bounds.maxX, y: bounds.maxY)
     }
 
     // (Held, it is easier to take hold of than it looks.)
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        held ? bounds.insetBy(dx: -10, dy: -10).contains(point) : super.point(inside: point, with: event)
+        held ? bounds.insetBy(dx: -14, dy: -14).contains(point) : super.point(inside: point, with: event)
     }
 
     init(item: MathItem, picture: UIImage?, quarterTurns: Int, dark: Bool) {
@@ -353,6 +369,13 @@ final class MathView: UIImageView {
         tintColor = dark ? item.color.onDarkPaper : item.color
         contentMode = .scaleToFill
         isUserInteractionEnabled = true
+        knob.backgroundColor = .white
+        knob.layer.cornerRadius = 5.5
+        knob.layer.borderWidth = 1
+        knob.layer.borderColor = UIColor.tintColor.cgColor
+        knob.isUserInteractionEnabled = false
+        knob.isHidden = true
+        addSubview(knob)
         bounds = CGRect(x: 0, y: 0, width: item.width, height: item.height)
         center = CGPoint(x: item.frame.midX, y: item.frame.midY)
         // The overlay is turned along with a page that is shown turned. The formula is turned back by as
@@ -3872,7 +3895,7 @@ struct PDFInkView: UIViewRepresentable {
         /// A touch that writes landed at [point] of [overlay]: anywhere but on the formula held, it lets it go.
         private func letGoUnlessOn(_ point: CGPoint, in overlay: PageOverlay) {
             guard let view = heldMath else { return }
-            if view.superview === overlay, view.frame.insetBy(dx: -10, dy: -10).contains(point) { return }
+            if view.superview === overlay, view.frame.insetBy(dx: -14, dy: -14).contains(point) { return }
             dropMath()
         }
 
@@ -3977,11 +4000,33 @@ struct PDFInkView: UIViewRepresentable {
         /// Dragging a formula moves it about its page; it cannot be dragged off the page.
         @objc private func dragMath(_ gesture: UIPanGestureRecognizer) {
             guard let view = gesture.view as? MathView, let overlay = view.superview as? PageOverlay else { return }
-            let by = gesture.translation(in: overlay)
-            let size = CGSize(width: view.item.width, height: view.item.height)
-            view.center = Self.keepInside(CGPoint(x: view.center.x + by.x, y: view.center.y + by.y), size: size, overlay: overlay)
-            gesture.setTranslation(.zero, in: overlay)
+            if gesture.state == .began {
+                // (Where the drag began, not where it was first noticed.)
+                let now = gesture.location(in: view), moved = gesture.translation(in: view)
+                let began = CGPoint(x: now.x - moved.x, y: now.y - moved.y)
+                view.sizingFrom = view.onKnob(began) ? view.bounds.size : nil
+            }
+            if let from = view.sizingFrom {
+                // By the knob: the formula grows or shrinks about its middle, to where the knob is dragged.
+                let at = gesture.location(in: view)
+                let reach = max(abs(at.x - view.bounds.midX) / (from.width / 2), abs(at.y - view.bounds.midY) / (from.height / 2))
+                let room = Self.footprint(from, in: overlay)
+                let most = min(overlay.bounds.width / max(1, room.width), overlay.bounds.height / max(1, room.height))
+                let least = 6 / max(1, min(from.width, from.height))
+                let scale = min(max(reach, min(least, 1)), max(most, 1))
+                let size = CGSize(width: from.width * scale, height: from.height * scale)
+                view.bounds = CGRect(origin: .zero, size: size)
+                view.center = Self.keepInside(view.center, size: size, overlay: overlay)
+                view.item.width = Double(size.width)
+                view.item.height = Double(size.height)
+            } else {
+                let by = gesture.translation(in: overlay)
+                let size = CGSize(width: view.item.width, height: view.item.height)
+                view.center = Self.keepInside(CGPoint(x: view.center.x + by.x, y: view.center.y + by.y), size: size, overlay: overlay)
+                gesture.setTranslation(.zero, in: overlay)
+            }
             if gesture.state == .ended || gesture.state == .cancelled {
+                view.sizingFrom = nil
                 view.item.x = Double(view.center.x) - view.item.width / 2
                 view.item.y = Double(view.center.y) - view.item.height / 2
                 if let at = math.firstIndex(where: { $0.id == view.item.id }) {

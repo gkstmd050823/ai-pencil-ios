@@ -25,8 +25,23 @@
     box.style.margin = '0';
     box.style.fontSize = fontPx + 'px';
     katex.render(tex, box, { displayMode: true, throwOnError: true, strict: 'ignore', output: 'html' });
+    return extent();
+  }
+
+  // Where the formula is: the box KaTeX gives it, made as wide as the pieces in it really are. (A piece may
+  // hang out of that box to the right, and was then cut off the picture: LaTeX shown as letters did.)
+  function extent() {
     var inner = box.querySelector('.katex-html') || box;
-    return inner.getBoundingClientRect();
+    var r = inner.getBoundingClientRect();
+    var left = r.left, right = r.right;
+    var pieces = inner.querySelectorAll('.base, .tag');
+    for (var i = 0; i < pieces.length; i++) {
+      var q = pieces[i].getBoundingClientRect();
+      if (q.width <= 0) continue;
+      if (q.left < left) left = q.left;
+      if (q.right > right) right = q.right;
+    }
+    return { left: left, top: r.top, width: right - left, height: r.height };
   }
 
   // Typesets tex at fontPx (CSS px), smaller if it would not fit in maxW x maxH. Returns, as JSON, where the
@@ -40,10 +55,10 @@
         r = draw(tex, fontPx);
       }
       // Put the formula in the middle of the preview, then measure where that left it.
-      var whole = box.getBoundingClientRect();
-      box.style.marginLeft = Math.max(0, (maxW - whole.width) / 2) + 'px';
-      box.style.marginTop = Math.max(0, (maxH - whole.height) / 2) + 'px';
-      r = (box.querySelector('.katex-html') || box).getBoundingClientRect();
+      // (By the formula itself, not by the box round it: the two are not always the same width.)
+      box.style.marginLeft = Math.max(0, (maxW - r.width) / 2 - r.left) + 'px';
+      box.style.marginTop = Math.max(0, (maxH - r.height) / 2 - r.top) + 'px';
+      r = extent();
       var em = parseFloat(getComputedStyle(box.querySelector('.katex')).fontSize);
       return JSON.stringify({ ok: true, x: r.left, y: r.top, w: r.width, h: r.height, em: em, dpr: window.devicePixelRatio });
     } catch (e) {
