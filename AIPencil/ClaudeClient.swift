@@ -60,7 +60,7 @@ enum Claude {
         ["type": "text", "text": text]
     }
 
-    private static func image(_ jpeg: Data) -> [String: Any] {
+    static func image(_ jpeg: Data) -> [String: Any] {
         ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": jpeg.base64EncodedString()]]
     }
 

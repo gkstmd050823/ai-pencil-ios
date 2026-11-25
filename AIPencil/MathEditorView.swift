@@ -109,7 +109,8 @@ private let snippets: [Snippet] = [
     Snippet(label: "행렬", text: "\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}"),
 ]
 
-/// Types a formula in LaTeX and sees it typeset as it is typed; "넣기" hands back a picture of it for the page.
+/// Types a formula in LaTeX, or writes it by hand for Claude to read into LaTeX, and sees it typeset;
+/// "넣기" hands back a picture of it for the page: of the formula, of its LaTeX, or of both.
 struct MathEditorView: View {
     let initial: String
     /// The size of the page the formula goes on, in points.
@@ -125,6 +126,10 @@ struct MathEditorView: View {
     @State private var layout: MathTypesetter.Layout?
     @State private var size = MathSize.medium
     @State private var saving = false
+    @StateObject private var hand = MathHand()
+    /// What goes on the page: the formula, the LaTeX it is written in, or both.
+    @AppStorage("mathPut") private var putRaw = MathPut.formula.rawValue
+    @State private var copied = false
 
     init(initial: String, pageSize: CGSize, store: MathStore, autoInsert: Bool = false, onDone: @escaping (MathResult) -> Void) {
         self.initial = initial
@@ -136,6 +141,7 @@ struct MathEditorView: View {
     }
 
     private var trimmed: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var put: MathPut { autoInsert ? .formula : (MathPut(rawValue: putRaw) ?? .formula) }
     private var problem: String? {
         guard let layout, !layout.ok, !trimmed.isEmpty else { return nil }
         return (layout.error ?? "").replacingOccurrences(of: "KaTeX parse error: ", with: "")
@@ -145,6 +151,43 @@ struct MathEditorView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
+                    // Paper to write the formula on by hand; Claude reads it into the LaTeX below.
+                    MathHandPad(canvas: hand.canvas)
+                        .frame(height: 190)
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.secondary.opacity(0.3), lineWidth: 1))
+                        .overlay(alignment: .topLeading) {
+                            if hand.empty {
+                                Text("여기에 펜으로 수식을 써요")
+                                    .font(.footnote)
+                                    .foregroundStyle(Color.gray)
+                                    .padding(12)
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                    HStack(spacing: 10) {
+                        Button("되돌리기") { hand.undo() }
+                            .disabled(hand.empty || hand.working)
+                        Button("모두 지우기") { hand.clear() }
+                            .disabled(hand.empty || hand.working)
+                        Spacer()
+                        if hand.working {
+                            ProgressView()
+                            Button("그만") { hand.stop() }
+                        } else {
+                            Button("수식으로 바꾸기") {
+                                hand.read { found in text = found }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(hand.empty)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    if let failure = hand.failure {
+                        Text(failure.message)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
                     // The preview is always on white, like the paper the formula will sit on.
                     WebPreview(webView: typesetter.webView)
                         .frame(height: 130)
@@ -163,9 +206,18 @@ struct MathEditorView: View {
                         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.accentColor.opacity(0.6), lineWidth: 1.5))
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
-                    Text("LaTeX로 입력해요. 예: \\frac{a}{b} = \\sqrt{x^2 + 1}")
+                    HStack {
+                        Text("LaTeX로 입력해요. 예: \\frac{a}{b} = \\sqrt{x^2 + 1}")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button(copied ? "복사했어요" : "코드 복사") {
+                            UIPasteboard.general.string = trimmed
+                            copied = true
+                        }
                         .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .disabled(trimmed.isEmpty)
+                    }
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
                             ForEach(snippets) { snippet in
@@ -180,6 +232,17 @@ struct MathEditorView: View {
                         }
                     }
                     .pickerStyle(.segmented)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("페이지에 넣을 것")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        Picker("페이지에 넣을 것", selection: $putRaw) {
+                            ForEach(MathPut.allCases) { kind in
+                                Text(kind.label).tag(kind.rawValue)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                    }
                 }
                 .padding(20)
             }
@@ -196,7 +259,8 @@ struct MathEditorView: View {
             }
         }
         // Typeset a moment after typing stops, and again once the page has loaded.
-        .task(id: "\(typesetter.ready)|\(text)") {
+        .task(id: "\(typesetter.ready)|\(putRaw)|\(text)") {
+            copied = false
             guard typesetter.ready else { return }
             if trimmed.isEmpty {
                 layout = nil
@@ -208,7 +272,7 @@ struct MathEditorView: View {
             for _ in 0..<8 {
                 if Task.isCancelled { return }
                 let result = await withCheckedContinuation { (continuation: CheckedContinuation<MathTypesetter.Layout?, Never>) in
-                    typesetter.render(trimmed) { continuation.resume(returning: $0) }
+                    typesetter.render(put.shown(trimmed)) { continuation.resume(returning: $0) }
                 }
                 if let result {
                     layout = result
